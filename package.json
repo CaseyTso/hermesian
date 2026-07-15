@@ -1,0 +1,32 @@
+{
+  "name": "hermesian",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hermes Agent sidebar and selection-aware editing for Obsidian",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke:acp": "node scripts/acp-smoke.mjs",
+    "deploy": "npm run build && node scripts/deploy.mjs",
+    "verify": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.2.1",
+    "diff": "8.0.4",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "esbuild": "0.28.1",
+    "obsidian": "1.13.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
