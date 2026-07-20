@@ -4,9 +4,11 @@ import {
   activateConversationTab,
   addPendingConversationTab,
   addConversationTab,
+  ConversationTransitionCoordinator,
   conversationControlAvailability,
   conversationControlsBusy,
   createConversationWorkspace,
+  isActiveConversationSession,
   normalizeConversationWorkspace,
   removeConversationTab,
   replaceConversationSession,
@@ -106,6 +108,30 @@ describe("conversation workspace", () => {
     });
   });
 
+  it("rejects binding one Hermes session to two tabs", () => {
+    const workspace = addConversationTab(
+      createConversationWorkspace("tab-a", "session-a"),
+      "tab-b",
+      "session-b",
+    );
+
+    expect(() => replaceConversationSession(workspace, "tab-b", "session-a")).toThrow(
+      "already open",
+    );
+  });
+
+  it("checks the active tab and session together after async preparation", () => {
+    const workspace = addConversationTab(
+      createConversationWorkspace("tab-a", "session-a"),
+      "tab-b",
+      "session-b",
+    );
+
+    expect(isActiveConversationSession(workspace, "tab-b", "session-b")).toBe(true);
+    expect(isActiveConversationSession(workspace, "tab-a", "session-a")).toBe(false);
+    expect(isActiveConversationSession(workspace, "tab-b", "session-a")).toBe(false);
+  });
+
   it("removes an inactive tab without changing the active tab", () => {
     const workspace = activateConversationTab(
       addConversationTab(
@@ -174,6 +200,28 @@ describe("conversation workspace", () => {
       { id: "tab-e", label: 2 },
     ]);
     expect(fifth?.nextLabel).toBe(3);
+  });
+});
+
+describe("ConversationTransitionCoordinator", () => {
+  it("invalidates an in-flight switch when another transition takes ownership", () => {
+    const coordinator = new ConversationTransitionCoordinator();
+    const generation = coordinator.beginSwitch();
+
+    expect(coordinator.isCurrentSwitch(generation)).toBe(true);
+    coordinator.invalidateSwitch();
+    expect(coordinator.isCurrentSwitch(generation)).toBe(false);
+  });
+
+  it("reserves a session for only one tab until its operation finishes", () => {
+    const coordinator = new ConversationTransitionCoordinator();
+
+    expect(coordinator.reserveSession("tab-a", "session-x")).toBe(true);
+    expect(coordinator.reserveSession("tab-b", "session-x")).toBe(false);
+    coordinator.releaseSession("tab-b", "session-x");
+    expect(coordinator.reserveSession("tab-b", "session-x")).toBe(false);
+    coordinator.releaseSession("tab-a", "session-x");
+    expect(coordinator.reserveSession("tab-b", "session-x")).toBe(true);
   });
 });
 

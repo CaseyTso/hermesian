@@ -42,6 +42,37 @@ export interface ConversationControlAvailability {
   stop: boolean;
 }
 
+export class ConversationTransitionCoordinator {
+  private readonly sessionReservations = new Map<string, string>();
+  private switchGeneration = 0;
+
+  beginSwitch(): number {
+    return ++this.switchGeneration;
+  }
+
+  invalidateSwitch(): void {
+    this.switchGeneration += 1;
+  }
+
+  isCurrentSwitch(generation: number): boolean {
+    return generation === this.switchGeneration;
+  }
+
+  reserveSession(tabId: string, sessionId: string): boolean {
+    if (this.sessionReservations.has(sessionId)) {
+      return false;
+    }
+    this.sessionReservations.set(sessionId, tabId);
+    return true;
+  }
+
+  releaseSession(tabId: string, sessionId: string): void {
+    if (this.sessionReservations.get(sessionId) === tabId) {
+      this.sessionReservations.delete(sessionId);
+    }
+  }
+}
+
 export function conversationControlsBusy(
   requestedBusy: boolean,
   initializing: boolean,
@@ -102,6 +133,17 @@ export function shouldAutoScrollConversation(
   sourceTabId: string | undefined,
 ): boolean {
   return sourceTabId === undefined || sourceTabId === visibleTabId;
+}
+
+export function isActiveConversationSession(
+  workspace: PersistedConversationWorkspace | undefined,
+  tabId: string,
+  sessionId: string,
+): boolean {
+  return (
+    workspace?.activeTabId === tabId &&
+    workspace.tabs.some((tab) => tab.id === tabId && tab.sessionId === sessionId)
+  );
 }
 
 export function createConversationWorkspace(
@@ -230,6 +272,14 @@ export function replaceConversationSession(
   const session = requireIdentifier(sessionId, "Hermes session ID");
   if (!workspace.tabs.some((tab) => tab.id === tabId)) {
     return workspace;
+  }
+  const existingOwner = workspace.tabs.find(
+    (tab) => tab.id !== tabId && tab.sessionId === session,
+  );
+  if (existingOwner) {
+    throw new Error(
+      `Hermes session ${session} is already open in conversation ${existingOwner.label}`,
+    );
   }
   return {
     ...workspace,
