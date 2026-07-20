@@ -57,6 +57,18 @@ export interface HermesModelCatalog {
   providers: HermesProviderModels[];
 }
 
+export interface HermesSlashCommand {
+  description: string;
+  inputHint?: string;
+  name: string;
+}
+
+export interface HermesSkillOption {
+  category: string;
+  description: string;
+  name: string;
+}
+
 export interface SessionContextUsage {
   cost?: { amount: number; currency: string };
   size: number;
@@ -65,11 +77,41 @@ export interface SessionContextUsage {
 
 export interface HermesSessionState {
   catalogLoading: boolean;
+  commands: HermesSlashCommand[];
   contextUsage?: SessionContextUsage;
   currentModel?: HermesModelOption;
   models: HermesModelOption[];
+  skillCatalogLoading: boolean;
+  skills: HermesSkillOption[];
   switchingModel: boolean;
 }
+
+export type ReasoningEffort =
+  | "default"
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra";
+
+export interface HermesHistoryEntry {
+  cwd: string;
+  sessionId: string;
+  title?: string;
+  updatedAt?: string;
+}
+
+export type HermesHistoryItem =
+  | { kind: "user" | "assistant" | "thought"; text: string }
+  | {
+      id: string;
+      kind: "tool";
+      status?: string;
+      title: string;
+    };
 
 export type HermesUiEvent =
   | { type: "status"; status: ConnectionStatus; detail?: string }
@@ -83,5 +125,9 @@ export type HermesUiEvent =
       status?: string | null;
     }
   | { type: "notice"; text: string }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; terminal: boolean }
   | { type: "turn-stop"; reason: string };
+
+export function hermesEventEndsTurn(event: HermesUiEvent): boolean {
+  return event.type === "turn-stop" || (event.type === "error" && event.terminal);
+}

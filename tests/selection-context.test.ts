@@ -100,7 +100,7 @@ describe("buildDocumentPrompt", () => {
 
     expect(prompt).toContain("<document>\n# Title\n\nBody\n</document>");
     expect(prompt).toContain("总结这篇笔记");
-    expect(prompt).toContain("只读上下文");
+    expect(prompt).toContain("完整上下文");
   });
 });
 
@@ -123,6 +123,80 @@ describe("validateSelectionEdit", () => {
         },
       ]),
     ).toEqual({ allowed: true });
+  });
+
+  it("allows full-file replacement when only document context (no selection)", () => {
+    const docCtx = createDocumentContext({
+      content: "full file content\nmulti line",
+      filePath: "note.md",
+      vaultPath,
+    });
+    // full file replacement: oldText matches documentContent, newText is new
+    expect(
+      validateSelectionEdit(docCtx, [
+        {
+          path: "/vault/note.md",
+          oldText: docCtx.documentContent,
+          newText: "replaced\nfull content",
+        },
+      ]),
+    ).toEqual({ allowed: true });
+  });
+
+  it("rejects document context edits where oldText differs from documentContent", () => {
+    const docCtx = createDocumentContext({
+      content: "original content",
+      filePath: "note.md",
+      vaultPath,
+    });
+    expect(
+      validateSelectionEdit(docCtx, [
+        {
+          path: "/vault/note.md",
+          oldText: "stale content",
+          newText: "something",
+        },
+      ]).allowed,
+    ).toBe(false);
+  });
+
+  it("rejects document context edits targeting a different file", () => {
+    const docCtx = createDocumentContext({
+      content: "content",
+      filePath: "note.md",
+      vaultPath,
+    });
+    expect(
+      validateSelectionEdit(docCtx, [
+        {
+          path: "/vault/other.md",
+          oldText: "content",
+          newText: "content",
+        },
+      ]).allowed,
+    ).toBe(false);
+  });
+
+  it("rejects document context edits with more than one diff", () => {
+    const docCtx = createDocumentContext({
+      content: "content",
+      filePath: "note.md",
+      vaultPath,
+    });
+    expect(
+      validateSelectionEdit(docCtx, [
+        {
+          path: "/vault/note.md",
+          oldText: "content",
+          newText: "content",
+        },
+        {
+          path: "/vault/note.md",
+          oldText: "content",
+          newText: "content",
+        },
+      ]).allowed,
+    ).toBe(false);
   });
 
   it("rejects edits outside the selection, another file, and stale snapshots", () => {

@@ -7,14 +7,26 @@ import { Readable, Writable } from "node:stream";
 
 import { loadHermesModelCatalog } from "./hermes-model-catalog";
 import {
+  loadHermesSessionCatalog,
+  mergeHermesSessionEntries,
+} from "./hermes-session-catalog";
+import { loadHermesSkillCatalog } from "./hermes-skill-catalog";
+import {
   mergeModelCatalogs,
   normalizeAcpModelState,
 } from "./session-state";
+import {
+  historyItemsFromUpdates,
+  normalizeSessionEntries,
+} from "./session-history";
 import type { HermesianSettings } from "./settings";
 import type {
+  HermesHistoryEntry,
+  HermesHistoryItem,
   HermesModelOption,
   HermesSessionState,
   HermesUiEvent,
+  ReasoningEffort,
   SessionContextUsage,
 } from "./types";
 import { readVaultTextFile, resolveVaultPath } from "./vault-files";
@@ -42,6 +54,10 @@ const STARTUP_TIMEOUT_MS = 30_000;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function yieldToUi(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function canExecute(path: string): boolean {
@@ -121,6 +137,34 @@ function rejectionFor(request: PermissionRequest): PermissionResponse {
     : { outcome: { outcome: "cancelled" } };
 }
 
+export function automaticVaultEditApproval(
+  request: PermissionRequest,
+  vaultPath: string,
+  enabled: boolean,
+): PermissionResponse | undefined {
+  const diffs = (request.toolCall.content ?? []).filter(
+    (content): content is Extract<acp.ToolCallContent, { type: "diff" }> =>
+      content.type === "diff",
+  );
+  for (const diff of diffs) {
+    resolveVaultPath(vaultPath, diff.path);
+  }
+  if (!enabled || request.toolCall.kind !== "edit" || diffs.length === 0) {
+    return undefined;
+  }
+  const allowOption =
+    request.options.find((option) => option.kind === "allow_once") ??
+    request.options.find((option) => option.kind === "allow_always");
+  return allowOption
+    ? {
+        outcome: {
+          outcome: "selected",
+          optionId: allowOption.optionId,
+        },
+      }
+    : undefined;
+}
+
 export class HermesAcpClient {
   private activeSession: acp.ActiveSession | undefined;
   private busy = false;
@@ -129,10 +173,21 @@ export class HermesAcpClient {
   private connectPromise: Promise<void> | undefined;
   private connection: acp.ClientConnection | undefined;
   private context: acp.ClientContext | undefined;
+  private historyCapture:
+    | { sessionId: string; updates: acp.SessionUpdate[] }
+    | undefined;
   private intentionalShutdown = false;
+  private lifecycleGeneration = 0;
+  private sessionOperation:
+    | { kind: "history" | "model" | "new-session"; token: symbol }
+    | undefined;
+  private resumedSessionId: string | undefined;
   private sessionState: HermesSessionState = {
     catalogLoading: false,
+    commands: [],
     models: [],
+    skillCatalogLoading: false,
+    skills: [],
     switchingModel: false,
   };
   private readonly sessionStateListeners = new Set<SessionStateListener>();
@@ -144,16 +199,40 @@ export class HermesAcpClient {
     return this.busy;
   }
 
+  get isOperating(): boolean {
+    return this.sessionOperation !== undefined;
+  }
+
   get isConnected(): boolean {
-    return Boolean(this.connection && !this.connection.signal.aborted && this.activeSession);
+    return Boolean(
+      this.connection &&
+        !this.connection.signal.aborted &&
+        (this.activeSession || this.resumedSessionId),
+    );
   }
 
   get sessionId(): string | undefined {
-    return this.activeSession?.sessionId;
+    return this.resumedSessionId ?? this.activeSession?.sessionId;
   }
 
   get currentSessionState(): HermesSessionState {
     return this.copySessionState();
+  }
+
+  private claimSessionOperation(
+    kind: "history" | "model" | "new-session",
+    busyMessage: string,
+  ): () => void {
+    if (this.busy || this.sessionOperation) {
+      throw new Error(busyMessage);
+    }
+    const token = Symbol(kind);
+    this.sessionOperation = { kind, token };
+    return () => {
+      if (this.sessionOperation?.token === token) {
+        this.sessionOperation = undefined;
+      }
+    };
   }
 
   onSessionState(listener: SessionStateListener): () => void {
@@ -172,13 +251,17 @@ export class HermesAcpClient {
       return this.connectPromise;
     }
 
-    this.connectPromise = this.connectInternal().finally(() => {
-      this.connectPromise = undefined;
+    const generation = this.lifecycleGeneration;
+    const connectPromise = this.connectInternal(generation).finally(() => {
+      if (this.connectPromise === connectPromise) {
+        this.connectPromise = undefined;
+      }
     });
-    return this.connectPromise;
+    this.connectPromise = connectPromise;
+    return connectPromise;
   }
 
-  private async connectInternal(): Promise<void> {
+  private async connectInternal(generation: number): Promise<void> {
     this.intentionalShutdown = false;
     this.emit({ type: "status", status: "connecting", detail: "Starting Hermes ACP…" });
 
@@ -226,6 +309,21 @@ export class HermesAcpClient {
 
     const app = acp
       .client({ name: "hermesian" })
+      .onNotification(acp.methods.client.session.update, async (ctx) => {
+        const sessionId = ctx.params.sessionId;
+        if (this.historyCapture?.sessionId === sessionId) {
+          this.historyCapture.updates.push(ctx.params.update);
+          return;
+        }
+        if (ctx.params.update.sessionUpdate === "available_commands_update") {
+          this.handleSessionUpdate(ctx.params.update);
+          return;
+        }
+        if (this.busy && this.resumedSessionId === sessionId) {
+          this.handleSessionUpdate(ctx.params.update);
+          await yieldToUi();
+        }
+      })
       .onRequest(acp.methods.client.session.requestPermission, async (ctx) =>
         this.handlePermission(ctx.params, ctx.signal),
       )
@@ -241,9 +339,14 @@ export class HermesAcpClient {
     this.context = connection.agent;
 
     void connection.closed.then(() => {
-      if (!this.intentionalShutdown) {
+      if (
+        generation === this.lifecycleGeneration &&
+        this.connection === connection &&
+        !this.intentionalShutdown
+      ) {
         this.catalogGeneration += 1;
         this.activeSession = undefined;
+        this.resumedSessionId = undefined;
         this.resetSessionState();
         this.emit({
           type: "status",
@@ -268,76 +371,192 @@ export class HermesAcpClient {
         withTimeout(initialize, STARTUP_TIMEOUT_MS, "Hermes ACP initialize"),
         startupFailure,
       ]);
+      if (generation !== this.lifecycleGeneration || this.connection !== connection) {
+        throw new Error("Hermes ACP connection attempt was cancelled");
+      }
 
       const sessionStart = this.context.buildSession(this.options.vaultPath).start();
-      this.activeSession = await Promise.race([
+      const activeSession = await Promise.race([
         withTimeout(sessionStart, STARTUP_TIMEOUT_MS, "Hermes ACP session/new"),
         startupFailure,
       ]);
-      this.initializeSessionState(this.activeSession, executable, settings.profile);
+      if (generation !== this.lifecycleGeneration || this.connection !== connection) {
+        activeSession.dispose();
+        throw new Error("Hermes ACP connection attempt was cancelled");
+      }
+      this.activeSession = activeSession;
+      this.resumedSessionId = undefined;
+      this.initializeSessionState(
+        this.activeSession.newSessionResponse as NewSessionResponseCompat,
+        executable,
+        settings.profile,
+      );
       this.emit({
         type: "status",
         status: "connected",
         detail: `Session ${this.activeSession.sessionId}`,
       });
     } catch (error) {
-      await this.disconnect();
-      this.emit({ type: "status", status: "error", detail: errorMessage(error) });
+      if (generation === this.lifecycleGeneration) {
+        await this.disconnect();
+        this.emit({ type: "status", status: "error", detail: errorMessage(error) });
+      } else {
+        connection.close();
+        if (child.exitCode == null && child.signalCode == null) {
+          child.kill("SIGTERM");
+        }
+      }
       throw error;
     }
   }
 
   async newSession(): Promise<void> {
-    if (this.busy || this.sessionState.switchingModel) {
-      throw new Error("Cannot create a new session while Hermes is responding");
+    const releaseOperation = this.claimSessionOperation(
+      "new-session",
+      "Cannot create a new session while Hermes is responding",
+    );
+    try {
+      await this.connect();
+      this.activeSession?.dispose();
+      if (!this.context) {
+        throw new Error("Hermes ACP context is unavailable");
+      }
+      this.activeSession = await withTimeout(
+        this.context.buildSession(this.options.vaultPath).start(),
+        STARTUP_TIMEOUT_MS,
+        "Hermes ACP session/new",
+      );
+      this.resumedSessionId = undefined;
+      const settings = this.options.settings();
+      this.initializeSessionState(
+        this.activeSession.newSessionResponse as NewSessionResponseCompat,
+        resolveHermesExecutable(settings.hermesExecutable),
+        settings.profile,
+      );
+      this.toolTitles.clear();
+      this.emit({
+        type: "status",
+        status: "connected",
+        detail: `Session ${this.activeSession.sessionId}`,
+      });
+    } finally {
+      releaseOperation();
     }
+  }
+
+  async listSessions(): Promise<HermesHistoryEntry[]> {
     await this.connect();
-    this.activeSession?.dispose();
-    if (!this.context) {
+    const context = this.context;
+    if (!context) {
       throw new Error("Hermes ACP context is unavailable");
     }
-    this.activeSession = await withTimeout(
-      this.context.buildSession(this.options.vaultPath).start(),
-      STARTUP_TIMEOUT_MS,
-      "Hermes ACP session/new",
-    );
+
     const settings = this.options.settings();
-    this.initializeSessionState(
-      this.activeSession,
-      resolveHermesExecutable(settings.hermesExecutable),
-      settings.profile,
+    const executable = resolveHermesExecutable(settings.hermesExecutable);
+    const loadLiveSessions = async (): Promise<HermesHistoryEntry[]> => {
+      const entries: HermesHistoryEntry[] = [];
+      let cursor: string | undefined;
+      do {
+        const response = await context.request(
+          acp.methods.agent.session.list,
+          cursor ? { cursor } : {},
+        );
+        entries.push(...normalizeSessionEntries(response.sessions));
+        cursor = response.nextCursor ?? undefined;
+      } while (cursor);
+      return entries;
+    };
+
+    const [persisted, live] = await Promise.allSettled([
+      loadHermesSessionCatalog(executable, settings.profile.trim()),
+      loadLiveSessions(),
+    ]);
+    if (persisted.status === "rejected" && live.status === "rejected") {
+      throw persisted.reason;
+    }
+    return mergeHermesSessionEntries(
+      persisted.status === "fulfilled" ? persisted.value : [],
+      live.status === "fulfilled" ? live.value : [],
     );
-    this.toolTitles.clear();
-    this.emit({
-      type: "status",
-      status: "connected",
-      detail: `Session ${this.activeSession.sessionId}`,
-    });
+  }
+
+  async loadSessionHistory(sessionId: string): Promise<HermesHistoryItem[]> {
+    const releaseOperation = this.claimSessionOperation(
+      "history",
+      "Cannot load conversation history while Hermes is responding",
+    );
+    try {
+      await this.connect();
+      if (!this.context) {
+        throw new Error("Hermes ACP context is unavailable");
+      }
+      const capture = { sessionId, updates: [] as acp.SessionUpdate[] };
+      this.historyCapture = capture;
+      try {
+        const response = await this.context.request(acp.methods.agent.session.load, {
+          cwd: this.options.vaultPath,
+          mcpServers: [],
+          sessionId,
+        });
+        this.activeSession?.dispose();
+        this.activeSession = undefined;
+        this.resumedSessionId = sessionId;
+        const settings = this.options.settings();
+        this.initializeSessionState(
+          response as NewSessionResponseCompat,
+          resolveHermesExecutable(settings.hermesExecutable),
+          settings.profile,
+        );
+        this.emit({
+          type: "status",
+          status: "connected",
+          detail: `Session ${sessionId}`,
+        });
+        return historyItemsFromUpdates(capture.updates);
+      } finally {
+        if (this.historyCapture === capture) {
+          this.historyCapture = undefined;
+        }
+      }
+    } finally {
+      releaseOperation();
+    }
+  }
+
+  async configureReasoningEffort(effort: ReasoningEffort): Promise<void> {
+    if (this.isBusy || this.isOperating) {
+      throw new Error("Cannot change thinking depth while Hermes is responding");
+    }
+    const settings = this.options.settings();
+    const executable = resolveHermesExecutable(settings.hermesExecutable);
+    const args = settings.profile.trim()
+      ? ["--profile", settings.profile.trim()]
+      : [];
+    args.push("config", "set", "agent.reasoning_effort", effort === "default" ? "" : effort);
+    await runHermesCommand(executable, args);
   }
 
   async setModel(model: HermesModelOption): Promise<void> {
-    if (this.busy) {
-      throw new Error("Cannot switch models while Hermes is responding");
-    }
-    if (this.sessionState.switchingModel) {
-      throw new Error("A model switch is already in progress");
-    }
-    await this.connect();
-    if (!this.context || !this.activeSession) {
-      throw new Error("Hermes ACP session is unavailable");
-    }
-    if (this.sessionState.currentModel?.switchId === model.switchId) {
-      return;
-    }
-
+    const releaseOperation = this.claimSessionOperation(
+      "model",
+      "Cannot switch models while Hermes is responding",
+    );
     this.updateSessionState({ switchingModel: true });
     try {
+      await this.connect();
+      const sessionId = this.sessionId;
+      if (!this.context || !sessionId) {
+        throw new Error("Hermes ACP session is unavailable");
+      }
+      if (this.sessionState.currentModel?.switchId === model.switchId) {
+        return;
+      }
       const response = await this.context.request<Record<string, never> | null, {
         modelId: string;
         sessionId: string;
       }>("session/set_model", {
         modelId: model.switchId,
-        sessionId: this.activeSession.sessionId,
+        sessionId,
       });
       if (response === null) {
         throw new Error("Hermes rejected the model switch");
@@ -348,6 +567,7 @@ export class HermesAcpClient {
       });
     } finally {
       this.updateSessionState({ switchingModel: false });
+      releaseOperation();
     }
   }
 
@@ -355,17 +575,28 @@ export class HermesAcpClient {
     if (!prompt.trim()) {
       return;
     }
-    if (this.busy) {
+    if (this.busy || this.sessionOperation) {
       throw new Error("Hermes is already processing a prompt");
     }
-    await this.connect();
-    const session = this.activeSession;
-    if (!session) {
-      throw new Error("Hermes ACP session is unavailable");
-    }
-
     this.busy = true;
     try {
+      await this.connect();
+      const session = this.activeSession;
+      const resumedSessionId = this.resumedSessionId;
+      if (!this.context || (!session && !resumedSessionId)) {
+        throw new Error("Hermes ACP session is unavailable");
+      }
+      if (resumedSessionId) {
+        const response = await this.context.request(acp.methods.agent.session.prompt, {
+          prompt: [{ type: "text", text: prompt }],
+          sessionId: resumedSessionId,
+        });
+        this.emit({ type: "turn-stop", reason: response.stopReason });
+        return;
+      }
+      if (!session) {
+        throw new Error("Hermes ACP session is unavailable");
+      }
       void session.prompt(prompt);
       for (;;) {
         const message = await session.nextUpdate();
@@ -374,9 +605,10 @@ export class HermesAcpClient {
           return;
         }
         this.handleSessionUpdate(message.update);
+        await yieldToUi();
       }
     } catch (error) {
-      this.emit({ type: "error", message: errorMessage(error) });
+      this.emit({ type: "error", message: errorMessage(error), terminal: true });
       throw error;
     } finally {
       this.busy = false;
@@ -384,21 +616,26 @@ export class HermesAcpClient {
   }
 
   async cancel(): Promise<void> {
-    if (!this.context || !this.activeSession || !this.busy) {
+    const sessionId = this.sessionId;
+    if (!this.context || !sessionId || !this.busy) {
       return;
     }
     await this.context.notify(acp.methods.agent.session.cancel, {
-      sessionId: this.activeSession.sessionId,
+      sessionId,
     });
     this.emit({ type: "notice", text: "Cancellation requested" });
   }
 
   async disconnect(): Promise<void> {
+    this.lifecycleGeneration += 1;
+    this.connectPromise = undefined;
     this.intentionalShutdown = true;
     this.busy = false;
+    this.sessionOperation = undefined;
     this.catalogGeneration += 1;
     this.activeSession?.dispose();
     this.activeSession = undefined;
+    this.resumedSessionId = undefined;
     this.context = undefined;
     this.connection?.close();
     this.connection = undefined;
@@ -416,27 +653,17 @@ export class HermesAcpClient {
     request: PermissionRequest,
     signal: AbortSignal,
   ): Promise<PermissionResponse> {
-    try {
-      for (const content of request.toolCall.content ?? []) {
-        if (content.type === "diff") {
-          resolveVaultPath(this.options.vaultPath, content.path);
-        }
-      }
-    } catch (error) {
-      this.emit({
-        type: "error",
-        message: `Blocked edit outside vault: ${errorMessage(error)}`,
-      });
-      return rejectionFor(request);
-    }
-
     if (signal.aborted) {
       return { outcome: { outcome: "cancelled" } };
     }
     try {
       return await this.options.onPermission(request, signal);
     } catch (error) {
-      this.emit({ type: "error", message: `Permission UI failed: ${errorMessage(error)}` });
+      this.emit({
+        type: "error",
+        message: `Permission UI failed: ${errorMessage(error)}`,
+        terminal: false,
+      });
       return rejectionFor(request);
     }
   }
@@ -506,11 +733,21 @@ export class HermesAcpClient {
         this.emit({ type: "notice", text: "Hermes cleared its plan" });
         return;
       case "user_message_chunk":
-      case "available_commands_update":
       case "current_mode_update":
       case "config_option_update":
       case "session_info_update":
         return;
+      case "available_commands_update": {
+        const commands = update.availableCommands
+          .map((command) => ({
+            description: command.description.trim(),
+            inputHint: command.input?.hint.trim() || undefined,
+            name: command.name.replace(/^\/+/, "").trim(),
+          }))
+          .filter((command) => command.name);
+        this.updateSessionState({ commands });
+        return;
+      }
       case "usage_update":
         this.handleUsageUpdate(update);
         return;
@@ -518,12 +755,11 @@ export class HermesAcpClient {
   }
 
   private initializeSessionState(
-    session: acp.ActiveSession,
+    response: NewSessionResponseCompat,
     executable: string,
     profile: string,
   ): void {
     const generation = ++this.catalogGeneration;
-    const response = session.newSessionResponse as NewSessionResponseCompat;
     const fallback = normalizeAcpModelState(
       response.models,
       "",
@@ -531,9 +767,12 @@ export class HermesAcpClient {
     );
     this.sessionState = {
       catalogLoading: true,
+      commands: this.sessionState.commands,
       contextUsage: undefined,
       currentModel: fallback.current,
       models: fallback.models,
+      skillCatalogLoading: true,
+      skills: [],
       switchingModel: false,
     };
     this.emitSessionState();
@@ -566,6 +805,18 @@ export class HermesAcpClient {
       () => {
         if (generation === this.catalogGeneration) {
           this.updateSessionState({ catalogLoading: false });
+        }
+      },
+    );
+    void loadHermesSkillCatalog(executable, profile).then(
+      (skills) => {
+        if (generation === this.catalogGeneration) {
+          this.updateSessionState({ skillCatalogLoading: false, skills });
+        }
+      },
+      () => {
+        if (generation === this.catalogGeneration) {
+          this.updateSessionState({ skillCatalogLoading: false });
         }
       },
     );
@@ -609,7 +860,10 @@ export class HermesAcpClient {
   private resetSessionState(): void {
     this.sessionState = {
       catalogLoading: false,
+      commands: [],
       models: [],
+      skillCatalogLoading: false,
+      skills: [],
       switchingModel: false,
     };
     this.emitSessionState();
@@ -629,7 +883,9 @@ export class HermesAcpClient {
       currentModel: this.sessionState.currentModel
         ? { ...this.sessionState.currentModel }
         : undefined,
+      commands: this.sessionState.commands.map((command) => ({ ...command })),
       models: this.sessionState.models.map((model) => ({ ...model })),
+      skills: this.sessionState.skills.map((skill) => ({ ...skill })),
     };
   }
 
@@ -643,4 +899,29 @@ export class HermesAcpClient {
   private emit(event: HermesUiEvent): void {
     this.options.onEvent(event);
   }
+}
+
+function runHermesCommand(executable: string, args: string[]): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr = `${stderr}${chunk}`.slice(-8_000);
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          `Hermes config update failed (code=${String(code)}, signal=${String(signal)})${
+            stderr.trim() ? `: ${stderr.trim()}` : ""
+          }`,
+        ),
+      );
+    });
+  });
 }

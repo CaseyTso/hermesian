@@ -169,23 +169,26 @@ export function buildDocumentPrompt(
     "",
     `用户请求：${request.trim()}`,
     "",
-    "<document> 是当前 Markdown 文件的完整只读上下文。当前没有附加可编辑选区，因此不要修改任何文件。",
+    "<document> 是当前 Markdown 文件的完整上下文。当前没有附加可编辑选区；你可以修改整个文件（使用 patch 或 write_file 工具）。",
   ].join("\n");
 }
 
 export function validateSelectionEdit(
-  context: SelectionContext | undefined,
+  context: SelectionContext | MarkdownDocumentContext | undefined,
   diffs: SelectionEditDiff[],
 ): SelectionEditValidation {
   if (!context) {
-    return { allowed: false, reason: "No editable selection is attached to this turn." };
+    return { allowed: false, reason: "No editable file context is attached to this turn." };
   }
+
+  const hasSelection = "selectedText" in context;
   if (diffs.length !== 1) {
     return {
       allowed: false,
       reason: "Inline editing requires exactly one diff for the selected Markdown file.",
     };
   }
+
 
   const diff = diffs[0];
   if (!diff) {
@@ -201,12 +204,17 @@ export function validateSelectionEdit(
   if (diff.oldText !== context.documentContent) {
     return {
       allowed: false,
-      reason: "The note changed after the selection was captured; select the text again.",
+      reason: "The note changed after the context was captured; refresh and try again.",
     };
   }
 
-  const prefix = context.documentContent.slice(0, context.selectionStartOffset);
-  const suffix = context.documentContent.slice(context.selectionEndOffset);
+  if (!hasSelection) {
+    // Document-only context: allow full-file replacement
+    return { allowed: true };
+  }
+
+  const prefix = context.documentContent.slice(0, (context as SelectionContext).selectionStartOffset);
+  const suffix = context.documentContent.slice((context as SelectionContext).selectionEndOffset);
   if (diff.newText.length < prefix.length + suffix.length) {
     return { allowed: false, reason: "The edit removes content outside the selection." };
   }
