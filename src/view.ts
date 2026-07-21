@@ -477,6 +477,11 @@ export class HermesianSidebarView extends ItemView {
     setIcon(logo, HERMESIAN_ICON_ID);
     identity.createSpan({ text: "Hermesian", cls: "hermesian-title" });
     this.statusEl = identity.createSpan({
+      attr: {
+        "aria-atomic": "true",
+        "aria-live": "polite",
+        role: "status",
+      },
       text: "Disconnected",
       cls: "hermesian-status",
     });
@@ -985,15 +990,19 @@ export class HermesianSidebarView extends ItemView {
       const active = tab.id === workspace.activeTabId;
       const deferred = tab.sessionId === null;
       const working = this.isTabBusy(tab.id);
+      const loading = deferred || this.clientLoadingTabs.has(tab.id);
+      const activityLabel = working ? ", responding" : loading ? ", starting" : "";
+      const activityTitle = working ? " · Responding" : loading ? " · Starting" : "";
       const button = this.conversationTabsEl.createEl("button", {
         attr: {
-          "aria-label": `Conversation ${tab.label}${working ? ", responding" : deferred ? ", waiting to start" : ""}`,
+          "aria-busy": String(working || loading),
+          "aria-label": `Conversation ${tab.label}${activityLabel}`,
           "aria-selected": String(active),
           role: "tab",
-          title: `Conversation ${tab.label}${working ? " · Responding" : deferred ? " · Starting" : ""} · Right-click to close`,
+          title: `Conversation ${tab.label}${activityTitle} · Right-click to close`,
           type: "button",
         },
-        cls: `hermesian-conversation-tab${active ? " is-active" : ""}${working ? " is-working" : ""}${deferred ? " is-deferred" : ""}`,
+        cls: `hermesian-conversation-tab${active ? " is-active" : ""}${working ? " is-working" : ""}${loading ? " is-loading" : ""}${deferred ? " is-deferred" : ""}`,
         text: String(tab.label),
       });
       button.disabled = this.initializing;
@@ -2130,6 +2139,10 @@ export class HermesianSidebarView extends ItemView {
         : this.messageContainer(tabId)
       : this.messagesEl;
     const message = parent.createDiv({
+      attr: {
+        "aria-live": error ? "assertive" : "polite",
+        role: error ? "alert" : "status",
+      },
       cls: `hermesian-system${error ? " is-error" : ""}`,
     });
     message.setText(text);
