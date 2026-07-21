@@ -2,7 +2,7 @@
 
 Hermesian is a desktop-only Obsidian plugin that connects the current Vault to [Hermes Agent](https://hermes-agent.nousresearch.com/) over ACP. It provides a native right-sidebar chat, Markdown selection context, streamed tool activity, and pre-write diff approval.
 
-Chinese documentation: [README.zh-CN.md](README.zh-CN.md)
+[中文文档](README.zh-CN.md)
 
 ## Requirements
 
