@@ -82,7 +82,7 @@
   align-items: center;
   background: var(--background-secondary);
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--hermesian-radius-sm);
   box-shadow: none;
   color: var(--text-muted);
   display: inline-flex;
@@ -155,7 +155,8 @@
 .hermesian-permission-heading,
 .hermesian-permission-actions,
 .hermesian-tool,
-.hermesian-selection-bar {
+.hermesian-selection-bar,
+.hermesian-image-attachment-bar {
   align-items: center;
   display: flex;
   gap: 8px;
@@ -285,6 +286,24 @@
 .hermesian-message.is-user .hermesian-message-content,
 .hermesian-message-content.is-streaming {
   white-space: pre-wrap;
+}
+
+.hermesian-message-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.hermesian-message-images img {
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  display: block;
+  height: auto;
+  max-height: 240px;
+  max-width: 100%;
+  object-fit: contain;
+  width: auto;
 }
 
 .hermesian-message.is-assistant .hermesian-message-content > :first-child {
@@ -860,6 +879,58 @@
   height: 24px;
   padding: 3px;
   width: 24px;
+}
+
+.hermesian-image-attachment-bar {
+  background: var(--background-primary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  box-sizing: border-box;
+  flex: 1 1 100%;
+  min-height: 42px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 4px 6px;
+  width: 100%;
+}
+
+.hermesian-image-attachment-label {
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  font-size: var(--font-ui-smaller);
+}
+
+.hermesian-image-attachment {
+  flex: 0 0 auto;
+  height: 32px;
+  position: relative;
+  width: 32px;
+}
+
+.hermesian-image-attachment img {
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  display: block;
+  height: 32px;
+  object-fit: cover;
+  width: 32px;
+}
+
+.hermesian-image-attachment > button {
+  background: var(--background-primary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: 50%;
+  height: 16px;
+  padding: 1px;
+  position: absolute;
+  right: -6px;
+  top: -6px;
+  width: 16px;
+}
+
+.hermesian-image-attachment > button svg {
+  height: 11px;
+  width: 11px;
 }
 
 .hermesian-input {

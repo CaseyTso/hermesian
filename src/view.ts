@@ -1,4 +1,5 @@
 import type {
+  ContentBlock,
   PermissionOption,
   RequestPermissionResponse,
   ToolCallContent,
@@ -33,6 +34,13 @@ import {
 } from "./conversation-tabs";
 import { linkifyExternalUrls } from "./external-links";
 import { HERMESIAN_ICON_ID } from "./hermes-icon";
+import {
+  buildImagePrompt,
+  imageAttachmentFromDataUrl,
+  isImageClipboardItem,
+  MAX_PASTED_IMAGE_BYTES,
+  type PastedImageAttachment,
+} from "./image-attachments";
 import { normalizeMathDelimiters } from "./markdown-math";
 import {
   contextUsageLevel,
@@ -100,6 +108,23 @@ function rejectionFor(options: PermissionOption[]): RequestPermissionResponse {
         },
       }
     : { outcome: { outcome: "cancelled" } };
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("error", () => {
+      reject(reader.error ?? new Error("Could not read the pasted image"));
+    });
+    reader.addEventListener("load", () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("Could not decode the pasted image"));
+        return;
+      }
+      resolve(reader.result);
+    });
+    reader.readAsDataURL(file);
+  });
 }
 
 class HermesModelSuggestModal extends SuggestModal<HermesModelOption> {
@@ -232,6 +257,7 @@ export class HermesianSidebarView extends ItemView {
   private includeCurrentDocumentContext = true;
   private initializing = true;
   private historyButtonEl!: HTMLButtonElement;
+  private imageAttachmentBarEl!: HTMLElement;
   private messagesEl!: HTMLElement;
   private modelButtonEl!: HTMLButtonElement;
   private modelLabelEl!: HTMLElement;
@@ -240,6 +266,7 @@ export class HermesianSidebarView extends ItemView {
   private readonly clientLoadingTabs = new Set<string>();
   private readonly loadedMessageTabIds = new Set<string>();
   private readonly messageCaches = new Map<string, HTMLElement>();
+  private readonly pendingImages = new Map<string, PastedImageAttachment[]>();
   private readonly sessionStates = new Map<string, HermesSessionState>();
   private readonly turnRuntimes = new Map<string, ConversationTurnRuntime>();
   private reasoningButtonEl!: HTMLButtonElement;
@@ -261,6 +288,7 @@ export class HermesianSidebarView extends ItemView {
   private stopButtonEl!: HTMLButtonElement;
   private readonly tabSelections = new Map<string, SelectionContext | undefined>();
   private readonly transitions = new ConversationTransitionCoordinator();
+  private closingConversationTabId: string | undefined;
   private visibleMessagesTabId: string | undefined;
 
   constructor(
@@ -550,6 +578,10 @@ export class HermesianSidebarView extends ItemView {
 
     this.selectionBarEl = composerContexts.createDiv({ cls: "hermesian-selection-bar" });
     this.selectionBarEl.hide();
+    this.imageAttachmentBarEl = composerContexts.createDiv({
+      cls: "hermesian-image-attachment-bar",
+    });
+    this.imageAttachmentBarEl.hide();
 
     this.composerEl = composer.createEl("textarea", {
       attr: {
@@ -571,6 +603,9 @@ export class HermesianSidebarView extends ItemView {
         event.preventDefault();
         void this.sendMessage();
       }
+    });
+    this.composerEl.addEventListener("paste", (event) => {
+      void this.handleComposerPaste(event);
     });
     this.composerEl.addEventListener("input", () => {
       this.renderSlashMenu(true);
@@ -975,6 +1010,7 @@ export class HermesianSidebarView extends ItemView {
     this.pendingSelection = this.tabSelections.get(activeTab.id);
     this.renderCurrentFile();
     this.renderSelectionBar();
+    this.renderImageAttachmentBar();
     this.hideSlashMenu();
   }
 
@@ -999,6 +1035,7 @@ export class HermesianSidebarView extends ItemView {
           "aria-busy": String(working || loading),
           "aria-label": `Conversation ${tab.label}${activityLabel}`,
           "aria-selected": String(active),
+          "data-conversation-tab-id": tab.id,
           role: "tab",
           title: `Conversation ${tab.label}${activityTitle} · Right-click to close`,
           type: "button",
@@ -1006,13 +1043,14 @@ export class HermesianSidebarView extends ItemView {
         cls: `hermesian-conversation-tab${active ? " is-active" : ""}${working ? " is-working" : ""}${loading ? " is-loading" : ""}${deferred ? " is-deferred" : ""}`,
         text: String(tab.label),
       });
-      button.disabled = this.initializing;
+      button.disabled = this.initializing || this.controlsBusy;
       button.addEventListener("click", () => {
         void this.switchConversation(tab.id);
       });
       button.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         event.stopPropagation();
+        event.stopImmediatePropagation();
         void this.closeConversation(tab.id);
       });
     }
@@ -1022,7 +1060,12 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private async addConversation(): Promise<void> {
-    if (this.initializing || this.activeSessionState().switchingModel) {
+    if (
+      this.initializing ||
+      this.controlsBusy ||
+      this.closingConversationTabId !== undefined ||
+      this.activeSessionState().switchingModel
+    ) {
       return;
     }
     this.transitions.invalidateSwitch();
@@ -1075,6 +1118,8 @@ export class HermesianSidebarView extends ItemView {
       !initialWorkspace ||
       !initialWorkspace.tabs.some((tab) => tab.id === tabId) ||
       this.initializing ||
+      this.controlsBusy ||
+      this.closingConversationTabId !== undefined ||
       this.isTabBusy(tabId) ||
       this.clientLoadingTabs.size > 0 ||
       this.hasPendingPermission(tabId) ||
@@ -1085,6 +1130,8 @@ export class HermesianSidebarView extends ItemView {
 
     this.transitions.invalidateSwitch();
     this.captureActiveConversationRuntime();
+    this.closingConversationTabId = tabId;
+    this.updateControls(true);
     const workspace = this.conversationWorkspace ?? initialWorkspace;
     const closingActiveTab = workspace.activeTabId === tabId;
     try {
@@ -1097,6 +1144,7 @@ export class HermesianSidebarView extends ItemView {
         }
         this.conversationWorkspace = updated;
         this.tabSelections.delete(tabId);
+        this.pendingImages.delete(tabId);
         this.tabSelections.set(replacementTabId, undefined);
         this.showConversationMessages(replacementTabId);
         this.resetConversationView(replacementTabId);
@@ -1130,6 +1178,7 @@ export class HermesianSidebarView extends ItemView {
       if (!closingActiveTab) {
         this.conversationWorkspace = updated;
         this.tabSelections.delete(tabId);
+        this.pendingImages.delete(tabId);
         this.forgetConversationMessages(tabId);
         this.turnRuntimes.delete(tabId);
         this.sessionStates.delete(tabId);
@@ -1145,6 +1194,7 @@ export class HermesianSidebarView extends ItemView {
       }
       this.conversationWorkspace = updated;
       this.tabSelections.delete(tabId);
+      this.pendingImages.delete(tabId);
       this.showConversationMessages(target.id);
       this.forgetConversationMessages(tabId);
       this.turnRuntimes.delete(tabId);
@@ -1164,6 +1214,7 @@ export class HermesianSidebarView extends ItemView {
     } catch (error) {
       new Notice(`Hermesian could not close that conversation: ${this.messageFor(error)}`);
     } finally {
+      this.closingConversationTabId = undefined;
       this.updateControls(false);
     }
   }
@@ -1174,6 +1225,8 @@ export class HermesianSidebarView extends ItemView {
       !workspace ||
       workspace.activeTabId === tabId ||
       this.initializing ||
+      this.controlsBusy ||
+      this.closingConversationTabId !== undefined ||
       this.clientLoadingTabs.has(tabId)
     ) {
       return;
@@ -1666,6 +1719,104 @@ export class HermesianSidebarView extends ItemView {
     this.currentFileBarEl.dataset.empty = this.currentFilePath ? "false" : "true";
   }
 
+  private async handleComposerPaste(event: ClipboardEvent): Promise<void> {
+    const clipboardItems = Array.from(event.clipboardData?.items ?? []);
+    const imageItems = clipboardItems.filter(isImageClipboardItem);
+    if (imageItems.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    const tabId = this.conversationWorkspace?.activeTabId;
+    if (!tabId) {
+      return;
+    }
+    const client = this.plugin.peekClient(tabId);
+    if (client?.isConnected && !client.supportsImagePrompts) {
+      new Notice("The connected Hermes agent does not support image prompts.");
+      return;
+    }
+
+    const attachments: PastedImageAttachment[] = [];
+    for (const item of imageItems) {
+      const file = item.getAsFile();
+      if (!file) {
+        continue;
+      }
+      if (file.size > MAX_PASTED_IMAGE_BYTES) {
+        new Notice("Pasted images must be smaller than 10 MB.");
+        continue;
+      }
+      try {
+        const dataUrl = await readFileAsDataUrl(file);
+        attachments.push(
+          imageAttachmentFromDataUrl(dataUrl, crypto.randomUUID(), file.type),
+        );
+      } catch (error) {
+        new Notice(`Hermesian could not read the pasted image: ${this.messageFor(error)}`);
+      }
+    }
+    if (attachments.length === 0) {
+      return;
+    }
+
+    const current = this.pendingImages.get(tabId) ?? [];
+    this.pendingImages.set(tabId, [...current, ...attachments].slice(0, 4));
+    if (this.conversationWorkspace?.activeTabId === tabId) {
+      this.renderImageAttachmentBar();
+    }
+  }
+
+  private renderImageAttachmentBar(): void {
+    const tabId = this.conversationWorkspace?.activeTabId;
+    const attachments = tabId ? this.pendingImages.get(tabId) ?? [] : [];
+    this.imageAttachmentBarEl.empty();
+    if (attachments.length === 0) {
+      this.imageAttachmentBarEl.hide();
+      return;
+    }
+
+    this.imageAttachmentBarEl.show();
+    this.imageAttachmentBarEl.createSpan({
+      cls: "hermesian-image-attachment-label",
+      text: `${attachments.length} image${attachments.length === 1 ? "" : "s"}`,
+    });
+    for (const attachment of attachments) {
+      const item = this.imageAttachmentBarEl.createDiv({
+        cls: "hermesian-image-attachment",
+      });
+      item.createEl("img", {
+        attr: {
+          alt: "Pasted image",
+          src: `data:${attachment.mimeType};base64,${attachment.data}`,
+        },
+      });
+      const remove = item.createEl("button", {
+        attr: {
+          "aria-label": "Remove pasted image",
+          title: "Remove pasted image",
+          type: "button",
+        },
+        cls: "clickable-icon",
+      });
+      setIcon(remove, "x");
+      remove.addEventListener("click", () => {
+        if (!tabId) {
+          return;
+        }
+        const remaining = (this.pendingImages.get(tabId) ?? []).filter(
+          (candidate) => candidate.id !== attachment.id,
+        );
+        if (remaining.length > 0) {
+          this.pendingImages.set(tabId, remaining);
+        } else {
+          this.pendingImages.delete(tabId);
+        }
+        this.renderImageAttachmentBar();
+      });
+    }
+  }
+
   private renderSelectionBar(): void {
     this.selectionBarEl.empty();
     if (!this.pendingSelection) {
@@ -1728,10 +1879,19 @@ export class HermesianSidebarView extends ItemView {
     }
     const rawRequest = this.composerEl.value.trim();
     const isSlashCommand = rawRequest.startsWith("/");
+    const pendingImages = isSlashCommand
+      ? []
+      : this.pendingImages.get(activeTab.id) ?? [];
+    if (pendingImages.length > 0 && !client.supportsImagePrompts) {
+      new Notice("The connected Hermes agent does not support image prompts.");
+      return;
+    }
     const request =
       rawRequest ||
       (this.pendingSelection
         ? "请根据上下文改写选中的内容，使其更清晰、严谨，并保留原意。"
+        : pendingImages.length > 0
+          ? "Please analyze the pasted image and respond to my request."
         : "");
     if (!request) {
       return;
@@ -1752,13 +1912,15 @@ export class HermesianSidebarView extends ItemView {
         : request;
     const runtime = this.turnRuntime(activeTab.id);
     runtime.activeEditScope = selection ?? documentContext;
-    this.appendUserMessage(request, selection, documentContext, activeTab.id);
+    this.appendUserMessage(request, selection, documentContext, activeTab.id, pendingImages);
     this.composerEl.value = "";
     this.hideSlashMenu();
     if (!isSlashCommand) {
       this.pendingSelection = undefined;
       this.renderSelectionBar();
     }
+    this.pendingImages.delete(activeTab.id);
+    this.renderImageAttachmentBar();
     this.captureActiveConversationRuntime();
     this.resetStreamingMessage(activeTab.id);
     runtime.busy = true;
@@ -1770,13 +1932,21 @@ export class HermesianSidebarView extends ItemView {
     this.updateControls(false);
 
     try {
-      await client.sendPrompt(
-        isSlashCommand
-          ? buildSlashOutboundPrompt(prompt)
-          : `${prompt}\n\n${OBSIDIAN_OUTPUT_RULES}`,
-      );
+      const outboundPrompt = isSlashCommand
+        ? buildSlashOutboundPrompt(prompt)
+        : `${prompt}\n\n${OBSIDIAN_OUTPUT_RULES}`;
+      const promptContent: string | ContentBlock[] = pendingImages.length
+        ? buildImagePrompt(outboundPrompt, pendingImages)
+        : outboundPrompt;
+      await client.sendPrompt(promptContent);
     } catch (error) {
       new Notice(`Hermesian: ${this.messageFor(error)}`);
+      if (pendingImages.length > 0) {
+        this.pendingImages.set(activeTab.id, pendingImages);
+        if (this.conversationWorkspace?.activeTabId === activeTab.id) {
+          this.renderImageAttachmentBar();
+        }
+      }
       runtime.activeEditScope = undefined;
       await this.finishFailedTurn(activeTab.id);
     } finally {
@@ -1835,6 +2005,7 @@ export class HermesianSidebarView extends ItemView {
     selection?: SelectionContext,
     documentContext?: MarkdownDocumentContext,
     tabId = this.conversationWorkspace?.activeTabId,
+    images: readonly PastedImageAttachment[] = [],
   ): void {
     const parent = tabId ? this.messageContainer(tabId) : this.messagesEl;
     const message = parent.createDiv({
@@ -1852,6 +2023,17 @@ export class HermesianSidebarView extends ItemView {
       });
     }
     message.createDiv({ text, cls: "hermesian-message-content" });
+    if (images.length > 0) {
+      const gallery = message.createDiv({ cls: "hermesian-message-images" });
+      for (const image of images) {
+        gallery.createEl("img", {
+          attr: {
+            alt: "Pasted image",
+            src: `data:${image.mimeType};base64,${image.data}`,
+          },
+        });
+      }
+    }
     this.scrollToBottom(tabId);
   }
 
@@ -2157,7 +2339,10 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private updateControls(busy: boolean, _showStop = busy): void {
-    this.controlsBusy = conversationControlsBusy(busy, this.initializing);
+    this.controlsBusy = conversationControlsBusy(
+      busy || this.closingConversationTabId !== undefined,
+      this.initializing,
+    );
     if (this.controlsBusy) {
       this.hideSlashMenu();
     }

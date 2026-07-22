@@ -149,6 +149,27 @@ describe("conversation workspace", () => {
     });
   });
 
+  it("removes only the requested middle tab when four conversations are open", () => {
+    const workspace = activateConversationTab(
+      addConversationTab(
+        addConversationTab(
+          addConversationTab(createConversationWorkspace("tab-a", "session-a"), "tab-b", "session-b"),
+          "tab-c",
+          "session-c",
+        ),
+        "tab-d",
+        "session-d",
+      ),
+      "tab-a",
+    );
+
+    const updated = removeConversationTab(workspace, "tab-b");
+
+    expect(updated?.activeTabId).toBe("tab-a");
+    expect(updated?.tabs.map((tab) => tab.id)).toEqual(["tab-a", "tab-c", "tab-d"]);
+    expect(updated?.tabs.map((tab) => tab.label)).toEqual([1, 2, 3]);
+  });
+
   it("activates the right neighbor when removing the active tab", () => {
     const first = createConversationWorkspace("tab-a", "session-a");
     const second = addConversationTab(first, "tab-b", "session-b");

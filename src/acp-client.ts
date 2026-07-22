@@ -176,6 +176,7 @@ export class HermesAcpClient {
   private historyCapture:
     | { sessionId: string; updates: acp.SessionUpdate[] }
     | undefined;
+  private imagePromptSupported = false;
   private intentionalShutdown = false;
   private lifecycleGeneration = 0;
   private sessionOperation:
@@ -201,6 +202,10 @@ export class HermesAcpClient {
 
   get isOperating(): boolean {
     return this.sessionOperation !== undefined;
+  }
+
+  get supportsImagePrompts(): boolean {
+    return this.imagePromptSupported;
   }
 
   get isConnected(): boolean {
@@ -367,10 +372,12 @@ export class HermesAcpClient {
           version: this.options.pluginVersion,
         },
       });
-      await Promise.race([
+      const initialized = await Promise.race([
         withTimeout(initialize, STARTUP_TIMEOUT_MS, "Hermes ACP initialize"),
         startupFailure,
       ]);
+      this.imagePromptSupported =
+        initialized.agentCapabilities?.promptCapabilities?.image === true;
       if (generation !== this.lifecycleGeneration || this.connection !== connection) {
         throw new Error("Hermes ACP connection attempt was cancelled");
       }
@@ -571,9 +578,21 @@ export class HermesAcpClient {
     }
   }
 
-  async sendPrompt(prompt: string): Promise<void> {
-    if (!prompt.trim()) {
+  async sendPrompt(prompt: string | acp.ContentBlock[]): Promise<void> {
+    const hasContent = Array.isArray(prompt)
+      ? prompt.some(
+          (block) => block.type === "image" || (block.type === "text" && Boolean(block.text.trim())),
+        )
+      : Boolean(prompt.trim());
+    if (!hasContent) {
       return;
+    }
+    if (
+      Array.isArray(prompt) &&
+      prompt.some((block) => block.type === "image") &&
+      !this.imagePromptSupported
+    ) {
+      throw new Error("The connected Hermes agent does not support image prompts");
     }
     if (this.busy || this.sessionOperation) {
       throw new Error("Hermes is already processing a prompt");
@@ -588,7 +607,7 @@ export class HermesAcpClient {
       }
       if (resumedSessionId) {
         const response = await this.context.request(acp.methods.agent.session.prompt, {
-          prompt: [{ type: "text", text: prompt }],
+          prompt: Array.isArray(prompt) ? prompt : [{ type: "text", text: prompt }],
           sessionId: resumedSessionId,
         });
         this.emit({ type: "turn-stop", reason: response.stopReason });
@@ -631,6 +650,7 @@ export class HermesAcpClient {
     this.connectPromise = undefined;
     this.intentionalShutdown = true;
     this.busy = false;
+    this.imagePromptSupported = false;
     this.sessionOperation = undefined;
     this.catalogGeneration += 1;
     this.activeSession?.dispose();
