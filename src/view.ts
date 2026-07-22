@@ -33,6 +33,7 @@ import {
 } from "./conversation-tabs";
 import { linkifyExternalUrls } from "./external-links";
 import { HERMESIAN_ICON_ID } from "./hermes-icon";
+import { normalizeMathDelimiters } from "./markdown-math";
 import {
   contextUsageLevel,
   contextUsagePercent,
@@ -1909,7 +1910,7 @@ export class HermesianSidebarView extends ItemView {
     target.dataset.sourcePath = sourcePath;
     await MarkdownRenderer.render(
       this.app,
-      text,
+      normalizeMathDelimiters(text),
       target,
       sourcePath,
       this,
