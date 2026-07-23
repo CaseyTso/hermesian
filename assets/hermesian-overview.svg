@@ -1,0 +1,195 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">Hermesian — A native Obsidian workspace for Hermes Agent</title>
+  <desc id="desc">A central Hermesian workspace connects Markdown context and an Obsidian sidebar to six capabilities: conversation tabs, streaming tools, diff approval, Vault safety, and models and history.</desc>
+  <defs>
+    <linearGradient id="accent" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0eaaa8"/>
+      <stop offset="1" stop-color="#2d72e8"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef6fb"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="9" stdDeviation="12" flood-color="#1c3b5a" flood-opacity="0.12"/>
+    </filter>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#1c3b5a" flood-opacity="0.08"/>
+    </filter>
+    <marker id="arrow-teal" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9" fill="none" stroke="#0eaaa8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9" fill="none" stroke="#2d72e8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <symbol id="icon-doc" viewBox="0 0 48 48">
+      <path d="M14 5h14l9 9v29H14z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+      <path d="M28 5v10h9M19 25h13M19 32h13M19 18h4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="icon-tabs" viewBox="0 0 48 48">
+      <rect x="8" y="12" width="26" height="25" rx="3" fill="none" stroke="currentColor" stroke-width="2.4"/>
+      <path d="M15 12v-3h25v25h-6M15 20h12M15 27h9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-pulse" viewBox="0 0 48 48">
+      <path d="M6 27h8l5-13 8 24 6-16 4 5h5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-diff" viewBox="0 0 48 48">
+      <path d="M16 8H9v32h7M32 8h7v32h-7M21 17h9M21 24h6M21 31h9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M14 17h3M14 31h3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="icon-shield" viewBox="0 0 48 48">
+      <path d="M24 6l15 6v11c0 10-6.5 16.5-15 20-8.5-3.5-15-10-15-20V12z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+      <path d="M16 24l5 5 11-12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-clock" viewBox="0 0 48 48">
+      <circle cx="24" cy="24" r="16" fill="none" stroke="currentColor" stroke-width="2.4"/>
+      <path d="M24 14v11l7 4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-open" viewBox="0 0 48 48">
+      <path d="M8 15h14l3 4h15v20H8z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+      <path d="M24 9v15M18 18l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-context" viewBox="0 0 48 48">
+      <path d="M12 7h24v34H12z" fill="none" stroke="currentColor" stroke-width="2.4"/>
+      <path d="M18 15h12M18 22h12M18 29h7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+      <path d="M15 29h15" stroke="#0eaaa8" stroke-width="4" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="icon-ask" viewBox="0 0 48 48">
+      <path d="M9 12h30v23H20l-8 7v-7H9z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+      <path d="M17 23h14M24 16v14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="icon-review" viewBox="0 0 48 48">
+      <path d="M12 8h24v32H12z" fill="none" stroke="currentColor" stroke-width="2.4"/>
+      <path d="M18 17h12M18 24h12M18 31h6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+      <path d="M29 31l3 3 6-7" fill="none" stroke="#2d72e8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+  </defs>
+
+  <rect width="1600" height="1000" fill="#ffffff"/>
+  <rect x="28" y="28" width="1544" height="944" rx="28" fill="#fbfdff" stroke="#dbe8f2" stroke-width="2"/>
+
+  <!-- Heading -->
+  <g text-anchor="middle" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <image x="764" y="56" width="72" height="70" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADwAAAA6CAYAAADspTpvAAAACXBIWXMAABYlAAAWJQA+VRRmAAAAhGVYSWZJSSoACAAAAAYAGgEFAAEAAABWAAAAGwEFAAEAAABeAAAAKAEDAAEAAAACAAAAaYcNAAEAAABmAAAAAAEEAAEAAAA8AAAAAQEEAAEAAAA6AAAAAAAAAJAAAAABAAAAkAAAAAEAAAACAAKgAwABAAAAPAAAAAOgAwABAAAAOgAAAIQAAAC3S0ALAAAABGNJQ1AMDQABbgPj7wAAACBjSFJNAAB6JgAAgIQAAQmgAAB9AAAAZ4QAAQ2IAAA6mAAAF3Dx+MpXAAAABGdBTUEAALGPC/xhBQAABJVJREFUeJztmL1PFFEUxd/oRogsanBBoVUS11hoYWXASqN2UBhrCxJLOyONjbb2lpYWUJhoz/4BGJvVSGfCh7uSoJAIWfJ8v5m54+ywwsybGSTjnGQzyzLz5p57z/14z9Faq/8JlX9twGGjJFx0lISLjpJw0VESLjpKwkVHSfhformyrec+bKjZuyNOXu84UoQh21z55RKvj/blQvpIEYYscKM8OpLLO6wItzY7qvFlS09fO51ZFBbMelzNmqyd1bJ7YEX4VWNdE436+f7MpTcxPuDMLW7oV43vembibOaytiIs0jNGqaf3RtRwNX1msIZ8DFE1v7iRSy4nthQjuM7ePaeev1/DsEwiURs87phU0UKysVQhypDPlHRiwhhmLpqryTdt5Kdq1UrqfBaVNJY23QjPTAw58560kXlm9cJai+2fu5p8a5uo+EUmtVH10X6KV+DAKfOpVbdcp1IkTfo4adMn8dO8EMMkElGjjBNUGuKsjwOlILIW34n0i3fftHmfmjSOtl3fyl0TFwe6igpGQZTqHSaOApJGpDZoHHq+T4WlzDsojqzLe1GVrVOtCIeLysv7Y+5vEGMklB4txM29xkFVFafwQJToTnujpbuG8lOF9blKCtGvbWBF2JW1MW7OtKfHb5a7cksMI8Io4NPqL7eam98PzEHpwXzCqgnfQwq1Ntc1g4qNtK0rQM03HAmSW9HcdXvqeMUxRmGka3g4B0UJzdXtoK8LiCCRRBnRjYQ4G2mzdlJYE5ZITV89rZomivvlrsidyGEoU5T8jsOQpzjQEHU/QJQRdaYpYtbjpzVhchJj/Grtyk8i5ktyT7XGEeb/mugyuByU16iBtJiPtKWW7xAbpGpqnlS/B31TCGIQfTp6vzc2DjnkfZz1JS0ofBCW1KmlIJ2K8KQ/eIic6ct+5DF23+hhcF31xXqPFEIci4P52yZ/QeqpXyor38M5R571kqxsENoWEQo7OK6zokhNWCYvQI6F8vivrYhCVbMcEYk0dcDkttXzmZx4yOQVPhSQPO7Vd2lDPGMLqQPSr5M8mwnhsNTwPmQmvda0xxjZXqbZBEgO20xcmZ1pSVFpLG25lZutXa+xksh7aZB8j/vs7aq+dXlQ3bgw4O6kFr4s66SHBJke4hFVPM/YB2kKC4XM9NzAKEbNqRhRefj6q75dH1QPrp9xn1vf6qil1o7a/vgDwkHtYOjBsXGR66klA0lrc1eHTyGn/I3AQdjpaPV57U9hGhqoqCtj/erkiWPBb8FmI4GsMyeMxIiu9ElGT6YxQdzcJYrnTnXf++RO91xN66NuRDcw+yFzwkgYsnLOhZSTSE7w6ObB52SszfYUwnGPjXORtG2PPQxkbhnjJZJOc+oRB+GDBopX3H6cuSVUaiQ8723kXaOYrIarx9Ulf9y0cQAEqQ9tj2jQ3nrtyvZDLtrzD9Md2d7Riky1Vgsm8gZd05c4IwzuBe2fHf/vTrAu96dRTq7JFj71ADJuCoF25CpExQG0He/aeyNig0OtLrJttN3pZIGjW05zQkm46CgJFx0l4aKjJFx0lISLjv+O8G+fE8NnnBI7NgAAAABJRU5ErkJggg==" preserveAspectRatio="xMidYMid meet"/>
+    <text x="800" y="178" font-size="64" font-weight="750" fill="#102d4a" letter-spacing="-2">Hermesian</text>
+    <text x="800" y="220" font-size="24" font-weight="500" fill="#3b5872">A native Obsidian workspace for <tspan fill="#2477df" font-weight="700">Hermes Agent</tspan></text>
+  </g>
+
+  <!-- Connector lines behind cards and hub -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M420 315H512Q540 315 560 340" stroke="#0eaaa8" stroke-width="2" marker-end="url(#arrow-teal)"/>
+    <path d="M420 455H520Q540 455 560 430" stroke="#2d72e8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <path d="M420 595H512Q540 595 560 520" stroke="#0eaaa8" stroke-width="2" marker-end="url(#arrow-teal)"/>
+    <path d="M1180 315H1088Q1060 315 1040 340" stroke="#2d72e8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <path d="M1180 455H1080Q1060 455 1040 430" stroke="#0eaaa8" stroke-width="2" marker-end="url(#arrow-teal)"/>
+    <path d="M1180 595H1088Q1060 595 1040 520" stroke="#2d72e8" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  </g>
+  <g fill="#ffffff" stroke="#b6d8e3" stroke-width="2">
+    <circle cx="512" cy="315" r="6"/><circle cx="520" cy="455" r="6"/><circle cx="512" cy="595" r="6"/>
+    <circle cx="1088" cy="315" r="6"/><circle cx="1080" cy="455" r="6"/><circle cx="1088" cy="595" r="6"/>
+  </g>
+
+  <!-- Feature cards -->
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <g filter="url(#soft)">
+      <rect x="100" y="260" width="320" height="110" rx="16" fill="#ffffff" stroke="#d4e4ef" stroke-width="2"/>
+      <rect x="100" y="400" width="320" height="110" rx="16" fill="#ffffff" stroke="#d4e4ef" stroke-width="2"/>
+      <rect x="100" y="540" width="320" height="110" rx="16" fill="#ffffff" stroke="#d4e4ef" stroke-width="2"/>
+      <rect x="1180" y="260" width="320" height="110" rx="16" fill="#ffffff" stroke="#d4e4ef" stroke-width="2"/>
+      <rect x="1180" y="400" width="320" height="110" rx="16" fill="#ffffff" stroke="#d4e4ef" stroke-width="2"/>
+      <rect x="1180" y="540" width="320" height="110" rx="16" fill="#ffffff" stroke="#d4e4ef" stroke-width="2"/>
+    </g>
+    <g color="#0eaaa8">
+      <use href="#icon-doc" x="126" y="291" width="48" height="48"/>
+      <use href="#icon-tabs" x="126" y="431" width="48" height="48"/>
+      <use href="#icon-pulse" x="126" y="571" width="48" height="48"/>
+    </g>
+    <g color="#2d72e8">
+      <use href="#icon-diff" x="1206" y="291" width="48" height="48"/>
+      <use href="#icon-shield" x="1206" y="431" width="48" height="48"/>
+      <use href="#icon-clock" x="1206" y="571" width="48" height="48"/>
+    </g>
+    <g fill="#102d4a">
+      <text x="192" y="305" font-size="21" font-weight="720">Markdown context</text>
+      <text x="192" y="337" font-size="17" fill="#577087">selection-aware</text>
+      <text x="192" y="445" font-size="21" font-weight="720">Conversation tabs</text>
+      <text x="192" y="477" font-size="17" fill="#577087">independent sessions</text>
+      <text x="192" y="585" font-size="21" font-weight="720">Streaming tools</text>
+      <text x="192" y="617" font-size="17" fill="#577087">live activity</text>
+      <text x="1272" y="305" font-size="21" font-weight="720">Diff approval</text>
+      <text x="1272" y="337" font-size="17" fill="#577087">review before write</text>
+      <text x="1272" y="445" font-size="21" font-weight="720">Vault safety</text>
+      <text x="1272" y="477" font-size="17" fill="#577087">canonical paths</text>
+      <text x="1272" y="585" font-size="21" font-weight="720">Models &amp; history</text>
+      <text x="1272" y="617" font-size="17" fill="#577087">resume sessions</text>
+    </g>
+  </g>
+
+  <!-- Central workspace -->
+  <g filter="url(#shadow)">
+    <rect x="560" y="260" width="480" height="390" rx="24" fill="url(#panel)" stroke="#b8d6e6" stroke-width="2"/>
+    <rect x="560" y="260" width="480" height="42" rx="24" fill="#102d4a"/>
+    <rect x="560" y="282" width="480" height="20" fill="#102d4a"/>
+    <circle cx="588" cy="281" r="5" fill="#36cbd0"/><circle cx="606" cy="281" r="5" fill="#5a9bea"/><circle cx="624" cy="281" r="5" fill="#b9d2e5"/>
+    <text x="800" y="287" text-anchor="middle" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="15" font-weight="650" fill="#dceaf5">Obsidian Vault · Hermesian sidebar</text>
+
+    <!-- Markdown pane -->
+    <rect x="586" y="330" width="190" height="222" rx="12" fill="#ffffff" stroke="#d7e7f0"/>
+    <path d="M610 363h72M610 385h124M610 407h108M610 429h72" stroke="#a8bdcc" stroke-width="7" stroke-linecap="round"/>
+    <rect x="606" y="453" width="132" height="17" rx="8" fill="#c9f2ef"/>
+    <path d="M610 494h124M610 516h88" stroke="#a8bdcc" stroke-width="7" stroke-linecap="round"/>
+    <text x="610" y="344" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" font-weight="700" fill="#0eaaa8">CURRENT NOTE.md</text>
+    <text x="610" y="583" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#577087">selected context</text>
+
+    <!-- ACP bridge -->
+    <path d="M790 439h40" stroke="url(#accent)" stroke-width="3" stroke-linecap="round" marker-end="url(#arrow-blue)"/>
+    <path d="M830 459h-40" stroke="#8ebcc9" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-teal)"/>
+    <rect x="786" y="397" width="56" height="37" rx="10" fill="#102d4a"/>
+    <text x="814" y="421" text-anchor="middle" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="15" font-weight="750" fill="#ffffff">ACP</text>
+
+    <!-- Chat sidebar pane -->
+    <rect x="864" y="330" width="150" height="222" rx="12" fill="#ffffff" stroke="#d7e7f0"/>
+    <rect x="879" y="349" width="28" height="20" rx="8" fill="#d8f4f2"/><text x="893" y="364" text-anchor="middle" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" font-weight="750" fill="#0e7779">1</text>
+    <rect x="912" y="349" width="28" height="20" rx="8" fill="#e3eefb"/><text x="926" y="364" text-anchor="middle" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12" font-weight="750" fill="#2d72e8">2</text>
+    <circle cx="995" cy="359" r="5" fill="#35cbd0"/>
+    <path d="M880 392h104M880 405h80" stroke="#a8bdcc" stroke-width="6" stroke-linecap="round"/>
+    <rect x="879" y="425" width="112" height="38" rx="10" fill="#dff5f2"/>
+    <path d="M891 441h78" stroke="#5aa7a8" stroke-width="6" stroke-linecap="round"/>
+    <path d="M880 486h98M880 500h71" stroke="#a8bdcc" stroke-width="6" stroke-linecap="round"/>
+    <rect x="879" y="521" width="115" height="16" rx="8" fill="#edf4f8"/>
+    <text x="939" y="533" text-anchor="middle" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="10" fill="#7e95a8">Ask Hermes…</text>
+
+    <text x="800" y="610" text-anchor="middle" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="720" fill="#102d4a">Hermesian workspace</text>
+    <text x="800" y="632" text-anchor="middle" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" fill="#577087">context · chat · tools · safe edits</text>
+  </g>
+
+  <!-- Workflow -->
+  <g filter="url(#soft)">
+    <rect x="160" y="730" width="1280" height="140" rx="22" fill="#ffffff" stroke="#cfe2ed" stroke-width="2"/>
+  </g>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" text-anchor="middle">
+    <g fill="none" stroke="#2d72e8" stroke-width="2" stroke-linecap="round" marker-end="url(#arrow-blue)">
+      <path d="M445 800h72"/><path d="M765 800h72"/><path d="M1085 800h72"/>
+    </g>
+    <g color="#0eaaa8">
+      <use href="#icon-open" x="246" y="760" width="48" height="48"/>
+      <use href="#icon-context" x="566" y="760" width="48" height="48"/>
+    </g>
+    <g color="#2d72e8">
+      <use href="#icon-ask" x="886" y="760" width="48" height="48"/>
+      <use href="#icon-review" x="1206" y="760" width="48" height="48"/>
+    </g>
+    <g fill="#102d4a">
+      <text x="270" y="834" font-size="18" font-weight="720">Open sidebar</text>
+      <text x="590" y="834" font-size="18" font-weight="720">Add context</text>
+      <text x="910" y="834" font-size="18" font-weight="720">Ask Hermes</text>
+      <text x="1230" y="834" font-size="18" font-weight="720">Review &amp; apply</text>
+    </g>
+  </g>
+
+  <!-- Footer -->
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" text-anchor="middle">
+    <path d="M620 916h360" stroke="#d7e7f0" stroke-width="2"/>
+    <text x="800" y="946" font-size="15" fill="#577087">Obsidian plugin  •  ACP-powered  •  open source</text>
+  </g>
+</svg>

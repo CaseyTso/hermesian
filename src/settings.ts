@@ -1,17 +1,22 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 
 import type HermesianPlugin from "./main";
+import type { ReasoningEffort } from "./types";
 
 export interface HermesianSettings {
   acceptHooks: boolean;
+  autoApproveVaultEdits: boolean;
   hermesExecutable: string;
   profile: string;
+  reasoningEffort: ReasoningEffort;
 }
 
 export const DEFAULT_SETTINGS: HermesianSettings = {
   acceptHooks: true,
+  autoApproveVaultEdits: true,
   hermesExecutable: "hermes",
   profile: "default",
+  reasoningEffort: "default",
 };
 
 export class HermesianSettingTab extends PluginSettingTab {
@@ -65,6 +70,20 @@ export class HermesianSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.acceptHooks = value;
             await this.plugin.saveSettingsAndReconnect();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Automatically approve Vault edits")
+      .setDesc(
+        "Allow patch/write edits only when ACP provides a diff and every canonical target stays inside this Vault. Terminal commands and unverifiable writes still require approval.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.autoApproveVaultEdits)
+          .onChange(async (value) => {
+            this.plugin.settings.autoApproveVaultEdits = value;
+            await this.plugin.saveSettings();
           }),
       );
   }

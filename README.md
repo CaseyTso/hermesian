@@ -8,6 +8,29 @@ Hermesian is a desktop-only Obsidian plugin that connects the current Vault to [
   <img src="assets/hermesian-sidebar.png" alt="Hermesian running in the Obsidian sidebar" width="1200" />
 </p>
 
+<p align="center">
+  <img src="assets/hermesian-overview.svg" alt="Hermesian architecture and workflow overview" width="1200" />
+</p>
+
+## Installation
+
+Download the latest release from [GitHub Releases](https://github.com/CaseyTso/hermesian/releases/latest). Either extract `hermesian-vX.Y.Z.zip`, or download these three assets directly:
+
+- `main.js`
+- `manifest.json`
+- `styles.css`
+
+Copy them into the plugin directory, then restart Obsidian and enable **Hermesian** under **Settings → Community plugins**:
+
+```text
+<Vault>/.obsidian/plugins/hermesian/
+├── main.js
+├── manifest.json
+└── styles.css
+```
+
+> **Do not use GitHub's Code → Download ZIP as an install package.** That archive contains source code and intentionally excludes the compiled `main.js`.
+
 ## Requirements
 
 - Obsidian Desktop 1.8.0+

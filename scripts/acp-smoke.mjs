@@ -6,14 +6,17 @@ import {
   accessSync,
   constants as fsConstants,
   mkdtempSync,
+  mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 
 const TOKEN = "HERMESIAN_ACP_SMOKE_OK";
+const RESUME_TOKEN = "HERMESIAN_ACP_RESUME_OK";
 const TIMEOUT_MS = 180_000;
 
 function executableCandidate() {
@@ -42,15 +45,22 @@ function executableCandidate() {
 }
 
 function timeout(promise, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      setTimeout(
-        () => reject(new Error(`${label} timed out after ${TIMEOUT_MS}ms`)),
-        TIMEOUT_MS,
-      );
-    }),
-  ]);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${TIMEOUT_MS}ms`)),
+      TIMEOUT_MS,
+    );
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function rejectPermission(params) {
@@ -95,19 +105,21 @@ async function runPrompt(session, prompt) {
   return { contextUsage, stopReason, text };
 }
 
-const cwd = mkdtempSync(join(tmpdir(), "hermesian-acp-smoke-"));
-const profile = process.env.HERMES_PROFILE || "coding_agent";
+const smokeRoot = join(process.cwd(), ".hermes");
+mkdirSync(smokeRoot, { recursive: true });
+const cwd = mkdtempSync(join(smokeRoot, "acp-smoke-"));
+const profile = process.env.HERMES_PROFILE || "default";
 const child = spawn(
   executableCandidate(),
   ["--profile", profile, "acp", "--accept-hooks"],
   {
-  cwd,
-  env: {
-    ...process.env,
-    HERMES_ACCEPT_HOOKS: "1",
-    HERMES_PROFILE: profile,
-  },
-  stdio: ["pipe", "pipe", "pipe"],
+    cwd,
+    env: {
+      ...process.env,
+      HERMES_ACCEPT_HOOKS: "1",
+      HERMES_PROFILE: profile,
+    },
+    stdio: ["pipe", "pipe", "pipe"],
   },
 );
 child.stderr.setEncoding("utf8");
@@ -118,12 +130,50 @@ child.stderr.on("data", (chunk) => {
 
 let connection;
 let session;
+let capturedSessionId;
+let replayingHistory = false;
+let replayUpdates = 0;
+let resumedText = "";
+let autoApproveTarget;
 const permissionRequests = [];
+let resolveAdvertisedCommands;
+const advertisedCommandsPromise = new Promise((resolve) => {
+  resolveAdvertisedCommands = resolve;
+});
 try {
   const app = acp
     .client({ name: "hermesian-smoke" })
+    .onNotification(acp.methods.client.session.update, ({ params }) => {
+      if (params.update.sessionUpdate === "available_commands_update") {
+        resolveAdvertisedCommands(params.update.availableCommands);
+      }
+      if (params.sessionId !== capturedSessionId) {
+        return;
+      }
+      if (replayingHistory) {
+        replayUpdates += 1;
+        return;
+      }
+      if (
+        params.update.sessionUpdate === "agent_message_chunk" &&
+        params.update.content.type === "text"
+      ) {
+        resumedText += params.update.content.text;
+      }
+    })
     .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
       permissionRequests.push(params);
+      const hasApprovedDiff = params.toolCall.content?.some(
+        (content) => content.type === "diff" && content.path === autoApproveTarget,
+      );
+      if (hasApprovedDiff && params.toolCall.kind === "edit") {
+        const allow = params.options.find(
+          (option) => option.kind === "allow_once" || option.kind === "allow_always",
+        );
+        if (allow) {
+          return { outcome: { outcome: "selected", optionId: allow.optionId } };
+        }
+      }
       return rejectPermission(params);
     });
   const stream = acp.ndJsonStream(
@@ -142,7 +192,31 @@ try {
     "initialize",
   );
   session = await timeout(context.buildSession(cwd).start(), "session/new");
+  const advertisedCommands = await timeout(
+    advertisedCommandsPromise,
+    "available_commands_update",
+  );
+  if (
+    !Array.isArray(advertisedCommands) ||
+    !advertisedCommands.some((command) => command.name === "help") ||
+    !advertisedCommands.some((command) => command.name === "model")
+  ) {
+    throw new Error("Hermes did not advertise the expected ACP slash commands");
+  }
 
+  if (process.env.HERMESIAN_ACP_COMMANDS_ONLY === "1") {
+    console.log(
+      JSON.stringify(
+        {
+          commands: advertisedCommands.map((command) => command.name),
+          protocolVersion: initialized.protocolVersion,
+          sessionId: session.sessionId,
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
   const modelState = session.newSessionResponse.models;
   if (
     !modelState ||
@@ -197,22 +271,85 @@ try {
     throw new Error("Rejected ACP edit unexpectedly modified the file");
   }
 
+  const approvedEditTarget = join(cwd, "approved-edit-target.md");
+  writeFileSync(approvedEditTarget, "APPROVED_ORIGINAL\n", "utf8");
+  autoApproveTarget = approvedEditTarget;
+  await runPrompt(
+    session,
+    `You must use the patch tool now with mode="replace". In ${approvedEditTarget}, replace the exact text APPROVED_ORIGINAL with APPROVED_UPDATED. Do not use terminal or write_file.`,
+  );
+  const approvedPermission = permissionRequests.find((request) =>
+    request.toolCall.content?.some(
+      (content) => content.type === "diff" && content.path === approvedEditTarget,
+    ),
+  );
+  if (!approvedPermission) {
+    throw new Error("Hermes did not send the expected approved ACP edit request");
+  }
+  if (readFileSync(approvedEditTarget, "utf8") !== "APPROVED_UPDATED\n") {
+    throw new Error("Approved ACP edit did not modify the target file");
+  }
+  autoApproveTarget = undefined;
+
+  const resumedSessionId = session.sessionId;
+  session.dispose();
+  session = undefined;
+  capturedSessionId = resumedSessionId;
+  replayingHistory = true;
+  await timeout(
+    context.request(acp.methods.agent.session.load, {
+      cwd,
+      mcpServers: [],
+      sessionId: resumedSessionId,
+    }),
+    "session/load",
+  );
+  replayingHistory = false;
+  if (replayUpdates === 0) {
+    throw new Error("Hermes session/load did not replay any history updates");
+  }
+  const resumedResponse = await timeout(
+    context.request(acp.methods.agent.session.prompt, {
+      prompt: [
+        {
+          type: "text",
+          text: `Reply with exactly ${RESUME_TOKEN}. Do not use tools or add any other text.`,
+        },
+      ],
+      sessionId: resumedSessionId,
+    }),
+    "resumed session/prompt",
+  );
+  capturedSessionId = undefined;
+  if (!resumedText.includes(RESUME_TOKEN)) {
+    throw new Error(
+      `Expected ${RESUME_TOKEN}, received ${JSON.stringify(resumedText)}`,
+    );
+  }
+
   console.log(
     JSON.stringify(
       {
         editApproval: {
+          approvedFileModified: true,
+          approvedToolKind: approvedPermission.toolCall.kind,
           fileUnchangedAfterReject: true,
           requestCount: permissionRequests.length,
           target: editTarget,
         },
         contextUsage: response.contextUsage,
+        historyResume: {
+          replayUpdates,
+          stopReason: resumedResponse.stopReason,
+          text: resumedText.trim(),
+        },
         models: {
           available: modelState.availableModels.length,
           current: modelState.currentModelId,
           setModel: true,
         },
         protocolVersion: initialized.protocolVersion,
-        sessionId: session.sessionId,
+        sessionId: resumedSessionId,
         stopReason: response.stopReason,
         text: response.text.trim(),
       },
@@ -220,6 +357,7 @@ try {
       2,
     ),
   );
+  }
 } catch (error) {
   console.error(error instanceof Error ? error.stack : String(error));
   if (stderr.trim()) {
@@ -233,4 +371,5 @@ try {
   if (child.exitCode == null && child.signalCode == null) {
     child.kill("SIGTERM");
   }
+  rmSync(cwd, { force: true, recursive: true });
 }

@@ -1,4 +1,5 @@
 import {
+  addIcon,
   FileSystemAdapter,
   type MarkdownFileInfo,
   MarkdownView,
@@ -7,8 +8,19 @@ import {
   WorkspaceLeaf,
 } from "obsidian";
 
-import { HermesAcpClient } from "./acp-client";
+import {
+  automaticVaultEditApproval,
+  HermesAcpClient,
+  type PermissionRequest,
+  type PermissionResponse,
+} from "./acp-client";
+import {
+  normalizeConversationWorkspace,
+  type PersistedConversationWorkspace,
+} from "./conversation-tabs";
+import { HERMESIAN_ICON_ID, HERMESIAN_ICON_SVG } from "./hermes-icon";
 import { chooseMarkdownSource } from "./markdown-source";
+import { isReasoningEffort } from "./session-history";
 import {
   createDocumentContext,
   createSelectionContext,
@@ -19,21 +31,49 @@ import {
   HermesianSettingTab,
   type HermesianSettings,
 } from "./settings";
+import { TabClientRegistry } from "./tab-client-registry";
 import {
   HERMESIAN_VIEW_TYPE,
   HermesianSidebarView,
 } from "./view";
-import type { MarkdownDocumentContext } from "./types";
+import type { MarkdownDocumentContext, ReasoningEffort } from "./types";
 
 export default class HermesianPlugin extends Plugin {
   settings: HermesianSettings = { ...DEFAULT_SETTINGS };
 
-  private client: HermesAcpClient | undefined;
+  private readonly clients = new TabClientRegistry<HermesAcpClient>(
+    (tabId, isCurrent) => {
+      const client = new HermesAcpClient({
+        onEvent: (event) => {
+          if (isCurrent()) {
+            this.sidebarView?.handleHermesEvent(tabId, event);
+          }
+        },
+        onPermission: (request, signal) =>
+          isCurrent()
+            ? (this.sidebarView?.requestPermission(tabId, request, signal) ??
+              Promise.resolve({ outcome: { outcome: "cancelled" } }))
+            : Promise.resolve({ outcome: { outcome: "cancelled" } }),
+        pluginVersion: this.manifest.version,
+        settings: () => this.settings,
+        vaultPath: this.getVaultPath(),
+      });
+      const unsubscribe = client.onSessionState((state) => {
+        if (isCurrent()) {
+          this.sidebarView?.handleHermesSessionState(tabId, state);
+        }
+      });
+      return { client, unsubscribe };
+    },
+  );
+  private conversationWorkspace: PersistedConversationWorkspace | undefined;
+  private conversationWorkspaceSaveTimer: number | undefined;
   private lastMarkdownView: MarkdownView | undefined;
   private sidebarView: HermesianSidebarView | undefined;
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    addIcon(HERMESIAN_ICON_ID, HERMESIAN_ICON_SVG);
 
     this.lastMarkdownView =
       this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
@@ -64,7 +104,7 @@ export default class HermesianPlugin extends Plugin {
       (leaf) => new HermesianSidebarView(leaf, this),
     );
 
-    this.addRibbonIcon("bot", "Open Hermesian", () => {
+    this.addRibbonIcon(HERMESIAN_ICON_ID, "Open Hermesian", () => {
       void this.activateView();
     });
 
@@ -92,7 +132,7 @@ export default class HermesianPlugin extends Plugin {
 
     this.addCommand({
       id: "new-hermes-session",
-      name: "Start a new Hermes session",
+      name: "Restart current conversation",
       callback: () => {
         void this.startNewSession();
       },
@@ -102,7 +142,12 @@ export default class HermesianPlugin extends Plugin {
   }
 
   onunload(): void {
-    void this.client?.disconnect();
+    if (this.conversationWorkspaceSaveTimer !== undefined) {
+      window.clearTimeout(this.conversationWorkspaceSaveTimer);
+      this.conversationWorkspaceSaveTimer = undefined;
+      void this.savePluginData();
+    }
+    void this.disconnectAllClients();
     this.app.workspace.detachLeavesOfType(HERMESIAN_VIEW_TYPE);
   }
 
@@ -114,23 +159,34 @@ export default class HermesianPlugin extends Plugin {
   async releaseView(view: HermesianSidebarView): Promise<void> {
     if (this.sidebarView === view) {
       this.sidebarView = undefined;
-      await this.client?.disconnect();
+      await this.disconnectAllClients();
     }
   }
 
-  getClient(): HermesAcpClient {
-    if (!this.client) {
-      this.client = new HermesAcpClient({
-        onEvent: (event) => this.sidebarView?.handleHermesEvent(event),
-        onPermission: (request, signal) =>
-          this.sidebarView?.requestPermission(request, signal) ??
-          Promise.resolve({ outcome: { outcome: "cancelled" } }),
-        pluginVersion: this.manifest.version,
-        settings: () => this.settings,
-        vaultPath: this.getVaultPath(),
-      });
-    }
-    return this.client;
+  getClient(tabId: string): HermesAcpClient {
+    return this.clients.getOrCreate(tabId);
+  }
+
+  automaticPermissionResponse(
+    request: PermissionRequest,
+  ): PermissionResponse | undefined {
+    return automaticVaultEditApproval(
+      request,
+      this.getVaultPath(),
+      this.settings.autoApproveVaultEdits,
+    );
+  }
+
+  peekClient(tabId: string): HermesAcpClient | undefined {
+    return this.clients.peek(tabId);
+  }
+
+  hasBusyClient(): boolean {
+    return this.clients.some((client) => client.isBusy || client.isOperating);
+  }
+
+  async releaseClient(tabId: string): Promise<void> {
+    await this.clients.release(tabId);
   }
 
   async activateView(): Promise<HermesianSidebarView | undefined> {
@@ -221,15 +277,58 @@ export default class HermesianPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    await this.flushConversationWorkspace();
+  }
+
+  getConversationWorkspace(): PersistedConversationWorkspace | undefined {
+    return normalizeConversationWorkspace(this.conversationWorkspace);
+  }
+
+  setConversationWorkspace(workspace: PersistedConversationWorkspace): void {
+    this.conversationWorkspace = workspace;
+    if (this.conversationWorkspaceSaveTimer !== undefined) {
+      window.clearTimeout(this.conversationWorkspaceSaveTimer);
+    }
+    this.conversationWorkspaceSaveTimer = window.setTimeout(() => {
+      this.conversationWorkspaceSaveTimer = undefined;
+      void this.savePluginData();
+    }, 250);
+  }
+
+  async flushConversationWorkspace(
+    workspace?: PersistedConversationWorkspace,
+  ): Promise<void> {
+    if (workspace) {
+      this.conversationWorkspace = workspace;
+    }
+    if (this.conversationWorkspaceSaveTimer !== undefined) {
+      window.clearTimeout(this.conversationWorkspaceSaveTimer);
+      this.conversationWorkspaceSaveTimer = undefined;
+    }
+    await this.savePluginData();
   }
 
   async saveSettingsAndReconnect(): Promise<void> {
     await this.saveSettings();
-    if (this.client) {
-      await this.client.disconnect();
-      this.client = undefined;
+    await this.disconnectAllClients();
+  }
+
+  getReasoningEffort(): ReasoningEffort {
+    return this.settings.reasoningEffort;
+  }
+
+  async setReasoningEffort(tabId: string, effort: ReasoningEffort): Promise<void> {
+    if (this.hasBusyClient()) {
+      throw new Error("Cannot change thinking depth while Hermes is responding");
     }
+    await this.getClient(tabId).configureReasoningEffort(effort);
+    this.settings.reasoningEffort = effort;
+    await this.saveSettings();
+    await this.disconnectAllClients();
+  }
+
+  private async disconnectAllClients(): Promise<void> {
+    await this.clients.releaseAll();
   }
 
   private async startNewSession(): Promise<void> {
@@ -238,7 +337,7 @@ export default class HermesianPlugin extends Plugin {
       return;
     }
     try {
-      await this.getClient().newSession();
+      await view.startNewSession();
     } catch (error) {
       new Notice(
         `Hermesian: ${error instanceof Error ? error.message : String(error)}`,
@@ -271,7 +370,46 @@ export default class HermesianPlugin extends Plugin {
   }
 
   private async loadSettings(): Promise<void> {
-    const saved = (await this.loadData()) as Partial<HermesianSettings> | null;
-    this.settings = { ...DEFAULT_SETTINGS, ...(saved ?? {}) };
+    const loaded = await this.loadData();
+    const saved =
+      loaded && typeof loaded === "object"
+        ? (loaded as Partial<HermesianSettings> & {
+            conversationWorkspace?: unknown;
+          })
+        : {};
+    this.settings = {
+      acceptHooks:
+        typeof saved.acceptHooks === "boolean"
+          ? saved.acceptHooks
+          : DEFAULT_SETTINGS.acceptHooks,
+      autoApproveVaultEdits:
+        typeof saved.autoApproveVaultEdits === "boolean"
+          ? saved.autoApproveVaultEdits
+          : DEFAULT_SETTINGS.autoApproveVaultEdits,
+      hermesExecutable:
+        typeof saved.hermesExecutable === "string"
+          ? saved.hermesExecutable
+          : DEFAULT_SETTINGS.hermesExecutable,
+      profile:
+        typeof saved.profile === "string" ? saved.profile : DEFAULT_SETTINGS.profile,
+      reasoningEffort:
+        typeof saved.reasoningEffort === "string" &&
+        isReasoningEffort(saved.reasoningEffort)
+          ? saved.reasoningEffort
+          : DEFAULT_SETTINGS.reasoningEffort,
+    };
+    this.conversationWorkspace = normalizeConversationWorkspace(
+      saved.conversationWorkspace,
+    );
+    if (!isReasoningEffort(String(this.settings.reasoningEffort))) {
+      this.settings.reasoningEffort = DEFAULT_SETTINGS.reasoningEffort;
+    }
+  }
+
+  private async savePluginData(): Promise<void> {
+    await this.saveData({
+      ...this.settings,
+      conversationWorkspace: this.conversationWorkspace,
+    });
   }
 }

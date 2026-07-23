@@ -30,14 +30,13 @@ hermes acp --check
 
 ## 安装与启动
 
-当前项目主要面向源码构建和开发者预览。安装依赖并构建：
+从 [GitHub Releases](https://github.com/CaseyTso/hermesian/releases/latest) 下载最新版本。可以直接解压 `hermesian-vX.Y.Z.zip`，也可以分别下载以下三个文件：
 
-```bash
-npm install
-npm run build
-```
+- `main.js`
+- `manifest.json`
+- `styles.css`
 
-将以下三个文件复制到 Vault 的插件目录：
+将文件放入 Vault 的插件目录：
 
 ```text
 <Vault>/.obsidian/plugins/hermesian/
@@ -46,7 +45,16 @@ npm run build
 └── styles.css
 ```
 
-然后在 Obsidian 的 **Settings → Community plugins** 中启用 Hermesian。
+完全重启 Obsidian，然后在 **设置 → 第三方插件** 中启用 Hermesian。
+
+> **不要把 GitHub 的 Code → Download ZIP 当作安装包。** 该压缩包只包含源码，并且有意排除了编译后的 `main.js`。
+
+如需从源码安装，先构建再复制上述三个产物：
+
+```bash
+npm install
+npm run build
+```
 
 ## 使用方法
 
