@@ -8,6 +8,10 @@ Hermesian is a desktop-only Obsidian plugin that connects the current Vault to [
   <img src="assets/hermesian-sidebar.png" alt="Hermesian running in the Obsidian sidebar" width="1200" />
 </p>
 
+<p align="center">
+  <img src="assets/hermesian-overview.svg" alt="Hermesian architecture and workflow overview" width="1200" />
+</p>
+
 ## Requirements
 
 - Obsidian Desktop 1.8.0+
