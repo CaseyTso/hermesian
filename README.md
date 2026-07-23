@@ -5,12 +5,30 @@ Hermesian is a desktop-only Obsidian plugin that connects the current Vault to [
 [中文文档](README.zh-CN.md)
 
 <p align="center">
+  <img src="assets/hermesian-overview.svg" alt="Hermesian architecture and workflow overview" width="1200" />
+</p>
+
+## Content
+
+<p align="center">
   <img src="assets/hermesian-sidebar.png" alt="Hermesian running in the Obsidian sidebar" width="1200" />
 </p>
 
-<p align="center">
-  <img src="assets/hermesian-overview.svg" alt="Hermesian architecture and workflow overview" width="1200" />
-</p>
+Hermesian brings Hermes Agent into the Obsidian workspace, keeping conversations, note context, tool activity, and reviewed edits beside the documents you are working on.
+
+**Core capabilities**
+
+- Run multiple independent Hermes conversations in parallel and restore tabs, sessions, drafts, and note-context state after restart.
+- Send the current Markdown note, an exact text selection, or pasted images as context without leaving Obsidian.
+- Stream responses, tool calls, model information, context usage, skills, slash commands, and session history in a native sidebar.
+- Review file diffs and enforce canonical Vault boundaries before approved edits are applied.
+
+**Typical use cases**
+
+- Summarize, explain, translate, or rewrite notes and selected passages.
+- Research a topic and turn findings into structured Markdown documentation.
+- Ask Hermes to inspect project files, run development tools, and prepare reviewed changes from inside a Vault.
+- Keep several long-running research, writing, or coding tasks active in parallel and resume them later.
 
 ## Installation
 
