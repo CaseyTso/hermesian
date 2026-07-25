@@ -5,6 +5,7 @@ import {
   type TabOperationState,
 } from "./conversation-runtime";
 import {
+  activateConversationTab,
   addPendingConversationTab,
   replaceConversationSession,
   type PersistedConversationTab,
@@ -95,7 +96,9 @@ export interface AddConversationResult {
 export interface SwitchConversationResult {
   items?: HermesHistoryItem[];
   sessionId?: string;
+  started: boolean;
   tabId: string;
+  workspace: PersistedConversationWorkspace;
 }
 
 export interface CloseConversationResult {
@@ -522,7 +525,58 @@ export class ConversationController<TClient extends ConversationClient> {
 
   switchConversation(tabId: string): Promise<SwitchConversationResult> {
     const blocked = this.blockedDuringStartup<SwitchConversationResult>("switchConversation", tabId);
-    return blocked ?? this.notImplemented("switchConversation");
+    return blocked ?? this.switchConversationInternal(tabId);
+  }
+
+  private async switchConversationInternal(tabId: string): Promise<SwitchConversationResult> {
+    const workspace = copyWorkspace(
+      this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+    );
+    const target = workspace?.tabs.find((tab) => tab.id === tabId);
+    if (!workspace || !target) {
+      throw this.controllerError("workspace_conflict", "Conversation tab was not found", tabId);
+    }
+    if (workspace.activeTabId === tabId) {
+      return {
+        sessionId: target.sessionId ?? undefined,
+        started: false,
+        tabId,
+        workspace,
+      };
+    }
+
+    const generation = this.operations.beginTransition();
+    this.publish({
+      ...this.snapshot,
+      transitionGeneration: generation,
+    });
+    const prepared = await this.ensureClientForTabInternal(tabId, workspace, generation);
+    this.assertCurrentTransition(generation);
+    const latestWorkspace = copyWorkspace(
+      this.dependencies.workspace.getWorkspace() ?? prepared.workspace,
+    );
+    if (!latestWorkspace?.tabs.some((tab) => tab.id === tabId)) {
+      throw this.controllerError("workspace_conflict", "Conversation tab was removed during switch", tabId);
+    }
+    const activeWorkspace = activateConversationTab(latestWorkspace, tabId);
+    await this.dependencies.workspace.setWorkspace(activeWorkspace, {
+      flush: true,
+      save: true,
+    });
+    this.assertCurrentTransition(generation);
+    this.publishWorkspace(activeWorkspace);
+    this.updateTabOperation(tabId, {
+      connection: "ready",
+      hasSession: true,
+      sessionOperation: "idle",
+    });
+    return {
+      items: prepared.items,
+      sessionId: prepared.sessionId,
+      started: prepared.started,
+      tabId,
+      workspace: copyWorkspace(activeWorkspace)!,
+    };
   }
 
   closeConversation(tabId: string): Promise<CloseConversationResult> {

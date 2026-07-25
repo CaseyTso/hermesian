@@ -6,7 +6,11 @@ import {
   type ConversationClient,
   type ConversationControllerDependencies,
 } from "../src/conversation-controller";
-import { createConversationWorkspace } from "../src/conversation-tabs";
+import {
+  addPendingConversationTab,
+  createConversationWorkspace,
+  replaceConversationSession,
+} from "../src/conversation-tabs";
 import type { HermesHistoryItem } from "../src/types";
 
 interface FakeClient extends ConversationClient {
@@ -440,5 +444,94 @@ describe("ConversationController add", () => {
 
     await expect(adding).rejects.toMatchObject({ code: "workspace_conflict" });
     expect(deps.workspace.getWorkspace()?.tabs.some((tab) => tab.id === "new-tab")).toBe(false);
+  });
+});
+
+describe("ConversationController switch", () => {
+  async function readySwitchController(targetIds: string[]): Promise<{
+    controller: ConversationController<FakeClient>;
+    deps: ConversationControllerDependencies<FakeClient>;
+    clients: Map<string, FakeClient>;
+  }> {
+    let workspace = createConversationWorkspace("base", "base-session");
+    const clients = new Map<string, FakeClient>([["base", fakeClient("base")]]);
+    for (const targetId of targetIds) {
+      const target = fakeClient(targetId);
+      clients.set(targetId, target);
+      workspace = addPendingConversationTab(workspace, targetId);
+      workspace = replaceConversationSession(workspace, targetId, `${targetId}-session`);
+    }
+    workspace = { ...workspace, activeTabId: "base" };
+    const deps = dependencies(
+      workspace,
+      clients.get("base")!,
+      clients,
+    );
+    const controller = new ConversationController(deps);
+    await controller.initialize();
+    return { clients, controller, deps };
+  }
+
+  it("prepares history before committing the active tab", async () => {
+    const history = deferred<HermesHistoryItem[]>();
+    const { controller, deps, clients } = await readySwitchController(["tab-b"]);
+    clients.get("tab-b")!.loadSessionHistory = vi.fn(() => history.promise);
+
+    const switching = controller.switchConversation("tab-b");
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("base");
+    history.resolve([]);
+
+    const result = await switching;
+    expect(result).toMatchObject({ tabId: "tab-b", sessionId: "tab-b-session" });
+    expect(result.workspace.activeTabId).toBe("tab-b");
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-b");
+  });
+
+  it("does not reconnect or reload when switching to the active tab", async () => {
+    const { controller, clients } = await readySwitchController(["tab-b"]);
+    const result = await controller.switchConversation("base");
+
+    expect(result).toMatchObject({ tabId: "base", sessionId: "base-session" });
+    expect(clients.get("base")!.connect).toHaveBeenCalledOnce();
+    expect(clients.get("base")!.loadSessionHistory).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the previous active tab when target preparation fails", async () => {
+    const { controller, deps, clients } = await readySwitchController(["tab-b"]);
+    clients.get("tab-b")!.connect = vi.fn(async () => {
+      throw new Error("connection unavailable");
+    });
+
+    await expect(controller.switchConversation("tab-b")).rejects.toThrow("connection unavailable");
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("base");
+    expect(controller.getSnapshot().tabOperations.get("tab-b")?.connection).toBe("failed");
+  });
+
+  it("cancels an older switch when a newer switch wins", async () => {
+    const firstHistory = deferred<HermesHistoryItem[]>();
+    const secondHistory = deferred<HermesHistoryItem[]>();
+    const { controller, deps, clients } = await readySwitchController(["tab-b", "tab-c"]);
+    clients.get("tab-b")!.loadSessionHistory = vi.fn(() => firstHistory.promise);
+    clients.get("tab-c")!.loadSessionHistory = vi.fn(() => secondHistory.promise);
+
+    const firstSwitch = controller.switchConversation("tab-b");
+    const secondSwitch = controller.switchConversation("tab-c");
+    secondHistory.resolve([]);
+    const secondResult = await secondSwitch;
+    expect(secondResult.workspace.activeTabId).toBe("tab-c");
+
+    firstHistory.resolve([]);
+    await expect(firstSwitch).rejects.toMatchObject({ code: "cancelled" });
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-c");
+  });
+
+  it("rejects a switch to a missing tab without mutating workspace", async () => {
+    const { controller, deps } = await readySwitchController([]);
+
+    await expect(controller.switchConversation("missing")).rejects.toMatchObject({
+      code: "workspace_conflict",
+      tabId: "missing",
+    });
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("base");
   });
 });

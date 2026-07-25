@@ -19,6 +19,7 @@ import {
 import type HermesianPlugin from "./main";
 import {
   ConversationController,
+  ConversationControllerError,
   type ConversationControllerSnapshot,
   type ConversationInitializationResult,
 } from "./conversation-controller";
@@ -1160,10 +1161,8 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private async switchConversation(tabId: string): Promise<void> {
-    const workspace = this.conversationWorkspace;
     if (
-      !workspace ||
-      workspace.activeTabId === tabId ||
+      !this.controller ||
       this.initializing ||
       this.controlsBusy ||
       this.closingConversationTabId !== undefined ||
@@ -1171,57 +1170,42 @@ export class HermesianSidebarView extends ItemView {
     ) {
       return;
     }
-    const target = workspace.tabs.find((tab) => tab.id === tabId);
-    if (!target) {
-      return;
-    }
 
     this.captureActiveConversationRuntime();
-    const generation = this.transitions.beginSwitch();
-    this.renderConversationTabs();
-    this.updateControls(false);
+    this.transitions.invalidateSwitch();
     try {
-      const { items, sessionId, started } = await this.ensureClientForTab(target.id);
-      if (!this.transitions.isCurrentSwitch(generation)) {
-        if (started && this.conversationWorkspace) {
-          await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-        }
-        return;
+      const result = await this.controller.switchConversation(tabId);
+      this.conversationWorkspace = result.workspace;
+      if (result.items && result.sessionId) {
+        await this.renderHistorySession(
+          { cwd: "", sessionId: result.sessionId },
+          result.items,
+          false,
+          result.tabId,
+        );
+      } else if (result.started) {
+        this.resetConversationView(result.tabId);
+        this.loadedMessageTabIds.add(result.tabId);
+        this.appendSystemMessage(
+          "New Hermes conversation started.",
+          false,
+          result.tabId,
+        );
       }
-      const latestWorkspace = this.conversationWorkspace;
-      if (!latestWorkspace?.tabs.some((tab) => tab.id === target.id)) {
-        return;
-      }
-      if (items) {
-        await this.renderHistorySession({ cwd: "", sessionId }, items, false, target.id);
-      } else if (started) {
-        this.resetConversationView(target.id);
-        this.loadedMessageTabIds.add(target.id);
-        this.appendSystemMessage("New Hermes conversation started.", false, target.id);
-      }
-      if (!this.transitions.isCurrentSwitch(generation)) {
-        return;
-      }
-      const readyWorkspace = this.conversationWorkspace;
-      if (!readyWorkspace?.tabs.some((tab) => tab.id === target.id)) {
-        return;
-      }
-      this.conversationWorkspace = activateConversationTab(readyWorkspace, target.id);
-      this.showConversationMessages(target.id);
+      this.showConversationMessages(result.tabId);
       this.restoreActiveConversationRuntime();
       this.renderSessionState(
-        this.sessionStates.get(target.id) ?? this.plugin.getClient(target.id).currentSessionState,
+        this.sessionStates.get(result.tabId) ?? this.plugin.getClient(result.tabId).currentSessionState,
       );
       this.renderConversationTabs();
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
     } catch (error) {
-      if (this.transitions.isCurrentSwitch(generation)) {
-        new Notice(`Hermesian could not switch conversations: ${this.messageFor(error)}`);
+      if (
+        error instanceof ConversationControllerError &&
+        (error.code === "cancelled" || error.code === "operation_stale")
+      ) {
+        return;
       }
-    } finally {
-      if (this.transitions.isCurrentSwitch(generation)) {
-        this.updateControls(false);
-      }
+      new Notice(`Hermesian could not switch conversations: ${this.messageFor(error)}`);
     }
   }
 
