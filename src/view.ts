@@ -1160,33 +1160,46 @@ export class HermesianSidebarView extends ItemView {
     if (this.reasoningButtonEl.disabled) {
       return;
     }
+    const activeTab = this.activeConversationTab();
+    if (!activeTab) {
+      return;
+    }
+    const targetTabId = activeTab.id;
+    let settled = false;
+
     new HermesReasoningSuggestModal(
       this.app,
       this.plugin.getReasoningEffort(),
       (effort) => {
-        void this.chooseReasoningEffort(effort);
+        if (settled) {
+          return;
+        }
+        settled = true;
+        void this.chooseReasoningEffort(targetTabId, effort);
       },
     ).open();
   }
 
-  private async chooseReasoningEffort(effort: ReasoningEffort): Promise<void> {
+  private async chooseReasoningEffort(
+    tabId: string,
+    effort: ReasoningEffort,
+  ): Promise<void> {
     if (effort === this.plugin.getReasoningEffort()) {
       return;
     }
-    const activeTab = this.activeConversationTab();
-    if (!activeTab || !this.plugin.canApplyConnectionSettings()) {
+    if (!this.plugin.canApplyConnectionSettings()) {
       return;
     }
     this.captureActiveConversationRuntime();
     this.updateControls(true, false);
     try {
-      await this.plugin.setReasoningEffort(activeTab.id, effort);
-      await this.ensureClientForTab(activeTab.id);
+      await this.plugin.setReasoningEffort(tabId, effort);
+      await this.ensureClientForTab(tabId);
       this.renderReasoningButton();
       this.appendSystemMessage(
         `Thinking depth set to ${reasoningEffortLabel(effort)}. The current Hermes session was restored.`,
         false,
-        activeTab.id,
+        tabId,
       );
     } catch (error) {
       new Notice(`Hermesian thinking-depth update failed: ${this.messageFor(error)}`);

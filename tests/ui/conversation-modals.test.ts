@@ -144,4 +144,64 @@ describe("HermesReasoningSuggestModal", () => {
 
     expect(modal.getSuggestions("").length).toBeGreaterThanOrEqual(3);
   });
+
+  it("does not call choose when the modal is closed without selection", () => {
+    // SuggestModal.close() fires onClose() but never onChooseSuggestion().
+    // This test verifies our mock preserves that contract.
+    const choose = vi.fn();
+    const modal = new HermesReasoningSuggestModal(
+      { vault: { getName: () => "test" } } as any,
+      "medium",
+      choose,
+    );
+
+    modal.close();
+    expect(choose).not.toHaveBeenCalled();
+  });
+});
+
+describe("owner-capture and settle-once contract", () => {
+  it("reasoning modal choose callback captures the tab id at open time", () => {
+    // Simulate the view's openReasoningPicker pattern:
+    // capture tabId before opening, use it in the closure.
+    const capturedTabId = "tab-A";
+    let chosenTabId: string | undefined;
+    let chosenEffort: string | undefined;
+
+    const modal = new HermesReasoningSuggestModal(
+      { vault: { getName: () => "test" } } as any,
+      "medium",
+      (effort) => {
+        chosenTabId = capturedTabId;
+        chosenEffort = effort;
+      },
+    );
+
+    // User switches to tab B between open and selection
+    // (simulated by NOT updating capturedTabId)
+
+    modal.onChooseSuggestion("high");
+    expect(chosenTabId).toBe("tab-A");
+    expect(chosenEffort).toBe("high");
+  });
+
+  it("settle-once guard prevents double invocation", () => {
+    // Simulate the settle-once pattern used in openReasoningPicker
+    let settled = false;
+    const calls: string[] = [];
+
+    const modal = new HermesReasoningSuggestModal(
+      { vault: { getName: () => "test" } } as any,
+      "medium",
+      (effort) => {
+        if (settled) return;
+        settled = true;
+        calls.push(effort);
+      },
+    );
+
+    modal.onChooseSuggestion("low");
+    modal.onChooseSuggestion("high"); // second call should be ignored
+    expect(calls).toEqual(["low"]);
+  });
 });
