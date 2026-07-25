@@ -671,3 +671,169 @@ describe("ConversationController close", () => {
     expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["base"]);
   });
 });
+
+describe("ConversationController history and restart", () => {
+  async function readySessionController(
+    workspace: ReturnType<typeof createConversationWorkspace>,
+    clients: Map<string, FakeClient>,
+  ): Promise<{
+    controller: ConversationController<FakeClient>;
+    deps: ConversationControllerDependencies<FakeClient>;
+  }> {
+    const deps = dependencies(workspace, clients.get("base")!, clients);
+    const controller = new ConversationController(deps);
+    await controller.initialize();
+    return { controller, deps };
+  }
+
+  function workspaceWithPendingTabs(...tabIds: string[]): ReturnType<typeof createConversationWorkspace> {
+    let workspace = createConversationWorkspace("base", "base-session");
+    for (const tabId of tabIds) {
+      workspace = addPendingConversationTab(workspace, tabId);
+    }
+    return { ...workspace, activeTabId: "base" };
+  }
+
+  it("binds the captured target tab even when active tab changes while loading", async () => {
+    const history = deferred<HermesHistoryItem[]>();
+    const target = fakeClient("tab-b");
+    target.loadSessionHistory = vi.fn(async (sessionId: string) => {
+      const items = await history.promise;
+      target.sessionId = sessionId;
+      return items;
+    });
+    const workspace = workspaceWithPendingTabs("tab-b");
+    const { controller, deps } = await readySessionController(
+      workspace,
+      new Map([
+        ["base", fakeClient("base")],
+        ["tab-b", target],
+      ]),
+    );
+
+    const binding = controller.bindHistorySession("tab-b", "history-session");
+    deps.workspace.setWorkspace({
+      ...deps.workspace.getWorkspace()!,
+      activeTabId: "base",
+    });
+    history.resolve([{ kind: "user", text: "history" }]);
+
+    const result = await binding;
+    expect(result).toMatchObject({ sessionId: "history-session", tabId: "tab-b" });
+    expect(result.workspace.activeTabId).toBe("base");
+    expect(result.workspace.tabs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "tab-b", sessionId: "history-session" })]),
+    );
+  });
+
+  it("reserves a history session so concurrent tabs cannot bind it twice", async () => {
+    const history = deferred<HermesHistoryItem[]>();
+    const first = fakeClient("tab-b");
+    first.loadSessionHistory = vi.fn(() => history.promise);
+    const second = fakeClient("tab-c");
+    const { controller } = await readySessionController(
+      workspaceWithPendingTabs("tab-b", "tab-c"),
+      new Map([
+        ["base", fakeClient("base")],
+        ["tab-b", first],
+        ["tab-c", second],
+      ]),
+    );
+
+    const firstBinding = controller.bindHistorySession("tab-b", "same-session");
+    await expect(controller.bindHistorySession("tab-c", "same-session")).rejects.toMatchObject({
+      code: "session_reserved",
+      tabId: "tab-c",
+    });
+    history.resolve([]);
+    await expect(firstBinding).resolves.toMatchObject({ tabId: "tab-b" });
+    expect(second.loadSessionHistory).not.toHaveBeenCalled();
+  });
+
+  it("activates an existing session owner without loading it again", async () => {
+    let workspace = workspaceWithPendingTabs("tab-b", "tab-c");
+    workspace = replaceConversationSession(workspace, "tab-b", "history-session");
+    const base = fakeClient("base");
+    const owner = fakeClient("tab-b");
+    const target = fakeClient("tab-c");
+    const { controller, deps } = await readySessionController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", owner],
+        ["tab-c", target],
+      ]),
+    );
+
+    const result = await controller.bindHistorySession("tab-c", "history-session");
+    expect(result.ownerTabId).toBe("tab-b");
+    expect(result.workspace.activeTabId).toBe("tab-b");
+    expect(target.loadSessionHistory).not.toHaveBeenCalled();
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-b");
+  });
+
+  it("does not replace a target binding when history loading fails", async () => {
+    const target = fakeClient("tab-b");
+    target.loadSessionHistory = vi.fn(async () => {
+      throw new Error("history unavailable");
+    });
+    const { controller, deps } = await readySessionController(
+      workspaceWithPendingTabs("tab-b"),
+      new Map([
+        ["base", fakeClient("base")],
+        ["tab-b", target],
+      ]),
+    );
+
+    await expect(controller.bindHistorySession("tab-b", "history-session")).rejects.toThrow(
+      "history unavailable",
+    );
+    expect(deps.workspace.getWorkspace()?.tabs.find((tab) => tab.id === "tab-b")?.sessionId).toBe(
+      null,
+    );
+  });
+
+  it("restarts only the requested tab and persists the new session", async () => {
+    let workspace = workspaceWithPendingTabs("tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "old-session");
+    const target = fakeClient("tab-b");
+    target.sessionId = "new-session";
+    target.newSession = vi.fn(async () => undefined);
+    const { controller, deps } = await readySessionController(
+      workspace,
+      new Map([
+        ["base", fakeClient("base")],
+        ["tab-b", target],
+      ]),
+    );
+
+    const result = await controller.restartConversation("tab-b");
+    expect(result).toMatchObject({ sessionId: "new-session", tabId: "tab-b" });
+    expect(result.workspace.tabs).toHaveLength(2);
+    expect(result.workspace.tabs.find((tab) => tab.id === "tab-b")?.sessionId).toBe("new-session");
+    expect(deps.workspace.getWorkspace()?.tabs.find((tab) => tab.id === "tab-b")?.sessionId).toBe(
+      "new-session",
+    );
+  });
+
+  it("keeps the old binding when restart fails", async () => {
+    let workspace = workspaceWithPendingTabs("tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "old-session");
+    const target = fakeClient("tab-b");
+    target.newSession = vi.fn(async () => {
+      throw new Error("restart unavailable");
+    });
+    const { controller, deps } = await readySessionController(
+      workspace,
+      new Map([
+        ["base", fakeClient("base")],
+        ["tab-b", target],
+      ]),
+    );
+
+    await expect(controller.restartConversation("tab-b")).rejects.toThrow("restart unavailable");
+    expect(deps.workspace.getWorkspace()?.tabs.find((tab) => tab.id === "tab-b")?.sessionId).toBe(
+      "old-session",
+    );
+  });
+});

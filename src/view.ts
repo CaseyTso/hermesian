@@ -27,7 +27,6 @@ import {
   activateConversationTab,
   ConversationTransitionCoordinator,
   isActiveConversationSession,
-  replaceConversationSession,
   shouldAutoScrollConversation,
   updateConversationTab,
   type PersistedConversationTab,
@@ -1230,6 +1229,7 @@ export class HermesianSidebarView extends ItemView {
     const workspace = this.conversationWorkspace;
     const targetTab = workspace?.tabs.find((tab) => tab.id === tabId);
     if (
+      !this.controller ||
       !workspace ||
       !targetTab ||
       this.isTabBusy(tabId) ||
@@ -1237,40 +1237,32 @@ export class HermesianSidebarView extends ItemView {
     ) {
       return;
     }
-    const existingOwner = workspace.tabs.find(
-      (tab) => tab.id !== tabId && tab.sessionId === session.sessionId,
-    );
-    if (existingOwner) {
-      await this.switchConversation(existingOwner.id);
-      new Notice(`That Hermes session is already open in conversation ${existingOwner.label}.`);
-      return;
-    }
-    if (!this.transitions.reserveSession(tabId, session.sessionId)) {
-      new Notice("That Hermes session is already opening in another conversation.");
-      return;
-    }
     this.captureActiveConversationRuntime();
     this.clientLoadingTabs.add(tabId);
     this.updateControls(false);
     try {
-      const items = await this.plugin
-        .getClient(tabId)
-        .loadSessionHistory(session.sessionId);
-      if (this.conversationWorkspace) {
-        this.conversationWorkspace = replaceConversationSession(
-          this.conversationWorkspace,
-          tabId,
-          session.sessionId,
+      const result = await this.controller.bindHistorySession(tabId, session.sessionId);
+      this.conversationWorkspace = result.workspace;
+      if (result.ownerTabId) {
+        this.showConversationMessages(result.ownerTabId);
+        this.restoreActiveConversationRuntime();
+        this.renderConversationTabs();
+        const owner = result.workspace.tabs.find((tab) => tab.id === result.ownerTabId);
+        new Notice(
+          `That Hermes session is already open in conversation ${owner?.label ?? result.ownerTabId}.`,
         );
-        await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
+        return;
       }
-      await this.renderHistorySession(session, items, true, tabId);
+      await this.renderHistorySession(session, result.items, true, tabId);
       this.turnRuntime(tabId).activeEditScope = undefined;
       this.renderConversationTabs();
     } catch (error) {
+      if (error instanceof ConversationControllerError && error.code === "session_reserved") {
+        new Notice("That Hermes session is already opening in another conversation.");
+        return;
+      }
       new Notice(`Hermesian could not load that session: ${this.messageFor(error)}`);
     } finally {
-      this.transitions.releaseSession(tabId, session.sessionId);
       this.clientLoadingTabs.delete(tabId);
       this.updateControls(false);
     }
@@ -1848,6 +1840,7 @@ export class HermesianSidebarView extends ItemView {
   async startNewSession(): Promise<void> {
     const activeTab = this.activeConversationTab();
     if (
+      !this.controller ||
       !activeTab ||
       this.controlsBusy ||
       this.isTabBusy(activeTab.id) ||
@@ -1856,30 +1849,31 @@ export class HermesianSidebarView extends ItemView {
     ) {
       return;
     }
+    const tabId = activeTab.id;
     this.captureActiveConversationRuntime();
-    this.clientLoadingTabs.add(activeTab.id);
+    this.clientLoadingTabs.add(tabId);
     this.updateControls(false);
     try {
-      const client = this.plugin.getClient(activeTab.id);
-      await client.newSession();
-      const sessionId = client.sessionId;
-      if (!sessionId) {
-        throw new Error("Hermes ACP did not return a new session ID");
+      const result = await this.controller.restartConversation(tabId);
+      this.conversationWorkspace = result.workspace;
+      this.resetConversationView(tabId);
+      this.turnRuntime(tabId).activeEditScope = undefined;
+      this.appendSystemMessage("New Hermes session started.", false, tabId);
+      if (this.conversationWorkspace.activeTabId === tabId) {
+        this.showConversationMessages(tabId);
+        this.restoreActiveConversationRuntime();
       }
-      this.conversationWorkspace = replaceConversationSession(
-        this.conversationWorkspace!,
-        activeTab.id,
-        sessionId,
-      );
-      this.resetConversationView(activeTab.id);
-      this.turnRuntime(activeTab.id).activeEditScope = undefined;
-      this.appendSystemMessage("New Hermes session started.", false, activeTab.id);
       this.renderConversationTabs();
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
     } catch (error) {
+      if (
+        error instanceof ConversationControllerError &&
+        (error.code === "cancelled" || error.code === "operation_stale")
+      ) {
+        return;
+      }
       new Notice(`Hermesian: ${this.messageFor(error)}`);
     } finally {
-      this.clientLoadingTabs.delete(activeTab.id);
+      this.clientLoadingTabs.delete(tabId);
       this.updateControls(false);
     }
   }
