@@ -65,6 +65,9 @@ import {
   type ConversationTabsCallbacks,
 } from "./ui/conversation-tabs-view";
 import {
+  createComposerView,
+} from "./ui/composer-view";
+import {
   buildSlashOutboundPrompt,
   buildSlashMenuItems,
   slashMenuInsertion,
@@ -446,19 +449,32 @@ export class HermesianSidebarView extends ItemView {
       "Select text in a Markdown note, run “Ask Hermes about selection”, then describe the change you want.",
     );
 
-    const composer = root.createDiv({ cls: "hermesian-composer" });
-    const composerContexts = composer.createDiv({ cls: "hermesian-composer-contexts" });
-    this.currentFileBarEl = composerContexts.createEl("button", {
-      attr: { type: "button" },
-      cls: "hermesian-current-file",
-    }) as HTMLButtonElement;
-    const currentFileIcon = this.currentFileBarEl.createSpan({
-      cls: "hermesian-current-file-icon",
-    });
-    setIcon(currentFileIcon, "file-text");
-    this.currentFileLabelEl = this.currentFileBarEl.createSpan({
-      cls: "hermesian-current-file-label",
-    });
+    const composerElements = createComposerView(root);
+    this.currentFileBarEl = composerElements.currentFileBarEl;
+    this.currentFileLabelEl = composerElements.currentFileLabelEl;
+    this.selectionBarEl = composerElements.selectionBarEl;
+    this.imageAttachmentBarEl = composerElements.imageAttachmentBarEl;
+    this.composerEl = composerElements.composerEl;
+    this.slashMenuEl = composerElements.slashMenuEl;
+    this.modelButtonEl = composerElements.modelButtonEl;
+    this.modelLabelEl = composerElements.modelLabelEl;
+    this.reasoningButtonEl = composerElements.reasoningButtonEl;
+    this.reasoningLabelEl = composerElements.reasoningLabelEl;
+    this.sendButtonEl = composerElements.sendButtonEl;
+    this.stopButtonEl = composerElements.stopButtonEl;
+    this.contextProgressEl = composerElements.contextProgressEl;
+    this.contextUsageEl = composerElements.contextUsageEl;
+
+    // Wire icons (needs Obsidian's setIcon)
+    setIcon(composerElements.currentFileBarEl.querySelector(".hermesian-current-file-icon")!, "file-text");
+    setIcon(composerElements.modelButtonEl.querySelector(".hermesian-model-icon")!, "bot");
+    setIcon(composerElements.modelButtonEl.querySelector(".hermesian-model-chevron")!, "chevron-down");
+    setIcon(composerElements.reasoningButtonEl.querySelector(".hermesian-reasoning-icon")!, "brain");
+    setIcon(composerElements.addSelectionButtonEl.querySelector("span")!, "paperclip");
+    setIcon(composerElements.sendButtonEl.querySelector("span")!, "arrow-right");
+    setIcon(composerElements.stopButtonEl.querySelector("span")!, "square");
+
+    // Wire event handlers
     this.currentFileBarEl.addEventListener("click", () => {
       if (!this.currentFilePath) {
         return;
@@ -469,25 +485,6 @@ export class HermesianSidebarView extends ItemView {
     });
     this.renderCurrentFile();
 
-    this.selectionBarEl = composerContexts.createDiv({ cls: "hermesian-selection-bar" });
-    this.selectionBarEl.hide();
-    this.imageAttachmentBarEl = composerContexts.createDiv({
-      cls: "hermesian-image-attachment-bar",
-    });
-    this.imageAttachmentBarEl.hide();
-
-    this.composerEl = composer.createEl("textarea", {
-      attr: {
-        "aria-autocomplete": "list",
-        "aria-controls": "hermesian-slash-menu",
-        "aria-expanded": "false",
-        "aria-label": "Message Hermes",
-        placeholder: "Ask Hermes…  ↵ to send · Shift+↵ for new line",
-        role: "combobox",
-        rows: "3",
-      },
-      cls: "hermesian-input",
-    });
     this.composerEl.addEventListener("keydown", (event) => {
       if (this.handleSlashMenuKeydown(event)) {
         return;
@@ -512,63 +509,22 @@ export class HermesianSidebarView extends ItemView {
       }, 0);
     });
 
-    this.slashMenuEl = composer.createDiv({
-      attr: {
-        "aria-label": "Hermes slash commands and skills",
-        id: "hermesian-slash-menu",
-        role: "listbox",
-      },
-      cls: "hermesian-slash-menu",
-    });
-    this.slashMenuEl.hide();
-
-    const composerFooter = composer.createDiv({ cls: "hermesian-composer-footer" });
-    const controlRow = composerFooter.createDiv({ cls: "hermesian-control-row" });
-    this.modelButtonEl = controlRow.createEl("button", {
-      attr: { "aria-label": "Select Hermes model" },
-      cls: "hermesian-model-button",
-    });
-    const modelIcon = this.modelButtonEl.createSpan({ cls: "hermesian-model-icon" });
-    setIcon(modelIcon, "bot");
-    this.modelLabelEl = this.modelButtonEl.createSpan({
-      text: "Loading model…",
-      cls: "hermesian-model-label",
-    });
-    const chevron = this.modelButtonEl.createSpan({ cls: "hermesian-model-chevron" });
-    setIcon(chevron, "chevron-down");
     this.modelButtonEl.addEventListener("click", () => this.openModelPicker());
-
-    this.reasoningButtonEl = controlRow.createEl("button", {
-      attr: { "aria-label": "Adjust Hermes thinking depth" },
-      cls: "hermesian-reasoning-button",
-    });
-    const reasoningIcon = this.reasoningButtonEl.createSpan({ cls: "hermesian-reasoning-icon" });
-    setIcon(reasoningIcon, "brain");
-    this.reasoningLabelEl = this.reasoningButtonEl.createSpan({ cls: "hermesian-reasoning-label" });
     this.renderReasoningButton();
     this.reasoningButtonEl.addEventListener("click", () => {
       void this.openReasoningPicker();
     });
 
-    const addSelectionButton = controlRow.createEl("button", {
-      attr: {
-        "aria-label": "Add selection",
-        title: "Add selection",
-        type: "button",
-      },
-      cls: "clickable-icon hermesian-add-selection",
-    });
-    setIcon(addSelectionButton, "paperclip");
     let selectionSource: MarkdownView | undefined;
     let renderedSelection = "";
-    addSelectionButton.addEventListener("pointerdown", (event) => {
+    composerElements.addSelectionButtonEl.addEventListener("pointerdown", (event) => {
       selectionSource =
         this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
       renderedSelection =
         this.containerEl.ownerDocument.getSelection()?.toString() ?? "";
       event.preventDefault();
     });
-    addSelectionButton.addEventListener("click", () => {
+    composerElements.addSelectionButtonEl.addEventListener("click", () => {
       const source = selectionSource;
       const selectedText = renderedSelection;
       selectionSource = undefined;
@@ -576,46 +532,14 @@ export class HermesianSidebarView extends ItemView {
       void this.plugin.captureAndAttachSelection(source, selectedText);
     });
 
-    this.sendButtonEl = controlRow.createEl("button", {
-      attr: {
-        "aria-label": "Send message",
-        title: "Send message",
-        type: "button",
-      },
-      cls: "clickable-icon hermesian-primary-action is-send",
-    });
-    const sendIcon = this.sendButtonEl.createSpan();
-    setIcon(sendIcon, "arrow-right");
     this.sendButtonEl.addEventListener("click", () => {
       void this.sendMessage();
     });
-
-    this.stopButtonEl = controlRow.createEl("button", {
-      attr: {
-        "aria-label": "Stop response",
-        title: "Stop response",
-        type: "button",
-      },
-      cls: "clickable-icon hermesian-primary-action is-stop",
-    });
-    const stopIcon = this.stopButtonEl.createSpan();
-    setIcon(stopIcon, "square");
-    this.stopButtonEl.hide();
     this.stopButtonEl.addEventListener("click", () => {
       const activeTab = this.activeConversationTab();
       if (activeTab) {
         void this.plugin.getClient(activeTab.id).cancel();
       }
-    });
-
-    const context = composerFooter.createDiv({ cls: "hermesian-context" });
-    this.contextUsageEl = context.createDiv({
-      text: "Context —",
-      cls: "hermesian-context-label",
-    });
-    const contextTrack = context.createDiv({ cls: "hermesian-context-track" });
-    this.contextProgressEl = contextTrack.createDiv({
-      cls: "hermesian-context-progress",
     });
   }
 
