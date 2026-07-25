@@ -63,7 +63,10 @@ import {
   type ConversationTabsCallbacks,
 } from "./ui/conversation-tabs-view";
 import {
+  applyComposerState,
   createComposerView,
+  type ComposerCallbacks,
+  type ComposerState,
 } from "./ui/composer-view";
 import {
   buildSlashOutboundPrompt,
@@ -469,7 +472,38 @@ export class HermesianSidebarView extends ItemView {
       "Select text in a Markdown note, run “Ask Hermes about selection”, then describe the change you want.",
     );
 
-    const composerElements = createComposerView(root);
+    const composerCallbacks: ComposerCallbacks = {
+      onDraftChange: (_draft: string) => {
+        this.renderSlashMenu(true);
+        this.captureActiveConversationRuntime();
+      },
+      onPaste: (event: ClipboardEvent) => {
+        void this.handleComposerPaste(event);
+      },
+      onSend: () => {
+        void this.sendMessage();
+      },
+      onStop: () => {
+        const activeTab = this.activeConversationTab();
+        if (activeTab) {
+          void this.plugin.getClient(activeTab.id).cancel();
+        }
+      },
+    };
+
+    const initialComposerState: ComposerState = {
+      disabled: true,
+      draft: "",
+      placeholder: "Ask Hermes…  ↵ to send · Shift+↵ for new line",
+      sendEnabled: false,
+      stopVisible: false,
+    };
+
+    const composerElements = createComposerView(
+      root,
+      initialComposerState,
+      composerCallbacks,
+    );
     this.currentFileBarEl = composerElements.currentFileBarEl;
     this.currentFileLabelEl = composerElements.currentFileLabelEl;
     this.selectionBarEl = composerElements.selectionBarEl;
@@ -514,13 +548,6 @@ export class HermesianSidebarView extends ItemView {
         void this.sendMessage();
       }
     });
-    this.composerEl.addEventListener("paste", (event) => {
-      void this.handleComposerPaste(event);
-    });
-    this.composerEl.addEventListener("input", () => {
-      this.renderSlashMenu(true);
-      this.captureActiveConversationRuntime();
-    });
     this.composerEl.addEventListener("blur", () => {
       window.setTimeout(() => {
         if (!this.slashMenuEl.contains(this.containerEl.ownerDocument.activeElement)) {
@@ -552,14 +579,10 @@ export class HermesianSidebarView extends ItemView {
       void this.plugin.captureAndAttachSelection(source, selectedText);
     });
 
-    this.sendButtonEl.addEventListener("click", () => {
-      void this.sendMessage();
-    });
-    this.stopButtonEl.addEventListener("click", () => {
-      const activeTab = this.activeConversationTab();
-      if (activeTab) {
-        void this.plugin.getClient(activeTab.id).cancel();
-      }
+    this.modelButtonEl.addEventListener("click", () => this.openModelPicker());
+    this.renderReasoningButton();
+    this.reasoningButtonEl.addEventListener("click", () => {
+      void this.openReasoningPicker();
     });
   }
 
@@ -2010,32 +2033,36 @@ export class HermesianSidebarView extends ItemView {
     if (!availability.composer) {
       this.hideSlashMenu();
     }
-    this.sendButtonEl.disabled = !availability.send;
-    this.composerEl.disabled = !availability.composer;
+    applyComposerState(
+      {
+        composerEl: this.composerEl,
+        sendButtonEl: this.sendButtonEl,
+        stopButtonEl: this.stopButtonEl,
+      },
+      {
+        disabled: !availability.composer,
+        draft: this.composerEl.value,
+        placeholder: this.composerPlaceholder(),
+        sendEnabled: availability.send,
+        stopVisible: availability.stop,
+      },
+    );
     this.renderAddConversationControl();
     this.historyButtonEl.disabled = !availability.history;
     this.reasoningButtonEl.disabled = !availability.reasoning;
     this.renderConversationTabs();
     this.renderSessionState(this.activeSessionState());
-    this.updateComposerPlaceholder();
-    if (availability.stop) {
-      this.sendButtonEl.hide();
-      this.stopButtonEl.show();
-    } else {
-      this.stopButtonEl.hide();
-      this.sendButtonEl.show();
-      if (availability.composer) {
-        this.composerEl.focus();
-      }
-    }
+  }
+
+  private composerPlaceholder(): string {
+    const activeTabId = this.conversationWorkspace?.activeTabId;
+    return activeTabId && this.isTabLoading(activeTabId)
+      ? "Draft here — this conversation is starting"
+      : "Ask Hermes…  ↵ to send · Shift+↵ for new line";
   }
 
   private updateComposerPlaceholder(): void {
-    const activeTabId = this.conversationWorkspace?.activeTabId;
-    this.composerEl.placeholder =
-      activeTabId && this.isTabLoading(activeTabId)
-        ? "Draft here — this conversation is starting"
-        : "Ask Hermes…  ↵ to send · Shift+↵ for new line";
+    this.composerEl.placeholder = this.composerPlaceholder();
   }
 
   private scrollToBottom(sourceTabId?: string): void {

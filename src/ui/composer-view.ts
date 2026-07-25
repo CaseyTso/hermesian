@@ -17,7 +17,35 @@ export interface ComposerElements {
   stopButtonEl: HTMLButtonElement;
 }
 
-export function createComposerView(parent: HTMLElement): ComposerElements {
+export interface ComposerState {
+  /** Whether the composer textarea is disabled (e.g., during initialization). */
+  disabled: boolean;
+  /** Current draft text. */
+  draft: string;
+  /** Placeholder shown when the textarea is empty. */
+  placeholder: string;
+  /** Whether the Send button is enabled. */
+  sendEnabled: boolean;
+  /** Whether the Stop button should be shown instead of Send. */
+  stopVisible: boolean;
+}
+
+export interface ComposerCallbacks {
+  /** Called when the user modifies the draft text. */
+  onDraftChange(draft: string): void;
+  /** Called on Enter (without Shift) or Send button click. */
+  onSend(): void;
+  /** Called on Stop button click. */
+  onStop(): void;
+  /** Called on paste events for image handling. */
+  onPaste(event: ClipboardEvent): void;
+}
+
+export function createComposerView(
+  parent: HTMLElement,
+  state: ComposerState,
+  callbacks: ComposerCallbacks,
+): ComposerElements {
   const composerHostEl = parent.createDiv({ cls: "hermesian-composer" });
   const composerContexts = composerHostEl.createDiv({ cls: "hermesian-composer-contexts" });
 
@@ -28,7 +56,6 @@ export function createComposerView(parent: HTMLElement): ComposerElements {
   const currentFileIcon = currentFileBarEl.createSpan({
     cls: "hermesian-current-file-icon",
   });
-  // setIcon call must be done by the caller (needs Obsidian's setIcon)
   currentFileIcon.empty();
   const currentFileLabelEl = currentFileBarEl.createSpan({
     cls: "hermesian-current-file-label",
@@ -47,12 +74,15 @@ export function createComposerView(parent: HTMLElement): ComposerElements {
       "aria-controls": "hermesian-slash-menu",
       "aria-expanded": "false",
       "aria-label": "Message Hermes",
-      placeholder: "Ask Hermes…  ↵ to send · Shift+↵ for new line",
+      placeholder: state.placeholder,
       role: "combobox",
       rows: "3",
     },
     cls: "hermesian-input",
   }) as HTMLTextAreaElement;
+
+  composerEl.value = state.draft;
+  composerEl.disabled = state.disabled;
 
   const slashMenuEl = composerHostEl.createDiv({
     attr: {
@@ -120,7 +150,36 @@ export function createComposerView(parent: HTMLElement): ComposerElements {
   });
   const stopIcon = stopButtonEl.createSpan();
   stopIcon.empty();
-  stopButtonEl.hide();
+
+  // Apply initial visibility
+  applyComposerState({ sendButtonEl, stopButtonEl, composerEl }, state);
+
+  // --- Event wiring ---
+  composerEl.addEventListener("input", () => {
+    callbacks.onDraftChange(composerEl.value);
+  });
+
+  composerEl.addEventListener("paste", (event) => {
+    callbacks.onPaste(event);
+  });
+
+  composerEl.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      if (!slashMenuEl.contains(composerHostEl.ownerDocument.activeElement)) {
+        slashMenuEl.hide();
+      }
+    }, 0);
+  });
+
+  sendButtonEl.addEventListener("click", () => {
+    if (state.sendEnabled) {
+      callbacks.onSend();
+    }
+  });
+
+  stopButtonEl.addEventListener("click", () => {
+    callbacks.onStop();
+  });
 
   const context = composerFooter.createDiv({ cls: "hermesian-context" });
   const contextUsageEl = context.createDiv({
@@ -150,4 +209,23 @@ export function createComposerView(parent: HTMLElement): ComposerElements {
     slashMenuEl,
     stopButtonEl,
   };
+}
+
+export function applyComposerState(
+  elements: Pick<ComposerElements, "composerEl" | "sendButtonEl" | "stopButtonEl">,
+  state: ComposerState,
+): void {
+  elements.composerEl.disabled = state.disabled;
+  elements.sendButtonEl.disabled = !state.sendEnabled;
+
+  if (state.stopVisible) {
+    elements.sendButtonEl.hide();
+    elements.stopButtonEl.show();
+  } else {
+    elements.stopButtonEl.hide();
+    elements.sendButtonEl.show();
+    if (!state.disabled) {
+      elements.composerEl.focus();
+    }
+  }
 }
