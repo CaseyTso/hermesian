@@ -620,6 +620,25 @@ export class ConversationController<TClient extends ConversationClient> {
     if (!workspace || !target) {
       throw this.controllerError("workspace_conflict", "Conversation tab was not found", tabId);
     }
+    // Target-scoped guard: reject if the target tab is already busy/loading/closing/model/permission.
+    const targetOperation = this.snapshot.tabOperations.get(tabId);
+    if (targetOperation) {
+      if (targetOperation.closing) {
+        throw this.controllerError("operation_stale", "Conversation tab is already closing", tabId);
+      }
+      if (targetOperation.prompt === "running") {
+        throw this.controllerError("operation_stale", "Conversation tab is busy", tabId);
+      }
+      if (targetOperation.connection === "loading") {
+        throw this.controllerError("operation_stale", "Conversation tab is loading", tabId);
+      }
+      if (targetOperation.sessionOperation === "model") {
+        throw this.controllerError("operation_stale", "Conversation tab is switching model", tabId);
+      }
+      if (targetOperation.permissionPending) {
+        throw this.controllerError("operation_stale", "Conversation tab has a pending permission", tabId);
+      }
+    }
     const closingActive = workspace.activeTabId === tabId;
     const generation = this.operations.beginTransition();
     const token = this.operations.begin(tabId);

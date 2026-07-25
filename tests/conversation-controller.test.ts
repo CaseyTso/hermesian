@@ -674,6 +674,84 @@ describe("ConversationController close", () => {
     });
     expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["base"]);
   });
+
+  it("rejects closing a busy target without affecting other tabs", async () => {
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const target = fakeClient("tab-b");
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", target],
+      ]),
+    );
+
+    controller.setPromptRunning("base", true);
+    await expect(controller.closeConversation("base")).rejects.toMatchObject({
+      code: "operation_stale",
+      tabId: "base",
+    });
+    // Workspace unchanged — old tab still present.
+    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["base", "tab-b"]);
+    expect(deps.clients.releaseClient).not.toHaveBeenCalled();
+  });
+
+  it("allows closing idle tab-b while tab-a is busy", async () => {
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const target = fakeClient("tab-b");
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", target],
+      ]),
+    );
+
+    controller.setPromptRunning("base", true);
+    // Closing idle tab-b should succeed even though base is busy.
+    const result = await controller.closeConversation("tab-b");
+    expect(result).toMatchObject({ tabId: "tab-b" });
+    expect(result.workspace.tabs.map((tab) => tab.id)).toEqual(["base"]);
+    expect(deps.clients.releaseClient).toHaveBeenCalledWith("tab-b");
+    // base was not released.
+    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
+  });
+
+  it("rejects duplicate close of an already-closing tab", async () => {
+    const history = deferred<HermesHistoryItem[]>();
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const target = fakeClient("tab-b");
+    target.loadSessionHistory = vi.fn(() => history.promise);
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", target],
+      ]),
+    );
+
+    const firstClose = controller.closeConversation("base");
+    // While the first close is still preparing, a second close of the same tab should be rejected.
+    await expect(controller.closeConversation("base")).rejects.toMatchObject({
+      code: "operation_stale",
+      tabId: "base",
+    });
+    history.resolve([]);
+    await firstClose;
+    expect(deps.clients.releaseClient).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("ConversationController history and restart", () => {

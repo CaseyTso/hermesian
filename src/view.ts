@@ -615,10 +615,8 @@ export class HermesianSidebarView extends ItemView {
     return this.controller?.getSnapshot().tabOperations.get(tabId)?.connection === "loading";
   }
 
-  private hasClosingTab(): boolean {
-    return Array.from(this.controller?.getSnapshot().tabOperations.values() ?? []).some(
-      (operation) => operation.closing,
-    );
+  private isTabClosing(tabId: string): boolean {
+    return this.controller?.getSnapshot().tabOperations.get(tabId)?.closing === true;
   }
 
   private hasPendingPermission(tabId: string): boolean {
@@ -783,7 +781,7 @@ export class HermesianSidebarView extends ItemView {
     if (
       !this.controller ||
       !this.controlAvailability().add ||
-      this.hasClosingTab() ||
+      this.isTabClosing(this.activeConversationTab()?.id ?? "") ||
       this.activeSessionState().switchingModel
     ) {
       return;
@@ -836,7 +834,7 @@ export class HermesianSidebarView extends ItemView {
       !workspace ||
       !workspace.tabs.some((tab) => tab.id === tabId) ||
       !this.tabControlAvailability(tabId).close ||
-      this.hasClosingTab() ||
+      this.isTabClosing(tabId) ||
       this.isTabBusy(tabId) ||
       this.hasPendingPermission(tabId) ||
       this.controller?.getSnapshot().sessionStates.get(tabId)?.switchingModel
@@ -896,7 +894,7 @@ export class HermesianSidebarView extends ItemView {
     if (
       !this.controller ||
       !this.controlAvailability().tabNavigation ||
-      this.hasClosingTab() ||
+      this.isTabClosing(tabId) ||
       this.isTabLoading(tabId)
     ) {
       return;
