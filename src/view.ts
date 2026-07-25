@@ -63,6 +63,10 @@ import {
   type ConversationTabsCallbacks,
 } from "./ui/conversation-tabs-view";
 import {
+  createSidebarShell,
+  type SidebarShellCallbacks,
+} from "./ui/sidebar-shell";
+import {
   applyComposerState,
   createComposerView,
   type ComposerCallbacks,
@@ -415,61 +419,32 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private renderShell(): void {
-    const root = this.containerEl.children[1] as HTMLElement;
-    root.empty();
-    root.addClass("hermesian-view");
-
-    const header = root.createDiv({ cls: "hermesian-header" });
-    const identity = header.createDiv({ cls: "hermesian-identity" });
-    const logo = identity.createSpan({ cls: "hermesian-logo" });
-    setIcon(logo, HERMESIAN_ICON_ID);
-    identity.createSpan({ text: "Hermesian", cls: "hermesian-title" });
-    this.statusEl = identity.createSpan({
-      attr: {
-        "aria-atomic": "true",
-        "aria-live": "polite",
-        role: "status",
+    const callbacks: SidebarShellCallbacks = {
+      onAddConversation: () => {
+        void this.addConversation();
       },
-      text: "Disconnected",
-      cls: "hermesian-status",
-    });
-
-    const headerActions = header.createDiv({ cls: "hermesian-header-actions" });
-    this.addConversationButtonEl = headerActions.createEl("button", {
-      attr: {
-        "aria-label": "Add conversation",
-        title: "Add conversation",
-        type: "button",
+      onMessagesClick: (event: MouseEvent) => {
+        this.openRenderedLink(event);
       },
-      cls: "clickable-icon",
-    });
-    setIcon(this.addConversationButtonEl, "square-plus");
-    this.addConversationButtonEl.addEventListener("click", () => {
-      void this.addConversation();
-    });
-    this.historyButtonEl = headerActions.createEl("button", {
-      attr: {
-        "aria-label": "View Hermes history",
-        title: "Browse and resume historical sessions",
+      onOpenHistory: () => {
+        void this.openHistoryPicker();
       },
-      cls: "clickable-icon",
-    });
-    setIcon(this.historyButtonEl, "history");
-    this.historyButtonEl.addEventListener("click", () => {
-      void this.openHistoryPicker();
-    });
+    };
 
-    this.conversationTabsEl = root.createDiv({
-      attr: { "aria-label": "Hermes conversations", role: "tablist" },
-      cls: "hermesian-conversation-tabs",
-    });
+    const shell = createSidebarShell(this.containerEl, callbacks);
+    this.statusEl = shell.statusEl;
+    this.addConversationButtonEl = shell.addConversationButtonEl;
+    this.historyButtonEl = shell.historyButtonEl;
+    this.conversationTabsEl = shell.conversationTabsEl;
+    this.messagesEl = shell.messagesEl;
 
-    this.messagesEl = root.createDiv({ cls: "hermesian-messages" });
-    this.messagesEl.addEventListener("click", (event) => {
-      this.openRenderedLink(event);
-    });
+    // Wire icons (needs Obsidian's setIcon)
+    setIcon(shell.root.querySelector(".hermesian-logo")!, HERMESIAN_ICON_ID);
+    setIcon(shell.addConversationButtonEl, "square-plus");
+    setIcon(shell.historyButtonEl, "history");
+
     this.appendSystemMessage(
-      "Select text in a Markdown note, run “Ask Hermes about selection”, then describe the change you want.",
+      "Select text in a Markdown note, run 'Ask Hermes about selection', then describe the change you want.",
     );
 
     const composerCallbacks: ComposerCallbacks = {
@@ -500,7 +475,7 @@ export class HermesianSidebarView extends ItemView {
     };
 
     const composerElements = createComposerView(
-      root,
+      shell.root,
       initialComposerState,
       composerCallbacks,
     );
