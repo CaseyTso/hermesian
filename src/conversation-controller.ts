@@ -4,9 +4,10 @@ import {
   type ConversationRuntimeState,
   type TabOperationState,
 } from "./conversation-runtime";
-import type {
-  PersistedConversationTab,
-  PersistedConversationWorkspace,
+import {
+  replaceConversationSession,
+  type PersistedConversationTab,
+  type PersistedConversationWorkspace,
 } from "./conversation-tabs";
 
 export interface ConversationClient {
@@ -54,6 +55,7 @@ export interface ConversationControllerDependencies<
   TClient extends ConversationClient,
 > {
   clients: ConversationClientPort<TClient>;
+  createTabId?: () => string;
   workspace: ConversationWorkspacePort;
 }
 
@@ -66,6 +68,11 @@ export interface ConversationControllerSnapshot {
 }
 
 export interface ConversationInitializationResult {
+  items?: HermesHistoryItem[];
+  sessionId: string;
+  started: boolean;
+  replaced: boolean;
+  tabId: string;
   workspace: PersistedConversationWorkspace;
 }
 
@@ -73,6 +80,9 @@ export interface EnsureClientResult {
   items?: HermesHistoryItem[];
   sessionId: string;
   started: boolean;
+  replaced: boolean;
+  tabId: string;
+  workspace: PersistedConversationWorkspace;
 }
 
 export interface AddConversationResult {
@@ -132,16 +142,44 @@ function runtimeForWorkspace(
   return operations;
 }
 
+function createPendingWorkspace(tabId: string): PersistedConversationWorkspace {
+  const id = tabId.trim();
+  if (!id) {
+    throw new ConversationControllerError(
+      "workspace_conflict",
+      "Conversation tab ID must not be empty",
+    );
+  }
+  return {
+    activeTabId: id,
+    nextLabel: 2,
+    tabs: [
+      {
+        draft: "",
+        id,
+        includeCurrentDocumentContext: true,
+        label: 1,
+        sessionId: null,
+      },
+    ],
+    version: 2,
+  };
+}
+
 export class ConversationController<TClient extends ConversationClient> {
   private readonly listeners = new Set<
     (snapshot: ConversationControllerSnapshot) => void
   >();
   private readonly operations = new ConversationOperationCoordinator();
+  private readonly dependencies: ConversationControllerDependencies<TClient>;
+  private disposed = false;
+  private initializationPromise: Promise<ConversationInitializationResult> | undefined;
   private snapshot: ConversationControllerSnapshot;
 
   constructor(
     dependencies: ConversationControllerDependencies<TClient>,
   ) {
+    this.dependencies = dependencies;
     const workspace = copyWorkspace(dependencies.workspace.getWorkspace());
     this.snapshot = Object.freeze({
       globalOperation: "idle",
@@ -172,31 +210,271 @@ export class ConversationController<TClient extends ConversationClient> {
   }
 
   initialize(): Promise<ConversationInitializationResult> {
-    return this.notImplemented("initialize");
+    if (this.initializationPromise) {
+      return this.initializationPromise;
+    }
+    if (this.disposed) {
+      return Promise.reject(this.controllerError("cancelled", "Controller is shut down"));
+    }
+    const promise = this.initializeInternal();
+    this.initializationPromise = promise;
+    return promise;
   }
 
-  ensureClientForTab(_tabId: string): Promise<EnsureClientResult> {
-    return this.notImplemented("ensureClientForTab");
+  ensureClientForTab(tabId: string): Promise<EnsureClientResult> {
+    if (this.snapshot.initializing) {
+      return Promise.reject(
+        this.controllerError("cancelled", "Conversation initialization is still pending", tabId),
+      );
+    }
+    return this.ensureClientForTabInternal(
+      tabId,
+      this.snapshot.workspace,
+      this.operations.beginTransition(),
+    );
+  }
+
+  private async initializeInternal(): Promise<ConversationInitializationResult> {
+    const generation = this.operations.beginTransition();
+    this.publish({
+      ...this.snapshot,
+      globalOperation: "reconnecting",
+      initializing: true,
+      transitionGeneration: generation,
+    });
+
+    let workspace = copyWorkspace(this.dependencies.workspace.getWorkspace());
+    if (!workspace) {
+      const tabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
+      workspace = createPendingWorkspace(tabId);
+      this.publishWorkspace(workspace);
+    }
+
+    try {
+      const result = await this.ensureClientForTabInternal(
+        workspace.activeTabId,
+        workspace,
+        generation,
+      );
+      this.assertCurrentTransition(generation);
+      const latestWorkspace =
+        copyWorkspace(this.dependencies.workspace.getWorkspace()) ?? result.workspace;
+      this.publish({
+        ...this.snapshot,
+        globalOperation: "idle",
+        initializing: false,
+        tabOperations: runtimeForWorkspace(latestWorkspace),
+        transitionGeneration: this.operations.getTransitionGeneration(),
+        workspace: latestWorkspace,
+      });
+      return { ...result, workspace: latestWorkspace };
+    } finally {
+      if (this.isCurrentTransition(generation)) {
+        this.publish({
+          ...this.snapshot,
+          globalOperation: "idle",
+          initializing: false,
+          transitionGeneration: this.operations.getTransitionGeneration(),
+        });
+      }
+    }
+  }
+
+  private async ensureClientForTabInternal(
+    tabId: string,
+    workspaceOverride: PersistedConversationWorkspace | undefined,
+    generation: number,
+  ): Promise<EnsureClientResult> {
+    const token = this.operations.begin(tabId);
+    let succeeded = false;
+    let workspace = copyWorkspace(
+      workspaceOverride ?? this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+    );
+    const tab = workspace?.tabs.find((candidate) => candidate.id === tabId);
+    if (!workspace || !tab) {
+      this.operations.complete(token);
+      throw this.controllerError("workspace_conflict", "Conversation tab was not found", tabId);
+    }
+
+    const client = this.dependencies.clients.acquireClient(tabId);
+    this.assertCurrentOperation(tabId, client, token, generation);
+    this.updateTabOperation(tabId, {
+      connection: "loading",
+      hasSession: Boolean(tab.sessionId),
+    });
+
+    try {
+      await client.connect();
+      this.assertCurrentOperation(tabId, client, token, generation);
+
+      let items: HermesHistoryItem[] | undefined;
+      let started = false;
+      let sessionId: string | undefined;
+      let replaced = false;
+      let changedWorkspace = false;
+      if (tab.sessionId) {
+        try {
+          items = await client.loadSessionHistory(tab.sessionId);
+          sessionId = client.sessionId ?? tab.sessionId;
+        } catch (loadError) {
+          this.assertCurrentOperation(tabId, client, token, generation);
+          await client.newSession();
+          this.assertCurrentOperation(tabId, client, token, generation);
+          sessionId = client.sessionId;
+          if (!sessionId) {
+            throw new ConversationControllerError(
+              "client_unavailable",
+              `Hermes did not return a replacement session after load failure: ${String(loadError)}`,
+              tabId,
+            );
+          }
+          started = true;
+          replaced = true;
+          workspace = replaceConversationSession(workspace, tabId, sessionId);
+          changedWorkspace = true;
+        }
+      } else {
+        sessionId = client.sessionId;
+        if (!sessionId) {
+          throw this.controllerError("client_unavailable", "Hermes did not return a session ID", tabId);
+        }
+        workspace = replaceConversationSession(workspace, tabId, sessionId);
+        changedWorkspace = true;
+        started = true;
+      }
+
+      if (!sessionId) {
+        throw this.controllerError("client_unavailable", "Hermes session is unavailable", tabId);
+      }
+      this.assertCurrentOperation(tabId, client, token, generation);
+      if (changedWorkspace) {
+        await this.dependencies.workspace.setWorkspace(workspace, {
+          flush: true,
+          save: true,
+        });
+        this.assertCurrentOperation(tabId, client, token, generation);
+      }
+      this.publishWorkspace(workspace);
+      this.updateTabOperation(tabId, {
+        connection: "ready",
+        hasSession: true,
+        sessionOperation: "idle",
+      });
+      succeeded = true;
+      return {
+        items,
+        sessionId,
+        started,
+        replaced,
+        tabId,
+        workspace: copyWorkspace(workspace)!,
+      };
+    } catch (error) {
+      if (this.isCurrentTransition(generation) && this.operations.isCurrent(token)) {
+        this.updateTabOperation(tabId, { connection: "failed" });
+      }
+      throw error;
+    } finally {
+      this.operations.complete(token);
+      if (!succeeded && this.isCurrentTransition(generation)) {
+        this.updateTabOperation(tabId, { connection: "failed" });
+      }
+    }
+  }
+
+  private assertCurrentOperation(
+    tabId: string,
+    client: TClient,
+    token: ReturnType<ConversationOperationCoordinator["begin"]>,
+    generation: number,
+  ): void {
+    this.assertCurrentTransition(generation);
+    if (
+      !this.operations.isCurrent(token) ||
+      !this.dependencies.clients.isCurrentClient(tabId, client)
+    ) {
+      throw this.controllerError("operation_stale", "Conversation operation is stale", tabId);
+    }
+  }
+
+  private assertCurrentTransition(generation: number): void {
+    if (!this.isCurrentTransition(generation)) {
+      throw this.controllerError("cancelled", "Conversation operation was cancelled");
+    }
+  }
+
+  private isCurrentTransition(generation: number): boolean {
+    return !this.disposed && this.operations.isCurrentTransition(generation);
+  }
+
+  private publishWorkspace(workspace: PersistedConversationWorkspace): void {
+    this.publish({
+      ...this.snapshot,
+      tabOperations: runtimeForWorkspace(workspace),
+      workspace: copyWorkspace(workspace),
+    });
+  }
+
+  private updateTabOperation(
+    tabId: string,
+    patch: Partial<TabOperationState>,
+  ): void {
+    const current = this.snapshot.tabOperations.get(tabId);
+    if (!current) {
+      return;
+    }
+    const tabOperations = new Map(this.snapshot.tabOperations);
+    tabOperations.set(tabId, Object.freeze({ ...current, ...patch }));
+    this.publish({ ...this.snapshot, tabOperations });
+  }
+
+  private controllerError(
+    code: ConversationErrorCode,
+    message: string,
+    tabId?: string,
+  ): ConversationControllerError {
+    return new ConversationControllerError(code, message, tabId);
   }
 
   addConversation(): Promise<AddConversationResult> {
-    return this.notImplemented("addConversation");
+    const blocked = this.blockedDuringStartup<AddConversationResult>("addConversation");
+    return blocked ?? this.notImplemented("addConversation");
   }
 
-  switchConversation(_tabId: string): Promise<SwitchConversationResult> {
-    return this.notImplemented("switchConversation");
+  switchConversation(tabId: string): Promise<SwitchConversationResult> {
+    const blocked = this.blockedDuringStartup<SwitchConversationResult>("switchConversation", tabId);
+    return blocked ?? this.notImplemented("switchConversation");
   }
 
-  closeConversation(_tabId: string): Promise<CloseConversationResult> {
-    return this.notImplemented("closeConversation");
+  closeConversation(tabId: string): Promise<CloseConversationResult> {
+    const blocked = this.blockedDuringStartup<CloseConversationResult>("closeConversation", tabId);
+    return blocked ?? this.notImplemented("closeConversation");
   }
 
-  bindHistorySession(_tabId: string, _sessionId: string): Promise<HistoryBindResult> {
-    return this.notImplemented("bindHistorySession");
+  bindHistorySession(tabId: string, _sessionId: string): Promise<HistoryBindResult> {
+    const blocked = this.blockedDuringStartup<HistoryBindResult>("bindHistorySession", tabId);
+    return blocked ?? this.notImplemented("bindHistorySession");
   }
 
-  restartConversation(_tabId: string): Promise<RestartConversationResult> {
-    return this.notImplemented("restartConversation");
+  restartConversation(tabId: string): Promise<RestartConversationResult> {
+    const blocked = this.blockedDuringStartup<RestartConversationResult>("restartConversation", tabId);
+    return blocked ?? this.notImplemented("restartConversation");
+  }
+
+  private blockedDuringStartup<T>(
+    operation: string,
+    tabId?: string,
+  ): Promise<T> | undefined {
+    if (this.disposed || this.snapshot.initializing) {
+      return Promise.reject(
+        this.controllerError(
+          "cancelled",
+          `ConversationController.${operation} is unavailable during initialization`,
+          tabId,
+        ),
+      );
+    }
+    return undefined;
   }
 
   updateClientState(_tabId: string, _state: HermesSessionState): void {
@@ -220,8 +498,22 @@ export class ConversationController<TClient extends ConversationClient> {
     this.notImplemented("invalidateVisibleTransition");
   }
 
-  shutdown(): Promise<void> {
-    return this.notImplemented("shutdown");
+  async shutdown(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    this.operations.invalidateTransition();
+    const tabIds = Array.from(this.snapshot.tabOperations.keys());
+    await Promise.allSettled(
+      tabIds.map((tabId) => this.dependencies.clients.releaseClient(tabId)),
+    );
+    this.publish({
+      ...this.snapshot,
+      globalOperation: "idle",
+      initializing: false,
+      transitionGeneration: this.operations.getTransitionGeneration(),
+    });
   }
 
   private publish(snapshot: ConversationControllerSnapshot): void {

@@ -7,6 +7,7 @@ import {
   type ConversationControllerDependencies,
 } from "../src/conversation-controller";
 import { createConversationWorkspace } from "../src/conversation-tabs";
+import type { HermesHistoryItem } from "../src/types";
 
 interface FakeClient extends ConversationClient {
   id: string;
@@ -38,20 +39,26 @@ function fakeClient(id: string): FakeClient {
 }
 
 function dependencies(
-  workspace: ReturnType<typeof createConversationWorkspace>,
+  workspace: ReturnType<typeof createConversationWorkspace> | undefined,
   client: FakeClient,
+  clientsByTab?: Map<string, FakeClient>,
 ): ConversationControllerDependencies<FakeClient> {
+  const clients = clientsByTab ?? new Map([[client.id, client]]);
+  let currentWorkspace = workspace;
   return {
     clients: {
-      acquireClient: vi.fn(() => client),
-      getClient: vi.fn(() => client),
-      isCurrentClient: vi.fn(() => true),
+      acquireClient: vi.fn((tabId: string) => clients.get(tabId) ?? client),
+      getClient: vi.fn((tabId: string) => clients.get(tabId)),
+      isCurrentClient: vi.fn((tabId: string, candidate: FakeClient) => clients.get(tabId) === candidate),
       releaseClient: vi.fn(async () => undefined),
     },
     workspace: {
-      getWorkspace: vi.fn(() => workspace),
-      setWorkspace: vi.fn(),
+      getWorkspace: vi.fn(() => currentWorkspace),
+      setWorkspace: vi.fn((nextWorkspace) => {
+        currentWorkspace = nextWorkspace;
+      }),
     },
+    createTabId: () => client.id,
   };
 }
 
@@ -144,8 +151,148 @@ describe("ConversationController boundary", () => {
     );
 
     expect(controller.getSnapshot().tabOperations.get("tab-a")?.connection).toBe("ready");
-    connect.resolve();
-    await connect.promise;
     expect(client.connect).not.toHaveBeenCalled();
+  });
+});
+
+describe("ConversationController initialization", () => {
+  it("creates and persists the first tab when no workspace exists", async () => {
+    const client = fakeClient("tab-new");
+    const deps = dependencies(undefined, client);
+    const controller = new ConversationController(deps);
+
+    const result = await controller.initialize();
+
+    expect(deps.clients.acquireClient).toHaveBeenCalledWith("tab-new");
+    expect(client.connect).toHaveBeenCalledOnce();
+    expect(result.workspace.tabs).toHaveLength(1);
+    expect(result.workspace.tabs[0]).toMatchObject({
+      id: "tab-new",
+      sessionId: "tab-new-session",
+    });
+    expect(deps.workspace.setWorkspace).toHaveBeenCalled();
+    expect(controller.getSnapshot().initializing).toBe(false);
+  });
+
+  it("loads the saved active session before leaving initialization", async () => {
+    const client = fakeClient("tab-a");
+    const history: HermesHistoryItem[] = [{ kind: "user", text: "restored" }];
+    client.loadSessionHistory = vi.fn(async (sessionId: string) => {
+      client.sessionId = sessionId;
+      return history;
+    });
+    const workspace = createConversationWorkspace("tab-a", "saved-session");
+    const controller = new ConversationController(
+      dependencies(workspace, client),
+    );
+
+    const result = await controller.initialize();
+
+    expect(client.connect).toHaveBeenCalledOnce();
+    expect(client.loadSessionHistory).toHaveBeenCalledWith("saved-session");
+    expect(result.items).toEqual(history);
+    expect(result.sessionId).toBe("saved-session");
+    expect(result.tabId).toBe("tab-a");
+    expect(controller.getSnapshot().initializing).toBe(false);
+  });
+
+  it("replaces a saved session only when the ACP load fails", async () => {
+    const client = fakeClient("tab-a");
+    client.loadSessionHistory = vi.fn(async () => {
+      throw new Error("saved session unavailable");
+    });
+    client.newSession = vi.fn(async () => {
+      client.sessionId = "replacement-session";
+    });
+    const workspace = createConversationWorkspace("tab-a", "saved-session");
+    const controller = new ConversationController(
+      dependencies(workspace, client),
+    );
+
+    const result = await controller.initialize();
+
+    expect(client.loadSessionHistory).toHaveBeenCalledOnce();
+    expect(client.newSession).toHaveBeenCalledOnce();
+    expect(result.items).toBeUndefined();
+    expect(result.started).toBe(true);
+    expect(result.sessionId).toBe("replacement-session");
+    expect(result.workspace.tabs[0]?.sessionId).toBe("replacement-session");
+  });
+
+  it("does not spawn clients for inactive tabs during startup", async () => {
+    const first = fakeClient("tab-a");
+    first.loadSessionHistory = vi.fn(async (sessionId: string) => {
+      first.sessionId = sessionId;
+      return [];
+    });
+    const second = fakeClient("tab-b");
+    const base = createConversationWorkspace("tab-a", "session-a");
+    const workspace = {
+      ...base,
+      tabs: [
+        ...base.tabs,
+        {
+          draft: "",
+          id: "tab-b",
+          includeCurrentDocumentContext: true,
+          label: 2,
+          sessionId: "session-b",
+        },
+      ],
+      nextLabel: 3,
+    };
+    const clients = new Map([
+      ["tab-a", first],
+      ["tab-b", second],
+    ]);
+    const deps = dependencies(workspace, first, clients);
+    const controller = new ConversationController(deps);
+
+    await controller.initialize();
+
+    expect(deps.clients.acquireClient).toHaveBeenCalledWith("tab-a");
+    expect(deps.clients.acquireClient).not.toHaveBeenCalledWith("tab-b");
+    expect(second.connect).not.toHaveBeenCalled();
+  });
+
+  it("drops a startup continuation after teardown without persisting it", async () => {
+    const connect = deferred<void>();
+    const client = fakeClient("tab-a");
+    client.connect = vi.fn(() => connect.promise);
+    const deps = dependencies(undefined, client);
+    const controller = new ConversationController(deps);
+
+    const initialization = controller.initialize();
+    await Promise.resolve();
+    const shutdown = controller.shutdown();
+    connect.resolve();
+
+    await expect(initialization).rejects.toMatchObject({ code: "cancelled" });
+    await shutdown;
+    expect(deps.workspace.setWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("blocks session-mutating handlers while startup is pending", async () => {
+    const connect = deferred<void>();
+    const client = fakeClient("tab-a");
+    client.connect = vi.fn(() => connect.promise);
+    const controller = new ConversationController(
+      dependencies(undefined, client),
+    );
+
+    const initialization = controller.initialize();
+    await Promise.resolve();
+
+    await expect(controller.addConversation()).rejects.toMatchObject({
+      code: "cancelled",
+    });
+    await expect(controller.switchConversation("tab-a")).rejects.toMatchObject({
+      code: "cancelled",
+    });
+    await expect(controller.restartConversation("tab-a")).rejects.toMatchObject({
+      code: "cancelled",
+    });
+    connect.resolve();
+    await initialization;
   });
 });

@@ -18,10 +18,14 @@ import {
 
 import type HermesianPlugin from "./main";
 import {
+  ConversationController,
+  type ConversationControllerSnapshot,
+  type ConversationInitializationResult,
+} from "./conversation-controller";
+import {
   activateConversationTab,
   addPendingConversationTab,
   ConversationTransitionCoordinator,
-  createConversationWorkspace,
   isActiveConversationSession,
   removeConversationTab,
   replaceConversationSession,
@@ -251,6 +255,8 @@ export class HermesianSidebarView extends ItemView {
   private composerEl!: HTMLTextAreaElement;
   private conversationTabsEl!: HTMLElement;
   private conversationWorkspace: PersistedConversationWorkspace | undefined;
+  private controller: ConversationController<HermesAcpClient> | undefined;
+  private controllerUnsubscribe: (() => void) | undefined;
   private contextProgressEl!: HTMLElement;
   private contextUsageEl!: HTMLElement;
   private controlsBusy = false;
@@ -318,17 +324,17 @@ export class HermesianSidebarView extends ItemView {
     this.renderShell();
     this.updateControls(true, false);
     this.plugin.attachView(this);
+    this.controller = new ConversationController(
+      this.plugin.getConversationControllerDependencies(),
+    );
+    this.controllerUnsubscribe = this.controller.subscribe((snapshot) => {
+      this.handleControllerSnapshot(snapshot);
+    });
     try {
-      const persisted = this.plugin.getConversationWorkspace();
-      const activeTabId = persisted?.activeTabId ?? crypto.randomUUID();
-      const client = this.plugin.getClient(activeTabId);
-      await client.connect();
-      await this.initializeConversationWorkspace(activeTabId, client, persisted);
+      const result = await this.controller.initialize();
+      await this.initializeConversationWorkspace(result);
     } catch (error) {
       new Notice(`Hermesian connection failed: ${this.messageFor(error)}`);
-    } finally {
-      this.initializing = false;
-      this.updateControls(false);
     }
   }
 
@@ -339,6 +345,10 @@ export class HermesianSidebarView extends ItemView {
       permission.resolve({ outcome: { outcome: "cancelled" } });
     }
     this.permissions.clear();
+    this.controllerUnsubscribe?.();
+    this.controllerUnsubscribe = undefined;
+    await this.controller?.shutdown();
+    this.controller = undefined;
     await this.plugin.releaseView(this);
   }
 
@@ -730,78 +740,50 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private async initializeConversationWorkspace(
-    initialTabId: string,
-    client: HermesAcpClient,
-    persisted: PersistedConversationWorkspace | undefined,
+    result: ConversationInitializationResult,
   ): Promise<void> {
-    if (!persisted) {
-      const sessionId = client.sessionId;
-      if (!sessionId) {
-        throw new Error("Hermes ACP did not create an initial session");
-      }
-      this.conversationWorkspace = createConversationWorkspace(
-        initialTabId,
-        sessionId,
-      );
-      this.showConversationMessages(initialTabId);
-      this.loadedMessageTabIds.add(initialTabId);
-      this.restoreActiveConversationRuntime();
-      this.renderConversationTabs();
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-      return;
-    }
-
-    this.conversationWorkspace = persisted;
-    const activeTab = this.activeConversationTab();
-    if (!activeTab) {
-      throw new Error("The saved conversation workspace has no active tab");
-    }
-    this.showConversationMessages(activeTab.id);
+    this.conversationWorkspace = result.workspace;
+    this.showConversationMessages(result.tabId);
     this.renderConversationTabs();
 
-    this.updateControls(true, false);
-    try {
-      let restoredItems: HermesHistoryItem[] | undefined;
-      let restoredSessionId = activeTab.sessionId;
-      if (restoredSessionId) {
-        try {
-          restoredItems = await client.loadSessionHistory(restoredSessionId);
-        } catch (error) {
-          await client.newSession();
-          const replacementSessionId = client.sessionId;
-          if (!replacementSessionId) {
-            throw error;
-          }
-          this.conversationWorkspace = replaceConversationSession(
-            this.conversationWorkspace,
-            activeTab.id,
-            replacementSessionId,
-          );
-          restoredSessionId = replacementSessionId;
-          this.resetConversationView(activeTab.id);
-          this.appendSystemMessage(
-            "The saved Hermes session could not be restored. A new session was started for this tab.",
-            true,
-          );
-        }
-      } else {
-        restoredSessionId = await this.bindPendingConversation(activeTab.id, true);
-        this.resetConversationView(activeTab.id);
-        this.loadedMessageTabIds.add(activeTab.id);
-        this.appendSystemMessage("New Hermes conversation started.");
+    if (result.items) {
+      await this.renderHistorySession(
+        { cwd: "", sessionId: result.sessionId },
+        result.items,
+        false,
+      );
+    } else if (result.started) {
+      this.resetConversationView(result.tabId);
+      this.loadedMessageTabIds.add(result.tabId);
+      this.appendSystemMessage(
+        result.replaced
+          ? "The saved Hermes session could not be restored. A new session was started for this tab."
+          : "New Hermes conversation started.",
+        result.replaced,
+      );
+    }
+
+    this.restoreActiveConversationRuntime();
+    this.renderConversationTabs();
+  }
+
+  private handleControllerSnapshot(
+    snapshot: ConversationControllerSnapshot,
+  ): void {
+    this.initializing = snapshot.initializing;
+    if (snapshot.workspace) {
+      this.conversationWorkspace = snapshot.workspace;
+    }
+    this.clientLoadingTabs.clear();
+    for (const [tabId, operation] of snapshot.tabOperations) {
+      if (operation.connection === "loading") {
+        this.clientLoadingTabs.add(tabId);
       }
-      if (restoredItems && restoredSessionId) {
-        await this.renderHistorySession(
-          { cwd: "", sessionId: restoredSessionId },
-          restoredItems,
-          false,
-        );
-      }
-      this.restoreActiveConversationRuntime();
-      this.renderConversationTabs();
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-    } finally {
-      this.updateControls(false);
+    }
+    if (this.sendButtonEl) {
+      this.updateControls(
+        snapshot.initializing || snapshot.globalOperation !== "idle",
+      );
     }
   }
 
@@ -877,75 +859,18 @@ export class HermesianSidebarView extends ItemView {
 
   private async ensureClientForTab(
     tabId: string,
-  ): Promise<{ items?: HermesHistoryItem[]; sessionId: string; started: boolean }> {
-    const workspace = this.conversationWorkspace;
-    const tab = workspace?.tabs.find((candidate) => candidate.id === tabId);
-    if (!workspace || !tab) {
-      throw new Error("The conversation tab could not be found");
+  ): Promise<{
+    items?: HermesHistoryItem[];
+    replaced: boolean;
+    sessionId: string;
+    started: boolean;
+  }> {
+    if (!this.controller) {
+      throw new Error("Conversation controller is unavailable");
     }
-    const client = this.plugin.getClient(tabId);
-    this.clientLoadingTabs.add(tabId);
-    if (workspace.activeTabId === tabId) {
-      this.updateControls(false);
-    }
-    try {
-      await client.connect();
-      if (
-        tab.sessionId &&
-        (client.sessionId !== tab.sessionId || !this.loadedMessageTabIds.has(tabId))
-      ) {
-        const items = await client.loadSessionHistory(tab.sessionId);
-        return { items, sessionId: tab.sessionId, started: false };
-      }
-      const sessionId = tab.sessionId ?? client.sessionId;
-      if (!sessionId) {
-        throw new Error("Hermes ACP did not return a session ID");
-      }
-      if (!tab.sessionId) {
-        this.conversationWorkspace = replaceConversationSession(
-          this.conversationWorkspace ?? workspace,
-          tabId,
-          sessionId,
-        );
-      }
-      return { sessionId, started: !tab.sessionId };
-    } finally {
-      this.clientLoadingTabs.delete(tabId);
-      if (this.conversationWorkspace?.activeTabId === tabId) {
-        this.updateControls(false);
-      }
-    }
-  }
-
-  private async bindPendingConversation(
-    tabId: string,
-    useCurrentSession = false,
-  ): Promise<string> {
-    const workspace = this.conversationWorkspace;
-    const tab = workspace?.tabs.find((candidate) => candidate.id === tabId);
-    if (!workspace || !tab) {
-      throw new Error("The deferred conversation tab could not be found");
-    }
-    if (tab.sessionId) {
-      return tab.sessionId;
-    }
-
-    const client = this.plugin.getClient(tabId);
-    let sessionId = useCurrentSession ? client.sessionId : undefined;
-    if (!sessionId) {
-      await client.connect();
-      sessionId = client.sessionId;
-    }
-    if (!sessionId) {
-      throw new Error("Hermes ACP did not return a new session ID");
-    }
-
-    this.conversationWorkspace = replaceConversationSession(
-      this.conversationWorkspace ?? workspace,
-      tabId,
-      sessionId,
-    );
-    return sessionId;
+    const result = await this.controller.ensureClientForTab(tabId);
+    this.conversationWorkspace = result.workspace;
+    return result;
   }
 
   private ensureMessageCache(tabId: string): HTMLElement {

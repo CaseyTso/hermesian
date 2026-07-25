@@ -181,6 +181,10 @@ export class ConversationOperationCoordinator {
   isCurrentTransition(generation: number): boolean {
     return generation === this.generation;
   }
+
+  getTransitionGeneration(): number {
+    return this.generation;
+  }
 }
 
 export function removeTabOperation(

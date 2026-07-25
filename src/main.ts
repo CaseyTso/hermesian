@@ -18,6 +18,9 @@ import {
   normalizeConversationWorkspace,
   type PersistedConversationWorkspace,
 } from "./conversation-tabs";
+import type {
+  ConversationControllerDependencies,
+} from "./conversation-controller";
 import { HERMESIAN_ICON_ID, HERMESIAN_ICON_SVG } from "./hermes-icon";
 import { chooseMarkdownSource } from "./markdown-source";
 import { isReasoningEffort } from "./session-history";
@@ -165,6 +168,25 @@ export default class HermesianPlugin extends Plugin {
 
   getClient(tabId: string): HermesAcpClient {
     return this.clients.getOrCreate(tabId);
+  }
+
+  getConversationControllerDependencies(): ConversationControllerDependencies<HermesAcpClient> {
+    return {
+      clients: {
+        acquireClient: (tabId) => this.clients.getOrCreate(tabId),
+        getClient: (tabId) => this.clients.peek(tabId),
+        isCurrentClient: (tabId, client) => this.clients.peek(tabId) === client,
+        releaseClient: (tabId) => this.clients.release(tabId),
+      },
+      createTabId: () => crypto.randomUUID(),
+      workspace: {
+        getWorkspace: () => this.getConversationWorkspace(),
+        setWorkspace: (workspace, options) =>
+          options?.flush
+            ? this.flushConversationWorkspace(workspace)
+            : this.setConversationWorkspace(workspace),
+      },
+    };
   }
 
   automaticPermissionResponse(
