@@ -25,7 +25,6 @@ import {
 } from "./conversation-controller";
 import {
   activateConversationTab,
-  ConversationTransitionCoordinator,
   isActiveConversationSession,
   shouldAutoScrollConversation,
   updateConversationTab,
@@ -257,12 +256,10 @@ export class HermesianSidebarView extends ItemView {
   private controllerUnsubscribe: (() => void) | undefined;
   private contextProgressEl!: HTMLElement;
   private contextUsageEl!: HTMLElement;
-  private controlsBusy = false;
   private currentFileBarEl!: HTMLButtonElement;
   private currentFileLabelEl!: HTMLElement;
   private currentFilePath: string | undefined;
   private includeCurrentDocumentContext = true;
-  private initializing = true;
   private historyButtonEl!: HTMLButtonElement;
   private imageAttachmentBarEl!: HTMLElement;
   private messagesEl!: HTMLElement;
@@ -270,32 +267,20 @@ export class HermesianSidebarView extends ItemView {
   private modelLabelEl!: HTMLElement;
   private pendingSelection: SelectionContext | undefined;
   private readonly permissions = new Map<string, PendingPermission>();
-  private readonly clientLoadingTabs = new Set<string>();
   private readonly loadedMessageTabIds = new Set<string>();
   private readonly messageCaches = new Map<string, HTMLElement>();
   private readonly pendingImages = new Map<string, PastedImageAttachment[]>();
-  private readonly sessionStates = new Map<string, HermesSessionState>();
   private readonly turnRuntimes = new Map<string, ConversationTurnRuntime>();
   private reasoningButtonEl!: HTMLButtonElement;
   private reasoningLabelEl!: HTMLElement;
   private selectionBarEl!: HTMLElement;
   private sendButtonEl!: HTMLButtonElement;
-  private sessionState: HermesSessionState = {
-    catalogLoading: false,
-    commands: [],
-    models: [],
-    skillCatalogLoading: false,
-    skills: [],
-    switchingModel: false,
-  };
   private slashMenuEl!: HTMLElement;
+  private stopButtonEl!: HTMLButtonElement;
+  private readonly tabSelections = new Map<string, SelectionContext | undefined>();
   private slashMenuIndex = 0;
   private slashMenuItems: SlashMenuItem[] = [];
   private statusEl!: HTMLElement;
-  private stopButtonEl!: HTMLButtonElement;
-  private readonly tabSelections = new Map<string, SelectionContext | undefined>();
-  private readonly transitions = new ConversationTransitionCoordinator();
-  private closingConversationTabId: string | undefined;
   private visibleMessagesTabId: string | undefined;
 
   constructor(
@@ -318,7 +303,6 @@ export class HermesianSidebarView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    this.initializing = true;
     this.renderShell();
     this.updateControls(true, false);
     this.plugin.attachView(this);
@@ -339,7 +323,8 @@ export class HermesianSidebarView extends ItemView {
   async onClose(): Promise<void> {
     this.captureActiveConversationRuntime();
     await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-    for (const permission of this.permissions.values()) {
+    for (const [permissionId, permission] of this.permissions) {
+      this.controller?.completePermission(permissionId);
       permission.resolve({ outcome: { outcome: "cancelled" } });
     }
     this.permissions.clear();
@@ -413,7 +398,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   handleHermesSessionState(tabId: string, state: HermesSessionState): void {
-    this.sessionStates.set(tabId, state);
+    this.controller?.updateClientState(tabId, state);
     if (!this.conversationWorkspace || this.conversationWorkspace.activeTabId === tabId) {
       this.renderSessionState(state);
     }
@@ -424,9 +409,10 @@ export class HermesianSidebarView extends ItemView {
     request: PermissionRequest,
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
-    this.revealActiveTurnForPermission(tabId);
     const runtime = this.turnRuntime(tabId);
     const permissionId = `${tabId}:${request.toolCall.toolCallId}`;
+    this.controller?.beginPermission(tabId, permissionId);
+    this.revealActiveTurnForPermission(tabId);
     const diffs = (request.toolCall.content ?? [])
       .filter(
         (content): content is Extract<ToolCallContent, { type: "diff" }> =>
@@ -441,12 +427,14 @@ export class HermesianSidebarView extends ItemView {
       const validation = validateSelectionEdit(runtime.activeEditScope, diffs);
       if (validation.allowed === false) {
         this.appendSystemMessage(`Blocked edit: ${validation.reason}`, true, tabId);
+        this.controller?.completePermission(permissionId);
         return Promise.resolve(rejectionFor(request.options));
       }
     }
     try {
       const automatic = this.plugin.automaticPermissionResponse(request);
       if (automatic) {
+        this.controller?.completePermission(permissionId);
         return Promise.resolve(automatic);
       }
     } catch (error) {
@@ -455,9 +443,11 @@ export class HermesianSidebarView extends ItemView {
         true,
         tabId,
       );
+      this.controller?.completePermission(permissionId);
       return Promise.resolve(rejectionFor(request.options));
     }
     if (signal.aborted) {
+      this.controller?.completePermission(permissionId);
       return Promise.resolve({ outcome: { outcome: "cancelled" } });
     }
 
@@ -479,6 +469,7 @@ export class HermesianSidebarView extends ItemView {
           return;
         }
         this.permissions.delete(permissionId);
+        this.controller?.completePermission(permissionId);
         this.renderAddConversationControl();
         this.renderConversationTabs();
         actions.querySelectorAll("button").forEach((button: Element) => {
@@ -768,15 +759,8 @@ export class HermesianSidebarView extends ItemView {
   private handleControllerSnapshot(
     snapshot: ConversationControllerSnapshot,
   ): void {
-    this.initializing = snapshot.initializing;
     if (snapshot.workspace) {
       this.conversationWorkspace = snapshot.workspace;
-    }
-    this.clientLoadingTabs.clear();
-    for (const [tabId, operation] of snapshot.tabOperations) {
-      if (operation.connection === "loading") {
-        this.clientLoadingTabs.add(tabId);
-      }
     }
     if (this.sendButtonEl) {
       this.updateControls(
@@ -806,53 +790,59 @@ export class HermesianSidebarView extends ItemView {
 
   private isTabBusy(tabId: string): boolean {
     return (
+      this.controller?.getSnapshot().tabOperations.get(tabId)?.prompt === "running" ||
       this.turnRuntimes.get(tabId)?.busy === true ||
       this.plugin.peekClient(tabId)?.isBusy === true
     );
   }
 
-  private hasPendingPermission(tabId: string): boolean {
-    return Array.from(this.permissions.values()).some(
-      (permission) => permission.tabId === tabId,
+  private isTabLoading(tabId: string): boolean {
+    return this.controller?.getSnapshot().tabOperations.get(tabId)?.connection === "loading";
+  }
+
+  private hasClosingTab(): boolean {
+    return Array.from(this.controller?.getSnapshot().tabOperations.values() ?? []).some(
+      (operation) => operation.closing,
     );
+  }
+
+  private hasPendingPermission(tabId: string): boolean {
+    return this.controller?.getSnapshot().tabOperations.get(tabId)?.permissionPending === true;
   }
 
 
   private activeSessionState(): HermesSessionState {
     const activeTab = this.activeConversationTab();
-    return (activeTab && this.sessionStates.get(activeTab.id)) ?? this.sessionState;
+    return (
+      (activeTab && this.controller?.getSnapshot().sessionStates.get(activeTab.id)) ??
+      (activeTab ? this.plugin.peekClient(activeTab.id)?.currentSessionState : undefined) ??
+      {
+        catalogLoading: false,
+        commands: [],
+        models: [],
+        skillCatalogLoading: false,
+        skills: [],
+        switchingModel: false,
+      }
+    );
   }
 
-  private conversationRuntimeState(state: HermesSessionState): ConversationRuntimeState {
-    const tabs = new Map<string, TabOperationState>();
-    for (const tab of this.conversationWorkspace?.tabs ?? []) {
-      const sessionState = this.sessionStates.get(tab.id);
-      tabs.set(tab.id, {
-        closing: this.closingConversationTabId === tab.id,
-        connection: this.clientLoadingTabs.has(tab.id)
-          ? "loading"
-          : tab.sessionId
-            ? "ready"
-            : "deferred",
-        hasSession: Boolean(tab.sessionId),
-        permissionPending: this.hasPendingPermission(tab.id),
-        prompt: this.isTabBusy(tab.id) ? "running" : "idle",
-        sessionOperation:
-          (sessionState?.switchingModel ?? (tab.id === this.conversationWorkspace?.activeTabId && state.switchingModel))
-            ? "model"
-            : "idle",
-      });
-    }
+  private conversationRuntimeState(_state: HermesSessionState): ConversationRuntimeState {
+    const snapshot = this.controller?.getSnapshot();
     return {
-      activeTabId: this.conversationWorkspace?.activeTabId,
-      globalOperation: this.controlsBusy ? "reconnecting" : "idle",
-      initializing: this.initializing,
-      tabs,
+      activeTabId: snapshot?.workspace?.activeTabId ?? this.conversationWorkspace?.activeTabId,
+      globalOperation: snapshot?.globalOperation ?? "idle",
+      initializing: snapshot?.initializing ?? true,
+      tabs: snapshot?.tabOperations ?? new Map<string, TabOperationState>(),
     };
   }
 
   private controlAvailability(state = this.activeSessionState()) {
     return deriveConversationControlAvailability(this.conversationRuntimeState(state));
+  }
+
+  private tabControlAvailability(tabId: string) {
+    return deriveConversationControlAvailability(this.conversationRuntimeState(this.activeSessionState()), tabId);
   }
 
   private async ensureClientForTab(
@@ -907,7 +897,6 @@ export class HermesianSidebarView extends ItemView {
     if (!workspace) {
       return;
     }
-    this.transitions.invalidateSwitch();
     if (workspace.activeTabId === tabId) {
       return;
     }
@@ -916,7 +905,7 @@ export class HermesianSidebarView extends ItemView {
     this.showConversationMessages(tabId);
     this.restoreActiveConversationRuntime();
     this.renderSessionState(
-      this.sessionStates.get(tabId) ?? this.plugin.getClient(tabId).currentSessionState,
+      this.controller?.getSnapshot().sessionStates.get(tabId) ?? this.plugin.getClient(tabId).currentSessionState,
     );
     this.renderConversationTabs();
     this.updateControls(false);
@@ -966,7 +955,7 @@ export class HermesianSidebarView extends ItemView {
       const active = tab.id === workspace.activeTabId;
       const deferred = tab.sessionId === null;
       const working = this.isTabBusy(tab.id);
-      const loading = deferred || this.clientLoadingTabs.has(tab.id);
+      const loading = deferred || this.isTabLoading(tab.id);
       const activityLabel = working ? ", responding" : loading ? ", starting" : "";
       const activityTitle = working ? " · Responding" : loading ? " · Starting" : "";
       const button = this.conversationTabsEl.createEl("button", {
@@ -982,7 +971,7 @@ export class HermesianSidebarView extends ItemView {
         cls: `hermesian-conversation-tab${active ? " is-active" : ""}${working ? " is-working" : ""}${loading ? " is-loading" : ""}${deferred ? " is-deferred" : ""}`,
         text: String(tab.label),
       });
-      button.disabled = this.initializing || this.controlsBusy;
+      button.disabled = !this.controlAvailability().tabNavigation;
       button.addEventListener("click", () => {
         void this.switchConversation(tab.id);
       });
@@ -1001,14 +990,12 @@ export class HermesianSidebarView extends ItemView {
   private async addConversation(): Promise<void> {
     if (
       !this.controller ||
-      this.initializing ||
-      this.controlsBusy ||
-      this.closingConversationTabId !== undefined ||
+      !this.controlAvailability().add ||
+      this.hasClosingTab() ||
       this.activeSessionState().switchingModel
     ) {
       return;
     }
-    this.transitions.invalidateSwitch();
     this.captureActiveConversationRuntime();
     const existingTabIds = new Set(
       this.conversationWorkspace?.tabs.map((tab) => tab.id) ?? [],
@@ -1056,20 +1043,16 @@ export class HermesianSidebarView extends ItemView {
       !this.controller ||
       !workspace ||
       !workspace.tabs.some((tab) => tab.id === tabId) ||
-      this.initializing ||
-      this.controlsBusy ||
-      this.closingConversationTabId !== undefined ||
+      !this.tabControlAvailability(tabId).close ||
+      this.hasClosingTab() ||
       this.isTabBusy(tabId) ||
-      this.clientLoadingTabs.size > 0 ||
       this.hasPendingPermission(tabId) ||
-      this.sessionStates.get(tabId)?.switchingModel
+      this.controller?.getSnapshot().sessionStates.get(tabId)?.switchingModel
     ) {
       return;
     }
 
-    this.transitions.invalidateSwitch();
     this.captureActiveConversationRuntime();
-    this.closingConversationTabId = tabId;
     this.updateControls(true);
     try {
       const result = await this.controller.closeConversation(tabId);
@@ -1078,7 +1061,6 @@ export class HermesianSidebarView extends ItemView {
       this.pendingImages.delete(tabId);
       this.forgetConversationMessages(tabId);
       this.turnRuntimes.delete(tabId);
-      this.sessionStates.delete(tabId);
 
       const activeTabId = result.workspace.activeTabId;
       this.showConversationMessages(activeTabId);
@@ -1114,7 +1096,6 @@ export class HermesianSidebarView extends ItemView {
       }
       new Notice(`Hermesian could not close that conversation: ${this.messageFor(error)}`);
     } finally {
-      this.closingConversationTabId = undefined;
       this.updateControls(false);
     }
   }
@@ -1122,16 +1103,14 @@ export class HermesianSidebarView extends ItemView {
   private async switchConversation(tabId: string): Promise<void> {
     if (
       !this.controller ||
-      this.initializing ||
-      this.controlsBusy ||
-      this.closingConversationTabId !== undefined ||
-      this.clientLoadingTabs.has(tabId)
+      !this.controlAvailability().tabNavigation ||
+      this.hasClosingTab() ||
+      this.isTabLoading(tabId)
     ) {
       return;
     }
 
     this.captureActiveConversationRuntime();
-    this.transitions.invalidateSwitch();
     try {
       const result = await this.controller.switchConversation(tabId);
       this.conversationWorkspace = result.workspace;
@@ -1154,7 +1133,7 @@ export class HermesianSidebarView extends ItemView {
       this.showConversationMessages(result.tabId);
       this.restoreActiveConversationRuntime();
       this.renderSessionState(
-        this.sessionStates.get(result.tabId) ?? this.plugin.getClient(result.tabId).currentSessionState,
+        this.controller?.getSnapshot().sessionStates.get(result.tabId) ?? this.plugin.getClient(result.tabId).currentSessionState,
       );
       this.renderConversationTabs();
     } catch (error) {
@@ -1203,7 +1182,6 @@ export class HermesianSidebarView extends ItemView {
     if (!activeTab) {
       return;
     }
-    this.clientLoadingTabs.add(activeTab.id);
     this.updateControls(false);
     try {
       const sessions = await this.plugin.getClient(activeTab.id).listSessions();
@@ -1217,7 +1195,6 @@ export class HermesianSidebarView extends ItemView {
     } catch (error) {
       new Notice(`Hermesian history failed: ${this.messageFor(error)}`);
     } finally {
-      this.clientLoadingTabs.delete(activeTab.id);
       this.updateControls(false);
     }
   }
@@ -1233,12 +1210,11 @@ export class HermesianSidebarView extends ItemView {
       !workspace ||
       !targetTab ||
       this.isTabBusy(tabId) ||
-      this.clientLoadingTabs.has(tabId)
+      this.isTabLoading(tabId)
     ) {
       return;
     }
     this.captureActiveConversationRuntime();
-    this.clientLoadingTabs.add(tabId);
     this.updateControls(false);
     try {
       const result = await this.controller.bindHistorySession(tabId, session.sessionId);
@@ -1263,7 +1239,6 @@ export class HermesianSidebarView extends ItemView {
       }
       new Notice(`Hermesian could not load that session: ${this.messageFor(error)}`);
     } finally {
-      this.clientLoadingTabs.delete(tabId);
       this.updateControls(false);
     }
   }
@@ -1395,7 +1370,6 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private renderSessionState(state: HermesSessionState): void {
-    this.sessionState = state;
     const availability = this.controlAvailability(state);
     this.renderAddConversationControl();
     this.historyButtonEl.disabled = !availability.history;
@@ -1436,7 +1410,7 @@ export class HermesianSidebarView extends ItemView {
   private renderSlashMenu(resetIndex: boolean): void {
     const value = this.composerEl.value;
     if (
-      this.controlsBusy ||
+      !this.controlAvailability().composer ||
       this.composerEl.selectionStart !== value.length ||
       this.composerEl.selectionEnd !== value.length
     ) {
@@ -1445,10 +1419,11 @@ export class HermesianSidebarView extends ItemView {
     }
 
     const previous = this.slashMenuItems[this.slashMenuIndex];
+    const state = this.activeSessionState();
     const items = buildSlashMenuItems(
       value,
-      this.sessionState.commands,
-      this.sessionState.skills,
+      state.commands,
+      state.skills,
     );
     if (items.length === 0) {
       this.hideSlashMenu();
@@ -1722,10 +1697,9 @@ export class HermesianSidebarView extends ItemView {
     const activeTab = this.activeConversationTab();
     if (
       !activeTab ||
-      this.initializing ||
-      this.controlsBusy ||
+      !this.controlAvailability().send ||
       this.isTabBusy(activeTab.id) ||
-      this.clientLoadingTabs.has(activeTab.id) ||
+      this.isTabLoading(activeTab.id) ||
       this.hasPendingPermission(activeTab.id)
     ) {
       return;
@@ -1800,6 +1774,7 @@ export class HermesianSidebarView extends ItemView {
     this.captureActiveConversationRuntime();
     this.resetStreamingMessage(activeTab.id);
     runtime.busy = true;
+    this.controller?.setPromptRunning(activeTab.id, true);
     runtime.activeTurnEl = this.messageContainer(activeTab.id).createDiv({
       cls: "hermesian-turn",
     });
@@ -1830,6 +1805,7 @@ export class HermesianSidebarView extends ItemView {
         await runtime.completionPromise;
       }
       runtime.busy = false;
+      this.controller?.setPromptRunning(activeTab.id, false);
       this.renderConversationTabs();
       if (this.conversationWorkspace?.activeTabId === activeTab.id) {
         this.updateControls(false);
@@ -1842,7 +1818,7 @@ export class HermesianSidebarView extends ItemView {
     if (
       !this.controller ||
       !activeTab ||
-      this.controlsBusy ||
+      !this.controlAvailability().composer ||
       this.isTabBusy(activeTab.id) ||
       this.activeSessionState().switchingModel ||
       this.hasPendingPermission(activeTab.id)
@@ -1851,7 +1827,6 @@ export class HermesianSidebarView extends ItemView {
     }
     const tabId = activeTab.id;
     this.captureActiveConversationRuntime();
-    this.clientLoadingTabs.add(tabId);
     this.updateControls(false);
     try {
       const result = await this.controller.restartConversation(tabId);
@@ -1873,7 +1848,6 @@ export class HermesianSidebarView extends ItemView {
       }
       new Notice(`Hermesian: ${this.messageFor(error)}`);
     } finally {
-      this.clientLoadingTabs.delete(tabId);
       this.updateControls(false);
     }
   }
@@ -2216,12 +2190,11 @@ export class HermesianSidebarView extends ItemView {
     }
   }
 
-  private updateControls(busy: boolean, _showStop = busy): void {
-    this.controlsBusy = busy || this.closingConversationTabId !== undefined;
-    if (this.controlsBusy) {
+  private updateControls(_busy: boolean, _showStop = _busy): void {
+    const availability = this.controlAvailability();
+    if (!availability.composer) {
       this.hideSlashMenu();
     }
-    const availability = this.controlAvailability();
     this.sendButtonEl.disabled = !availability.send;
     this.composerEl.disabled = !availability.composer;
     this.renderAddConversationControl();
@@ -2236,7 +2209,7 @@ export class HermesianSidebarView extends ItemView {
     } else {
       this.stopButtonEl.hide();
       this.sendButtonEl.show();
-      if (!this.controlsBusy) {
+      if (availability.composer) {
         this.composerEl.focus();
       }
     }
@@ -2245,7 +2218,7 @@ export class HermesianSidebarView extends ItemView {
   private updateComposerPlaceholder(): void {
     const activeTabId = this.conversationWorkspace?.activeTabId;
     this.composerEl.placeholder =
-      activeTabId && this.clientLoadingTabs.has(activeTabId)
+      activeTabId && this.isTabLoading(activeTabId)
         ? "Draft here — this conversation is starting"
         : "Ask Hermes…  ↵ to send · Shift+↵ for new line";
   }

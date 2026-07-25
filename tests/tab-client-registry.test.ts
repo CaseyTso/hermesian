@@ -19,6 +19,20 @@ describe("TabClientRegistry", () => {
     expect(registry.getOrCreate("b")).not.toBe(firstA);
   });
 
+  it("accepts synchronous factory replay before the slot is returned", () => {
+    const replayed: string[] = [];
+    const registry = new TabClientRegistry<FakeClient>((tabId, isCurrent) => {
+      if (isCurrent()) {
+        replayed.push(tabId);
+      }
+      return { client: { disconnect: vi.fn(async () => undefined), id: 1 } };
+    });
+
+    registry.getOrCreate("replayed");
+
+    expect(replayed).toEqual(["replayed"]);
+  });
+
   it("invalidates callbacks before disconnect and creates a fresh replacement", async () => {
     let nextId = 1;
     const forwarded: string[] = [];

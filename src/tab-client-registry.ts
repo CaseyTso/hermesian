@@ -26,11 +26,19 @@ export class TabClientRegistry<TClient extends DisconnectableTabClient> {
       return existing.client;
     }
 
-    let slot: RegisteredTabClient<TClient> | undefined;
-    const isCurrent = (): boolean => this.slots.get(tabId) === slot;
-    slot = this.factory(tabId, isCurrent);
+    const slot: RegisteredTabClient<TClient> = {
+      client: undefined as unknown as TClient,
+    };
     this.slots.set(tabId, slot);
-    return slot.client;
+    try {
+      const created = this.factory(tabId, () => this.slots.get(tabId) === slot);
+      slot.client = created.client;
+      slot.unsubscribe = created.unsubscribe;
+      return slot.client;
+    } catch (error) {
+      this.slots.delete(tabId);
+      throw error;
+    }
   }
 
   peek(tabId: string): TClient | undefined {

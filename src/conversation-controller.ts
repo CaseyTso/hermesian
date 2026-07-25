@@ -66,6 +66,7 @@ export interface ConversationControllerDependencies<
 export interface ConversationControllerSnapshot {
   globalOperation: "idle" | "reconnecting";
   initializing: boolean;
+  sessionStates: ReadonlyMap<string, HermesSessionState>;
   tabOperations: ReadonlyMap<string, TabOperationState>;
   transitionGeneration: number;
   workspace: PersistedConversationWorkspace | undefined;
@@ -136,6 +137,15 @@ function copyWorkspace(
   return Object.freeze({ ...workspace, tabs }) as PersistedConversationWorkspace;
 }
 
+function copySessionState(state: HermesSessionState): HermesSessionState {
+  return Object.freeze({
+    ...state,
+    commands: [...state.commands],
+    models: [...state.models],
+    skills: [...state.skills],
+  });
+}
+
 function runtimeForWorkspace(
   workspace: PersistedConversationWorkspace | undefined,
 ): ReadonlyMap<string, TabOperationState> {
@@ -185,7 +195,9 @@ export class ConversationController<TClient extends ConversationClient> {
     (snapshot: ConversationControllerSnapshot) => void
   >();
   private readonly historyReservations = new Map<string, string>();
+  private readonly permissionTokens = new Map<string, string>();
   private readonly operations = new ConversationOperationCoordinator();
+  private readonly sessionStates = new Map<string, HermesSessionState>();
   private readonly dependencies: ConversationControllerDependencies<TClient>;
   private disposed = false;
   private initializationPromise: Promise<ConversationInitializationResult> | undefined;
@@ -199,6 +211,7 @@ export class ConversationController<TClient extends ConversationClient> {
     this.snapshot = Object.freeze({
       globalOperation: "idle",
       initializing: true,
+      sessionStates: new Map(),
       tabOperations: runtimeForWorkspace(workspace),
       transitionGeneration: this.operations.getTransitionGeneration(),
       workspace,
@@ -424,6 +437,10 @@ export class ConversationController<TClient extends ConversationClient> {
 
   private publishWorkspace(workspace: PersistedConversationWorkspace): void {
     const tabOperations = new Map(runtimeForWorkspace(workspace));
+    const tabIds = new Set(workspace.tabs.map((tab) => tab.id));
+    const sessionStates = new Map(
+      Array.from(this.sessionStates.entries()).filter(([tabId]) => tabIds.has(tabId)),
+    );
     for (const [tabId, current] of this.snapshot.tabOperations) {
       const seeded = tabOperations.get(tabId);
       if (seeded) {
@@ -432,6 +449,7 @@ export class ConversationController<TClient extends ConversationClient> {
     }
     this.publish({
       ...this.snapshot,
+      sessionStates,
       tabOperations,
       workspace: copyWorkspace(workspace),
     });
@@ -858,25 +876,70 @@ export class ConversationController<TClient extends ConversationClient> {
     return undefined;
   }
 
-  updateClientState(_tabId: string, _state: HermesSessionState): void {
-    this.notImplemented("updateClientState");
+  updateClientState(tabId: string, state: HermesSessionState): void {
+    if (!this.snapshot.tabOperations.has(tabId)) {
+      return;
+    }
+    this.sessionStates.set(tabId, copySessionState(state));
+    const current = this.snapshot.tabOperations.get(tabId);
+    if (!current) {
+      return;
+    }
+    const sessionOperation = state.switchingModel
+      ? "model"
+      : current.sessionOperation === "model"
+        ? "idle"
+        : current.sessionOperation;
+    const tabOperations = new Map(this.snapshot.tabOperations);
+    tabOperations.set(tabId, Object.freeze({ ...current, sessionOperation }));
+    this.publish({
+      ...this.snapshot,
+      sessionStates: new Map(this.sessionStates),
+      tabOperations,
+    });
+  }
+
+  setPromptRunning(tabId: string, running: boolean): void {
+    this.updateTabOperation(tabId, { prompt: running ? "running" : "idle" });
+  }
+
+  beginPermission(tabId: string, permissionId: string): void {
+    if (!this.snapshot.tabOperations.has(tabId)) {
+      return;
+    }
+    this.operations.invalidateTransition();
+    this.permissionTokens.set(permissionId, tabId);
+    this.updateTabOperation(tabId, { permissionPending: true });
+    this.publish({
+      ...this.snapshot,
+      transitionGeneration: this.operations.getTransitionGeneration(),
+    });
+  }
+
+  completePermission(permissionId: string): void {
+    const tabId = this.permissionTokens.get(permissionId);
+    if (!tabId) {
+      return;
+    }
+    this.permissionTokens.delete(permissionId);
+    const stillPending = Array.from(this.permissionTokens.values()).some(
+      (ownerTabId) => ownerTabId === tabId,
+    );
+    if (!stillPending) {
+      this.updateTabOperation(tabId, { permissionPending: false });
+    }
   }
 
   setPermissionPending(tabId: string, pending: boolean): void {
-    const current = this.snapshot.tabOperations.get(tabId);
-    if (!current || current.permissionPending === pending) {
-      return;
-    }
-    const tabOperations = new Map(this.snapshot.tabOperations);
-    tabOperations.set(
-      tabId,
-      Object.freeze({ ...current, permissionPending: pending }),
-    );
-    this.publish({ ...this.snapshot, tabOperations });
+    this.updateTabOperation(tabId, { permissionPending: pending });
   }
 
   invalidateVisibleTransition(_reason: string): void {
-    this.notImplemented("invalidateVisibleTransition");
+    this.operations.invalidateTransition();
+    this.publish({
+      ...this.snapshot,
+      transitionGeneration: this.operations.getTransitionGeneration(),
+    });
   }
 
   async shutdown(): Promise<void> {
@@ -904,9 +967,6 @@ export class ConversationController<TClient extends ConversationClient> {
     }
   }
 
-  private notImplemented(operation: string): never {
-    throw new Error(`ConversationController.${operation} is not implemented`);
-  }
 }
 
 export type ConversationRuntimeSnapshot = ConversationRuntimeState;

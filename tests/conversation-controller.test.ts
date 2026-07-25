@@ -837,3 +837,80 @@ describe("ConversationController history and restart", () => {
     );
   });
 });
+
+describe("ConversationController client and permission state", () => {
+  function sessionState(switchingModel = false) {
+    return {
+      catalogLoading: false,
+      commands: [],
+      models: [],
+      skillCatalogLoading: false,
+      skills: [],
+      switchingModel,
+    };
+  }
+
+  it("stores the first session-state replay in the controller snapshot", async () => {
+    const controller = new ConversationController(
+      dependencies(createConversationWorkspace("base", "base-session"), fakeClient("base")),
+    );
+    await controller.initialize();
+    controller.updateClientState("base", sessionState(true));
+
+    expect(controller.getSnapshot().sessionStates.get("base")).toMatchObject({
+      switchingModel: true,
+    });
+    expect(controller.getSnapshot().tabOperations.get("base")).toMatchObject({
+      sessionOperation: "model",
+    });
+  });
+
+  it("ignores state replay for a stale or unknown tab slot", async () => {
+    const controller = new ConversationController(
+      dependencies(createConversationWorkspace("base", "base-session"), fakeClient("base")),
+    );
+    await controller.initialize();
+    controller.updateClientState("stale-tab", sessionState());
+
+    expect(controller.getSnapshot().sessionStates.has("stale-tab")).toBe(false);
+    expect(controller.getSnapshot().tabOperations.has("stale-tab")).toBe(false);
+  });
+
+  it("keeps permission cleanup isolated between tabs", async () => {
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    const controller = new ConversationController(
+      dependencies(workspace, fakeClient("base"), new Map([
+        ["base", fakeClient("base")],
+        ["tab-b", fakeClient("tab-b")],
+      ])),
+    );
+    await controller.initialize();
+    controller.beginPermission("base", "base:permission");
+    controller.beginPermission("tab-b", "tab-b:permission");
+    controller.completePermission("base:permission");
+
+    expect(controller.getSnapshot().tabOperations.get("base")?.permissionPending).toBe(false);
+    expect(controller.getSnapshot().tabOperations.get("tab-b")?.permissionPending).toBe(true);
+    controller.completePermission("tab-b:permission");
+    expect(controller.getSnapshot().tabOperations.get("tab-b")?.permissionPending).toBe(false);
+  });
+
+  it("keeps prompt busy state independent between tabs", async () => {
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    const controller = new ConversationController(
+      dependencies(workspace, fakeClient("base"), new Map([
+        ["base", fakeClient("base")],
+        ["tab-b", fakeClient("tab-b")],
+      ])),
+    );
+    await controller.initialize();
+    controller.setPromptRunning("base", true);
+    controller.setPromptRunning("tab-b", true);
+    controller.setPromptRunning("base", false);
+
+    expect(controller.getSnapshot().tabOperations.get("base")?.prompt).toBe("idle");
+    expect(controller.getSnapshot().tabOperations.get("tab-b")?.prompt).toBe("running");
+  });
+});
