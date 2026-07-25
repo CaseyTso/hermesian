@@ -1579,3 +1579,94 @@ describe("ConversationController permission reveal", () => {
     expect(controller.getSnapshot().tabOperations.get("tab-b")?.permissionPending).toBe(false);
   });
 });
+
+describe("ConversationController snapshot isolation", () => {
+  it("rejects Map mutation through tabOperations cast", async () => {
+    const controller = new ConversationController(
+      dependencies(createConversationWorkspace("base", "base-session"), fakeClient("base")),
+    );
+    await controller.initialize();
+
+    const snap = controller.getSnapshot();
+    const before = snap.tabOperations.get("base");
+
+    expect(() => {
+      (snap.tabOperations as unknown as Map<string, unknown>).set("hacked", {});
+    }).toThrow();
+
+    expect(snap.tabOperations.get("base")).toBe(before);
+    expect(snap.tabOperations.has("hacked")).toBe(false);
+  });
+
+  it("rejects Map mutation through sessionStates cast", async () => {
+    const controller = new ConversationController(
+      dependencies(createConversationWorkspace("base", "base-session"), fakeClient("base")),
+    );
+    await controller.initialize();
+    controller.updateClientState("base", {
+      catalogLoading: false,
+      commands: [],
+      models: [],
+      skillCatalogLoading: false,
+      skills: [],
+      switchingModel: false,
+    });
+
+    const snap = controller.getSnapshot();
+
+    expect(() => {
+      (snap.sessionStates as unknown as Map<string, unknown>).clear();
+    }).toThrow();
+
+    expect(snap.sessionStates.has("base")).toBe(true);
+  });
+
+  it("rejects Map mutation through controls.byTab cast", async () => {
+    const controller = new ConversationController(
+      dependencies(createConversationWorkspace("base", "base-session"), fakeClient("base")),
+    );
+    await controller.initialize();
+
+    const snap = controller.getSnapshot();
+
+    expect(() => {
+      (snap.controls.byTab as unknown as Map<string, unknown>).delete("base");
+    }).toThrow();
+
+    expect(snap.controls.byTab.has("base")).toBe(true);
+  });
+
+  it("rejects workspace tabs array mutation", async () => {
+    const controller = new ConversationController(
+      dependencies(createConversationWorkspace("base", "base-session"), fakeClient("base")),
+    );
+    await controller.initialize();
+
+    const snap = controller.getSnapshot();
+    const tabCount = snap.workspace!.tabs.length;
+
+    expect(() => {
+      (snap.workspace!.tabs as unknown as { label: number }[]).push({ label: 999 });
+    }).toThrow();
+
+    expect(snap.workspace!.tabs).toHaveLength(tabCount);
+  });
+
+  it("preserves subsequent snapshots after a listener mutation attempt", async () => {
+    const controller = new ConversationController(
+      dependencies(createConversationWorkspace("base", "base-session"), fakeClient("base")),
+    );
+    await controller.initialize();
+
+    const snap1 = controller.getSnapshot();
+    try {
+      (snap1.tabOperations as unknown as Map<string, unknown>).set("hacked", {});
+    } catch { /* expected */ }
+
+    controller.setPromptRunning("base", true);
+    const snap2 = controller.getSnapshot();
+
+    expect(snap2.tabOperations.has("hacked")).toBe(false);
+    expect(snap1.tabOperations.has("hacked")).toBe(false);
+  });
+});

@@ -136,8 +136,30 @@ function copyWorkspace(
   if (!workspace) {
     return undefined;
   }
-  const tabs = workspace.tabs.map((tab) => Object.freeze({ ...tab }));
+  const tabs = Object.freeze(
+    workspace.tabs.map((tab) => Object.freeze({ ...tab })),
+  );
   return Object.freeze({ ...workspace, tabs }) as PersistedConversationWorkspace;
+}
+
+function freezeMap<K, V>(source: ReadonlyMap<K, V>): ReadonlyMap<K, V> {
+  return new FrozenReadonlyMap(source);
+}
+
+class FrozenReadonlyMap<K, V> implements ReadonlyMap<K, V> {
+  constructor(private readonly source: ReadonlyMap<K, V>) {}
+  get size() { return this.source.size; }
+  get(key: K) { return this.source.get(key); }
+  has(key: K) { return this.source.has(key); }
+  entries() { return this.source.entries(); }
+  keys() { return this.source.keys(); }
+  values() { return this.source.values(); }
+  forEach(
+    callbackfn: (value: V, key: K, map: ReadonlyMap<K, V>) => void,
+    thisArg?: unknown,
+  ) { return this.source.forEach(callbackfn, thisArg); }
+  [Symbol.iterator]() { return this.source[Symbol.iterator](); }
+  get [Symbol.toStringTag]() { return "FrozenReadonlyMap"; }
 }
 
 function copySessionState(state: HermesSessionState): HermesSessionState {
@@ -1170,7 +1192,16 @@ export class ConversationController<TClient extends ConversationClient> {
       initializing: snapshot.initializing,
       tabs: snapshot.tabOperations,
     });
-    this.snapshot = Object.freeze({ ...snapshot, controls });
+    this.snapshot = Object.freeze({
+      ...snapshot,
+      controls: {
+        active: controls.active,
+        aggregate: controls.aggregate,
+        byTab: freezeMap(controls.byTab),
+      },
+      sessionStates: freezeMap(snapshot.sessionStates),
+      tabOperations: freezeMap(snapshot.tabOperations),
+    });
     for (const listener of this.listeners) {
       listener(this.snapshot);
     }
