@@ -52,6 +52,7 @@ export interface HermesAcpClientOptions {
 }
 
 const STARTUP_TIMEOUT_MS = 30_000;
+const FINITE_OPERATION_TIMEOUT_MS = 30_000;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -456,9 +457,13 @@ export class HermesAcpClient {
       const entries: HermesHistoryEntry[] = [];
       let cursor: string | undefined;
       do {
-        const response = await context.request(
-          acp.methods.agent.session.list,
-          cursor ? { cursor } : {},
+        const response = await withTimeout(
+          context.request(
+            acp.methods.agent.session.list,
+            cursor ? { cursor } : {},
+          ),
+          FINITE_OPERATION_TIMEOUT_MS,
+          "Hermes ACP session/list",
         );
         entries.push(...normalizeSessionEntries(response.sessions));
         cursor = response.nextCursor ?? undefined;
@@ -492,11 +497,15 @@ export class HermesAcpClient {
       const capture = { sessionId, updates: [] as acp.SessionUpdate[] };
       this.historyCapture = capture;
       try {
-        const response = await this.context.request(acp.methods.agent.session.load, {
-          cwd: this.options.vaultPath,
-          mcpServers: [],
-          sessionId,
-        });
+        const response = await withTimeout(
+          this.context.request(acp.methods.agent.session.load, {
+            cwd: this.options.vaultPath,
+            mcpServers: [],
+            sessionId,
+          }),
+          FINITE_OPERATION_TIMEOUT_MS,
+          "Hermes ACP session/load",
+        );
         this.activeSession?.dispose();
         this.activeSession = undefined;
         this.resumedSessionId = sessionId;
@@ -550,13 +559,17 @@ export class HermesAcpClient {
       if (this.sessionState.currentModel?.switchId === model.switchId) {
         return;
       }
-      const response = await this.context.request<Record<string, never> | null, {
-        modelId: string;
-        sessionId: string;
-      }>("session/set_model", {
-        modelId: model.switchId,
-        sessionId,
-      });
+      const response = await withTimeout(
+        this.context.request<Record<string, never> | null, {
+          modelId: string;
+          sessionId: string;
+        }>("session/set_model", {
+          modelId: model.switchId,
+          sessionId,
+        }),
+        FINITE_OPERATION_TIMEOUT_MS,
+        "Hermes ACP session/set_model",
+      );
       if (response === null) {
         throw new Error("Hermes rejected the model switch");
       }
@@ -922,7 +935,7 @@ function runHermesCommand(executable: string, args: string[]): Promise<void> {
     command: executable,
     args,
   });
-  return childProcess.waitForExit().then((exit) => {
+  const operation = childProcess.waitForExit().then((exit) => {
     if (exit.code === 0) {
       return;
     }
@@ -932,5 +945,14 @@ function runHermesCommand(executable: string, args: string[]): Promise<void> {
         details ? `: ${details}` : ""
       }`,
     );
+  });
+  return withTimeout(
+    operation,
+    FINITE_OPERATION_TIMEOUT_MS,
+    "Hermes config update",
+  ).catch((error) => {
+    // Ensure the child is terminated on any failure
+    childProcess.terminate({ graceMs: 500 }).catch(() => {});
+    throw error;
   });
 }
