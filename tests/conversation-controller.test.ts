@@ -10,6 +10,7 @@ import {
   addPendingConversationTab,
   createConversationWorkspace,
   replaceConversationSession,
+  type PersistedConversationWorkspace,
 } from "../src/conversation-tabs";
 import type { HermesHistoryItem } from "../src/types";
 
@@ -919,6 +920,221 @@ describe("ConversationController close", () => {
     expect(snapshot.workspace?.tabs.map((tab) => tab.id).sort()).toEqual(
       persisted.tabs.map((tab) => tab.id).sort(),
     );
+  });
+
+  it("keeps the active tab visible when successor prepare succeeds but close commit fails", async () => {
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const tabB = fakeClient("tab-b");
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", tabB],
+      ]),
+    );
+    deps.workspace.setWorkspace = vi.fn((_nextWorkspace, options) => {
+      if (options?.save) {
+        throw new Error("persistence write failed");
+      }
+    });
+
+    await expect(controller.closeConversation("base")).rejects.toThrow(
+      "persistence write failed",
+    );
+
+    const snapshot = controller.getSnapshot();
+    const persisted = deps.workspace.getWorkspace()!;
+    expect(snapshot.workspace?.tabs.map((tab) => tab.id)).toEqual([
+      "base",
+      "tab-b",
+    ]);
+    expect(snapshot.workspace?.activeTabId).toBe("base");
+    expect(snapshot.workspace).toEqual(persisted);
+    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
+  });
+
+  // --- Phase 2R.2B RED tests: Close/Switch transition isolation ---
+
+  it("does not cancel an in-flight switch when closing an inactive tab", async () => {
+    const switchHistory = deferred<HermesHistoryItem[]>();
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = addPendingConversationTab(workspace, "tab-c");
+    workspace = replaceConversationSession(workspace, "tab-c", "tab-c-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const tabB = fakeClient("tab-b");
+    const tabC = fakeClient("tab-c");
+    tabC.loadSessionHistory = vi.fn(() => switchHistory.promise);
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", tabB],
+        ["tab-c", tabC],
+      ]),
+    );
+
+    controller.setPromptRunning("base", true);
+    const switchToC = controller.switchConversation("tab-c");
+    const closeB = controller.closeConversation("tab-b");
+    switchHistory.resolve([]);
+
+    const [switchResult, closeResult] = await Promise.all([switchToC, closeB]);
+    expect(switchResult.workspace.activeTabId).toBe("tab-c");
+    expect(closeResult).toMatchObject({ tabId: "tab-b" });
+    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id).sort()).toEqual([
+      "base",
+      "tab-c",
+    ]);
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-c");
+    expect(controller.getSnapshot().tabOperations.get("base")?.prompt).toBe("running");
+    expect(deps.clients.releaseClient).toHaveBeenCalledWith("tab-b");
+    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
+    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("tab-c");
+  });
+
+  it("does not let a delayed inactive close overwrite a newer switch commit", async () => {
+    const closePersistence = deferred<void>();
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = addPendingConversationTab(workspace, "tab-c");
+    workspace = replaceConversationSession(workspace, "tab-c", "tab-c-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const tabB = fakeClient("tab-b");
+    const tabC = fakeClient("tab-c");
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", tabB],
+        ["tab-c", tabC],
+      ]),
+    );
+    const originalSetWorkspace = deps.workspace.setWorkspace;
+    deps.workspace.setWorkspace = vi.fn(async (
+      nextWorkspace: PersistedConversationWorkspace,
+      options?: { flush?: boolean; save?: boolean },
+    ) => {
+      if (!nextWorkspace.tabs.some((tab) => tab.id === "tab-b")) {
+        await closePersistence.promise;
+      }
+      return originalSetWorkspace(nextWorkspace, options);
+    });
+
+    const closeB = controller.closeConversation("tab-b");
+    await Promise.resolve();
+    const switchToC = controller.switchConversation("tab-c");
+    await Promise.resolve();
+    closePersistence.resolve();
+
+    const [closeResult, switchResult] = await Promise.all([closeB, switchToC]);
+    expect(closeResult).toMatchObject({ tabId: "tab-b" });
+    expect(switchResult.workspace.activeTabId).toBe("tab-c");
+    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id).sort()).toEqual([
+      "base",
+      "tab-c",
+    ]);
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-c");
+    expect(controller.getSnapshot().workspace?.activeTabId).toBe("tab-c");
+  });
+
+  it("bases a switch on the latest workspace after an inactive close commits", async () => {
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = addPendingConversationTab(workspace, "tab-c");
+    workspace = replaceConversationSession(workspace, "tab-c", "tab-c-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", fakeClient("tab-b")],
+        ["tab-c", fakeClient("tab-c")],
+      ]),
+    );
+
+    await controller.closeConversation("tab-b");
+    const switchResult = await controller.switchConversation("tab-c");
+
+    expect(switchResult.workspace.tabs.map((tab) => tab.id).sort()).toEqual([
+      "base",
+      "tab-c",
+    ]);
+    expect(switchResult.workspace.activeTabId).toBe("tab-c");
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-c");
+  });
+
+  it("preserves a committed switch when an inactive close commits afterward", async () => {
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = addPendingConversationTab(workspace, "tab-c");
+    workspace = replaceConversationSession(workspace, "tab-c", "tab-c-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", fakeClient("tab-b")],
+        ["tab-c", fakeClient("tab-c")],
+      ]),
+    );
+
+    await controller.switchConversation("tab-c");
+    const closeResult = await controller.closeConversation("tab-b");
+
+    expect(closeResult.workspace.activeTabId).toBe("tab-c");
+    expect(closeResult.workspace.tabs.map((tab) => tab.id).sort()).toEqual([
+      "base",
+      "tab-c",
+    ]);
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-c");
+  });
+
+  it("lets a newer switch win over an older active close preparation", async () => {
+    const successorHistory = deferred<HermesHistoryItem[]>();
+    const switchHistory = deferred<HermesHistoryItem[]>();
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = addPendingConversationTab(workspace, "tab-c");
+    workspace = replaceConversationSession(workspace, "tab-c", "tab-c-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const tabB = fakeClient("tab-b");
+    tabB.loadSessionHistory = vi.fn(() => successorHistory.promise);
+    const tabC = fakeClient("tab-c");
+    tabC.loadSessionHistory = vi.fn(() => switchHistory.promise);
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", tabB],
+        ["tab-c", tabC],
+      ]),
+    );
+
+    const closeBase = controller.closeConversation("base");
+    const switchToC = controller.switchConversation("tab-c");
+    switchHistory.resolve([]);
+    await expect(switchToC).resolves.toMatchObject({ tabId: "tab-c" });
+    successorHistory.resolve([]);
+
+    await expect(closeBase).rejects.toMatchObject({ code: "cancelled" });
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-c");
+    expect(deps.workspace.getWorkspace()?.tabs.some((tab) => tab.id === "base")).toBe(true);
+    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
   });
 });
 
