@@ -6,12 +6,10 @@ import type {
 } from "@agentclientprotocol/sdk";
 import { diffLines } from "diff";
 import {
-  type App,
   ItemView,
   MarkdownRenderer,
   MarkdownView,
   Notice,
-  SuggestModal,
   WorkspaceLeaf,
   setIcon,
 } from "obsidian";
@@ -56,7 +54,12 @@ import {
   buildSelectionPrompt,
   validateSelectionEdit,
 } from "./selection-context";
-import { REASONING_EFFORTS, reasoningEffortLabel } from "./session-history";
+import { reasoningEffortLabel } from "./session-history";
+import {
+  HermesModelSuggestModal,
+  HermesHistorySuggestModal,
+  HermesReasoningSuggestModal,
+} from "./ui/conversation-modals";
 import {
   buildSlashOutboundPrompt,
   buildSlashMenuItems,
@@ -129,122 +132,6 @@ function readFileAsDataUrl(file: File): Promise<string> {
     });
     reader.readAsDataURL(file);
   });
-}
-
-class HermesModelSuggestModal extends SuggestModal<HermesModelOption> {
-  constructor(
-    app: App,
-    private readonly models: HermesModelOption[],
-    private readonly currentSwitchId: string | undefined,
-    private readonly choose: (model: HermesModelOption) => void,
-  ) {
-    super(app);
-    this.setPlaceholder("Search provider or model…");
-  }
-
-  getSuggestions(query: string): HermesModelOption[] {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) {
-      return this.models;
-    }
-    return this.models.filter((model) =>
-      [model.providerName, model.providerId, model.name, model.modelId, model.description]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalized),
-    );
-  }
-
-  renderSuggestion(model: HermesModelOption, element: HTMLElement): void {
-    const row = element.createDiv({ cls: "hermesian-model-suggestion" });
-    const copy = row.createDiv({ cls: "hermesian-model-suggestion-copy" });
-    copy.createDiv({ text: model.name, cls: "hermesian-model-suggestion-name" });
-    copy.createDiv({
-      text: `${model.providerName}${model.description ? ` · ${model.description}` : ""}`,
-      cls: "hermesian-model-suggestion-provider",
-    });
-    if (model.switchId === this.currentSwitchId) {
-      const check = row.createSpan({ cls: "hermesian-model-suggestion-check" });
-      setIcon(check, "check");
-    }
-  }
-
-  onChooseSuggestion(model: HermesModelOption): void {
-    this.choose(model);
-  }
-}
-
-class HermesHistorySuggestModal extends SuggestModal<HermesHistoryEntry> {
-  constructor(
-    app: App,
-    private readonly sessions: HermesHistoryEntry[],
-    private readonly choose: (session: HermesHistoryEntry) => void,
-  ) {
-    super(app);
-    this.setPlaceholder("Search historical Hermes sessions…");
-  }
-
-  getSuggestions(query: string): HermesHistoryEntry[] {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) {
-      return this.sessions;
-    }
-    return this.sessions.filter((session) =>
-      [session.title ?? "", session.sessionId, session.cwd]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalized),
-    );
-  }
-
-  renderSuggestion(session: HermesHistoryEntry, element: HTMLElement): void {
-    const row = element.createDiv({ cls: "hermesian-history-suggestion" });
-    row.createDiv({
-      text: session.title || "Untitled Hermes session",
-      cls: "hermesian-history-title",
-    });
-    row.createDiv({
-      text: `${session.updatedAt ?? "No timestamp"} · ${session.sessionId}`,
-      cls: "hermesian-history-meta",
-    });
-  }
-
-  onChooseSuggestion(session: HermesHistoryEntry): void {
-    this.choose(session);
-  }
-}
-
-class HermesReasoningSuggestModal extends SuggestModal<ReasoningEffort> {
-  constructor(
-    app: App,
-    private readonly current: ReasoningEffort,
-    private readonly choose: (effort: ReasoningEffort) => void,
-  ) {
-    super(app);
-    this.setPlaceholder("Select thinking depth…");
-  }
-
-  getSuggestions(query: string): ReasoningEffort[] {
-    const normalized = query.trim().toLowerCase();
-    return normalized
-      ? REASONING_EFFORTS.filter((effort) =>
-          reasoningEffortLabel(effort).toLowerCase().includes(normalized),
-        )
-      : REASONING_EFFORTS;
-  }
-
-  renderSuggestion(effort: ReasoningEffort, element: HTMLElement): void {
-    const row = element.createDiv({ cls: "hermesian-reasoning-option" });
-    row.createSpan({ text: reasoningEffortLabel(effort) });
-    if (effort === this.current) {
-      const check = row.createSpan({ cls: "hermesian-reasoning-check" });
-      setIcon(check, "check");
-    }
-  }
-
-  onChooseSuggestion(effort: ReasoningEffort): void {
-    this.choose(effort);
-  }
 }
 
 export class HermesianSidebarView extends ItemView {
