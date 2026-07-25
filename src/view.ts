@@ -1002,6 +1002,7 @@ export class HermesianSidebarView extends ItemView {
 
   private async addConversation(): Promise<void> {
     if (
+      !this.controller ||
       this.initializing ||
       this.controlsBusy ||
       this.closingConversationTabId !== undefined ||
@@ -1011,45 +1012,43 @@ export class HermesianSidebarView extends ItemView {
     }
     this.transitions.invalidateSwitch();
     this.captureActiveConversationRuntime();
-    const workspace = this.conversationWorkspace;
-    if (!workspace) {
-      return;
-    }
-    const tabId = crypto.randomUUID();
-    this.conversationWorkspace = addPendingConversationTab(workspace, tabId);
-    this.pendingSelection = undefined;
-    this.tabSelections.set(tabId, undefined);
-    this.showConversationMessages(tabId);
-    this.resetConversationView(tabId);
-    this.restoreActiveConversationRuntime();
-    this.renderConversationTabs();
-    this.appendSystemMessage("Starting a new Hermes conversation…", false, tabId);
-    this.updateControls(false);
-    try {
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-      const client = this.plugin.getClient(tabId);
-      await client.connect();
-      const sessionId = client.sessionId;
-      if (!sessionId) {
-        throw new Error("Hermes ACP did not return a new session ID");
-      }
-      this.conversationWorkspace = replaceConversationSession(
-        this.conversationWorkspace,
-        tabId,
-        sessionId,
-      );
-      if (this.conversationWorkspace.activeTabId === tabId) {
-        this.showConversationMessages(tabId);
-        this.resetConversationView(tabId);
-      }
-      this.loadedMessageTabIds.add(tabId);
+    const existingTabIds = new Set(
+      this.conversationWorkspace?.tabs.map((tab) => tab.id) ?? [],
+    );
+    const adding = this.controller.addConversation();
+    const pendingWorkspace = this.controller.getSnapshot().workspace;
+    const pendingTabId = pendingWorkspace?.activeTabId;
+    if (pendingTabId && !existingTabIds.has(pendingTabId)) {
+      this.pendingSelection = undefined;
+      this.tabSelections.set(pendingTabId, undefined);
+      this.showConversationMessages(pendingTabId);
+      this.resetConversationView(pendingTabId);
+      this.restoreActiveConversationRuntime();
       this.renderConversationTabs();
-      this.appendSystemMessage("New Hermes conversation started.", false, tabId);
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
+      this.appendSystemMessage(
+        "Starting a new Hermes conversation…",
+        false,
+        pendingTabId,
+      );
+    }
+
+    try {
+      const result = await adding;
+      this.conversationWorkspace = result.workspace;
+      this.loadedMessageTabIds.add(result.tabId);
+      if (result.workspace.activeTabId === result.tabId) {
+        this.showConversationMessages(result.tabId);
+        this.resetConversationView(result.tabId);
+        this.restoreActiveConversationRuntime();
+      }
+      this.renderConversationTabs();
+      this.appendSystemMessage(
+        "New Hermes conversation started.",
+        false,
+        result.tabId,
+      );
     } catch (error) {
       new Notice(`Hermesian could not add a conversation: ${this.messageFor(error)}`);
-    } finally {
-      this.updateControls(false);
     }
   }
 

@@ -5,6 +5,7 @@ import {
   type TabOperationState,
 } from "./conversation-runtime";
 import {
+  addPendingConversationTab,
   replaceConversationSession,
   type PersistedConversationTab,
   type PersistedConversationWorkspace,
@@ -88,6 +89,7 @@ export interface EnsureClientResult {
 export interface AddConversationResult {
   sessionId?: string;
   tabId: string;
+  workspace: PersistedConversationWorkspace;
 }
 
 export interface SwitchConversationResult {
@@ -408,9 +410,16 @@ export class ConversationController<TClient extends ConversationClient> {
   }
 
   private publishWorkspace(workspace: PersistedConversationWorkspace): void {
+    const tabOperations = new Map(runtimeForWorkspace(workspace));
+    for (const [tabId, current] of this.snapshot.tabOperations) {
+      const seeded = tabOperations.get(tabId);
+      if (seeded) {
+        tabOperations.set(tabId, Object.freeze({ ...seeded, ...current }));
+      }
+    }
     this.publish({
       ...this.snapshot,
-      tabOperations: runtimeForWorkspace(workspace),
+      tabOperations,
       workspace: copyWorkspace(workspace),
     });
   }
@@ -438,7 +447,77 @@ export class ConversationController<TClient extends ConversationClient> {
 
   addConversation(): Promise<AddConversationResult> {
     const blocked = this.blockedDuringStartup<AddConversationResult>("addConversation");
-    return blocked ?? this.notImplemented("addConversation");
+    return blocked ?? this.addConversationInternal();
+  }
+
+  private async addConversationInternal(): Promise<AddConversationResult> {
+    const generation = this.operations.getTransitionGeneration();
+    const currentWorkspace = copyWorkspace(
+      this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+    );
+    if (!currentWorkspace) {
+      throw this.controllerError("workspace_conflict", "Conversation workspace is unavailable");
+    }
+
+    const tabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
+    const pendingWorkspace = addPendingConversationTab(currentWorkspace, tabId);
+    const token = this.operations.begin(tabId);
+    let succeeded = false;
+    const client = this.dependencies.clients.acquireClient(tabId);
+    this.publishWorkspace(pendingWorkspace);
+    this.updateTabOperation(tabId, {
+      connection: "loading",
+      hasSession: false,
+      sessionOperation: "idle",
+    });
+
+    try {
+      await this.dependencies.workspace.setWorkspace(pendingWorkspace, { save: true });
+      this.assertCurrentOperation(tabId, client, token, generation);
+      await client.connect();
+      this.assertCurrentOperation(tabId, client, token, generation);
+      const sessionId = client.sessionId;
+      if (!sessionId) {
+        throw this.controllerError("client_unavailable", "Hermes did not return a new session ID", tabId);
+      }
+
+      const latestWorkspace = copyWorkspace(
+        this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+      );
+      if (!latestWorkspace?.tabs.some((tab) => tab.id === tabId)) {
+        await this.dependencies.clients.releaseClient(tabId);
+        throw this.controllerError("workspace_conflict", "Added conversation tab no longer exists", tabId);
+      }
+      const committedWorkspace = replaceConversationSession(
+        latestWorkspace,
+        tabId,
+        sessionId,
+      );
+      this.assertCurrentOperation(tabId, client, token, generation);
+      await this.dependencies.workspace.setWorkspace(committedWorkspace, {
+        flush: true,
+        save: true,
+      });
+      this.assertCurrentOperation(tabId, client, token, generation);
+      this.publishWorkspace(committedWorkspace);
+      this.updateTabOperation(tabId, {
+        connection: "ready",
+        hasSession: true,
+        sessionOperation: "idle",
+      });
+      succeeded = true;
+      return { sessionId, tabId, workspace: copyWorkspace(committedWorkspace)! };
+    } catch (error) {
+      if (this.isCurrentTransition(generation) && this.operations.isCurrent(token)) {
+        this.updateTabOperation(tabId, { connection: "failed" });
+      }
+      throw error;
+    } finally {
+      this.operations.complete(token);
+      if (!succeeded && this.isCurrentTransition(generation)) {
+        this.updateTabOperation(tabId, { connection: "failed" });
+      }
+    }
   }
 
   switchConversation(tabId: string): Promise<SwitchConversationResult> {

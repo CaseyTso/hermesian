@@ -42,6 +42,7 @@ function dependencies(
   workspace: ReturnType<typeof createConversationWorkspace> | undefined,
   client: FakeClient,
   clientsByTab?: Map<string, FakeClient>,
+  createTabId: () => string = () => client.id,
 ): ConversationControllerDependencies<FakeClient> {
   const clients = clientsByTab ?? new Map([[client.id, client]]);
   let currentWorkspace = workspace;
@@ -58,7 +59,7 @@ function dependencies(
         currentWorkspace = nextWorkspace;
       }),
     },
-    createTabId: () => client.id,
+    createTabId,
   };
 }
 
@@ -294,5 +295,150 @@ describe("ConversationController initialization", () => {
     });
     connect.resolve();
     await initialization;
+  });
+});
+
+describe("ConversationController add", () => {
+  async function readyController(
+    newClients: Map<string, FakeClient>,
+    createTabId: () => string,
+  ): Promise<{
+    base: FakeClient;
+    controller: ConversationController<FakeClient>;
+    deps: ConversationControllerDependencies<FakeClient>;
+  }> {
+    const base = fakeClient("base");
+    const workspace = createConversationWorkspace("base", "base-session");
+    const deps = dependencies(
+      workspace,
+      base,
+      new Map([["base", base], ...newClients]),
+      createTabId,
+    );
+    const controller = new ConversationController(deps);
+    await controller.initialize();
+    return { base, controller, deps };
+  }
+
+  it("creates a stable pending tab and marks it loading before connect resolves", async () => {
+    const connect = deferred<void>();
+    const added = fakeClient("new-tab");
+    added.connect = vi.fn(() => connect.promise);
+    const { controller } = await readyController(
+      new Map([["new-tab", added]]),
+      () => "new-tab",
+    );
+
+    const adding = controller.addConversation();
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.workspace?.tabs.at(-1)).toMatchObject({
+      id: "new-tab",
+      sessionId: null,
+    });
+    expect(snapshot.workspace?.activeTabId).toBe("new-tab");
+    expect(snapshot.tabOperations.get("new-tab")?.connection).toBe("loading");
+    await Promise.resolve();
+    expect(added.connect).toHaveBeenCalledOnce();
+
+    connect.resolve();
+    const result = await adding;
+    expect(result).toMatchObject({ sessionId: "new-tab-session", tabId: "new-tab" });
+    expect(controller.getSnapshot().tabOperations.get("new-tab")?.connection).toBe("ready");
+  });
+
+  it("keeps concurrent adds isolated and commits by stable tab ID", async () => {
+    const firstConnect = deferred<void>();
+    const secondConnect = deferred<void>();
+    const first = fakeClient("new-one");
+    const second = fakeClient("new-two");
+    first.connect = vi.fn(() => firstConnect.promise);
+    second.connect = vi.fn(() => secondConnect.promise);
+    const ids = ["new-one", "new-two"];
+    let nextId = 0;
+    const { controller } = await readyController(
+      new Map([
+        ["new-one", first],
+        ["new-two", second],
+      ]),
+      () => ids[nextId++]!,
+    );
+
+    const firstAdd = controller.addConversation();
+    const secondAdd = controller.addConversation();
+    expect(controller.getSnapshot().workspace?.tabs.map((tab) => tab.id)).toEqual([
+      "base",
+      "new-one",
+      "new-two",
+    ]);
+
+    secondConnect.resolve();
+    firstConnect.resolve();
+    const [firstResult, secondResult] = await Promise.all([firstAdd, secondAdd]);
+    expect(firstResult).toMatchObject({ sessionId: "new-one-session", tabId: "new-one" });
+    expect(secondResult).toMatchObject({ sessionId: "new-two-session", tabId: "new-two" });
+    expect(controller.getSnapshot().workspace?.tabs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "new-one", sessionId: "new-one-session" }),
+        expect.objectContaining({ id: "new-two", sessionId: "new-two-session" }),
+      ]),
+    );
+  });
+
+  it("does not let an add continuation reclaim an active tab changed during connect", async () => {
+    const connect = deferred<void>();
+    const added = fakeClient("new-tab");
+    added.connect = vi.fn(() => connect.promise);
+    const { controller, deps } = await readyController(
+      new Map([["new-tab", added]]),
+      () => "new-tab",
+    );
+
+    const adding = controller.addConversation();
+    const pending = deps.workspace.getWorkspace()!;
+    deps.workspace.setWorkspace({ ...pending, activeTabId: "base" });
+    connect.resolve();
+
+    const result = await adding;
+    expect(result.tabId).toBe("new-tab");
+    expect(result.workspace.activeTabId).toBe("base");
+  });
+
+  it("keeps a failed pending tab visible and marks its connection failed", async () => {
+    const added = fakeClient("new-tab");
+    added.connect = vi.fn(async () => {
+      throw new Error("connect failed");
+    });
+    const { controller } = await readyController(
+      new Map([["new-tab", added]]),
+      () => "new-tab",
+    );
+
+    await expect(controller.addConversation()).rejects.toThrow("connect failed");
+    expect(controller.getSnapshot().workspace?.tabs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "new-tab", sessionId: null })]),
+    );
+    expect(controller.getSnapshot().tabOperations.get("new-tab")?.connection).toBe("failed");
+  });
+
+  it("does not commit a session after a deferred tab was removed", async () => {
+    const connect = deferred<void>();
+    const added = fakeClient("new-tab");
+    added.connect = vi.fn(() => connect.promise);
+    const { controller, deps } = await readyController(
+      new Map([["new-tab", added]]),
+      () => "new-tab",
+    );
+
+    const adding = controller.addConversation();
+    const pending = deps.workspace.getWorkspace()!;
+    deps.workspace.setWorkspace({
+      ...pending,
+      activeTabId: "base",
+      tabs: pending.tabs.filter((tab) => tab.id !== "new-tab"),
+    });
+    connect.resolve();
+
+    await expect(adding).rejects.toMatchObject({ code: "workspace_conflict" });
+    expect(deps.workspace.getWorkspace()?.tabs.some((tab) => tab.id === "new-tab")).toBe(false);
   });
 });
