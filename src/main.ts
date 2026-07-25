@@ -308,6 +308,51 @@ export default class HermesianPlugin extends Plugin {
     await this.flushConversationWorkspace();
   }
 
+  async savePluginSettings(): Promise<void> {
+    await this.savePluginData();
+  }
+
+  getConnectionSettings(): Pick<
+    HermesianSettings,
+    "acceptHooks" | "hermesExecutable" | "profile"
+  > {
+    return {
+      acceptHooks: this.settings.acceptHooks,
+      hermesExecutable: this.settings.hermesExecutable,
+      profile: this.settings.profile,
+    };
+  }
+
+  async applyConnectionSettings(
+    next: Pick<HermesianSettings, "acceptHooks" | "hermesExecutable" | "profile">,
+  ): Promise<boolean> {
+    if (!this.canApplyConnectionSettings()) {
+      new Notice(
+        "Cannot apply connection settings while Hermes is busy — wait for all conversations to finish and try again.",
+      );
+      return false;
+    }
+    const previous = this.getConnectionSettings();
+    this.settings.hermesExecutable = next.hermesExecutable;
+    this.settings.profile = next.profile;
+    this.settings.acceptHooks = next.acceptHooks;
+
+    try {
+      await this.savePluginSettings();
+      await this.disconnectAllClients();
+      new Notice("Hermesian connection settings applied.");
+      return true;
+    } catch (error) {
+      this.settings.hermesExecutable = previous.hermesExecutable;
+      this.settings.profile = previous.profile;
+      this.settings.acceptHooks = previous.acceptHooks;
+      new Notice(
+        `Hermesian: failed to apply connection settings — ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+  }
+
   getConversationWorkspace(): PersistedConversationWorkspace | undefined {
     return normalizeConversationWorkspace(this.conversationWorkspace);
   }

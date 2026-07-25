@@ -29,33 +29,33 @@ export class HermesianSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "Hermesian" });
 
+    const draft = this.plugin.getConnectionSettings();
+
     new Setting(containerEl)
       .setName("Hermes executable")
       .setDesc(
-        "Executable name or absolute path. Hermesian also checks ~/.local/bin/hermes and common Homebrew locations when set to ‘hermes’.",
+        "Executable name or absolute path. Hermesian also checks ~/.local/bin/hermes and common Homebrew locations when set to 'hermes'.",
       )
       .addText((text) =>
         text
           .setPlaceholder("hermes")
-          .setValue(this.plugin.settings.hermesExecutable)
-          .onChange(async (value) => {
-            this.plugin.settings.hermesExecutable = value.trim() || "hermes";
-            await this.plugin.saveSettingsAndReconnect();
+          .setValue(draft.hermesExecutable)
+          .onChange((value) => {
+            draft.hermesExecutable = value.trim() || "hermes";
           }),
       );
 
     new Setting(containerEl)
       .setName("Hermes profile")
       .setDesc(
-        "Profile selected with Hermes’ --profile flag. Use ‘default’ for the default Hermes profile; credentials stay in Hermes.",
+        "Profile selected with Hermes' --profile flag. Use 'default' for the default Hermes profile; credentials stay in Hermes.",
       )
       .addText((text) =>
         text
           .setPlaceholder("default")
-          .setValue(this.plugin.settings.profile)
-          .onChange(async (value) => {
-            this.plugin.settings.profile = value.trim();
-            await this.plugin.saveSettingsAndReconnect();
+          .setValue(draft.profile)
+          .onChange((value) => {
+            draft.profile = value.trim();
           }),
       );
 
@@ -66,10 +66,30 @@ export class HermesianSettingTab extends PluginSettingTab {
       )
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.acceptHooks)
-          .onChange(async (value) => {
-            this.plugin.settings.acceptHooks = value;
-            await this.plugin.saveSettingsAndReconnect();
+          .setValue(draft.acceptHooks)
+          .onChange((value) => {
+            draft.acceptHooks = value;
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Apply connection settings")
+      .setDesc(
+        "Save the executable, profile and hook settings above and restart active Hermes connections. Only available when all conversations are idle.",
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Apply")
+          .setCta()
+          .onClick(async () => {
+            const applied = await this.plugin.applyConnectionSettings({
+              acceptHooks: draft.acceptHooks,
+              hermesExecutable: draft.hermesExecutable,
+              profile: draft.profile,
+            });
+            if (applied) {
+              this.display();
+            }
           }),
       );
 
