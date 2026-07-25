@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ConversationOperationCoordinator,
   deriveConversationControlAvailability,
+  deriveConversationControls,
   removeTabOperation,
   type ConversationRuntimeState,
   type TabOperationState,
@@ -208,6 +209,59 @@ describe("conversation runtime control availability", () => {
     const availability = deriveConversationControlAvailability(state);
 
     expect(availability.send).toBe(availability.composer && availability.hasSession);
+  });
+
+  it("publishes aggregate and per-tab controls from one runtime state", () => {
+    const controls = deriveConversationControls(
+      runtimeState(
+        new Map([
+          ["tab-a", tabState({ prompt: "running" })],
+          ["tab-b", tabState()],
+        ]),
+      ),
+    );
+
+    expect(controls.byTab.get("tab-a")).toMatchObject({
+      composer: false,
+      send: false,
+      stop: true,
+    });
+    expect(controls.byTab.get("tab-b")).toMatchObject({
+      composer: true,
+      send: true,
+      stop: false,
+    });
+    expect(controls.active).toBe(controls.byTab.get("tab-b"));
+    expect(controls.aggregate).toEqual({
+      connectionSettings: false,
+      reasoning: false,
+      tabNavigation: true,
+    });
+  });
+
+  it("keeps permission controls target-scoped while blocking global navigation", () => {
+    const controls = deriveConversationControls(
+      runtimeState(
+        new Map([
+          ["tab-a", tabState({ permissionPending: true })],
+          ["tab-b", tabState()],
+        ]),
+      ),
+    );
+
+    expect(controls.byTab.get("tab-a")).toMatchObject({
+      composer: false,
+      send: false,
+    });
+    expect(controls.byTab.get("tab-b")).toMatchObject({
+      composer: true,
+      send: true,
+    });
+    expect(controls.aggregate).toEqual({
+      connectionSettings: false,
+      reasoning: false,
+      tabNavigation: false,
+    });
   });
 });
 

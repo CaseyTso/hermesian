@@ -138,6 +138,35 @@ describe("ConversationController boundary", () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
+  it("publishes active, per-tab, and aggregate controls in every snapshot", async () => {
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = { ...workspace, activeTabId: "tab-b" };
+    const controller = new ConversationController(
+      dependencies(workspace, fakeClient("tab-b")),
+    );
+
+    await controller.initialize();
+    controller.setPromptRunning("tab-a", true);
+    const snapshot = controller.getSnapshot();
+
+    expect(snapshot.controls.active).toBe(snapshot.controls.byTab.get("tab-b"));
+    expect(snapshot.controls.byTab.get("tab-a")).toMatchObject({
+      send: false,
+      stop: true,
+    });
+    expect(snapshot.controls.byTab.get("tab-b")).toMatchObject({
+      send: true,
+      stop: false,
+    });
+    expect(snapshot.controls.aggregate).toMatchObject({
+      connectionSettings: false,
+      reasoning: false,
+      tabNavigation: true,
+    });
+  });
+
   it("does not depend on Obsidian or DOM globals", () => {
     const source = readFileSync(
       new URL("../src/conversation-controller.ts", import.meta.url),
@@ -146,6 +175,25 @@ describe("ConversationController boundary", () => {
 
     expect(source).not.toMatch(/from ["']obsidian["']/);
     expect(source).not.toMatch(/\bHTMLElement\b/);
+  });
+
+  it("keeps control availability ownership out of View and Plugin", () => {
+    const viewSource = readFileSync(
+      new URL("../src/view.ts", import.meta.url),
+      "utf8",
+    );
+    const pluginSource = readFileSync(
+      new URL("../src/main.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(viewSource.includes("deriveConversationControlAvailability")).toBe(false);
+    expect(viewSource.includes("conversationRuntimeState(")).toBe(false);
+    expect(viewSource.includes("getSnapshot().controls")).toBe(true);
+    expect(viewSource.includes("controlAvailability()")).toBe(true);
+    expect(pluginSource.includes("hasBusyClient")).toBe(false);
+    expect(pluginSource.includes("getAggregateConversationControls")).toBe(true);
+    expect(pluginSource.includes("canApplyConnectionSettings")).toBe(true);
   });
 
   it("accepts fake clients whose protocol operations can be deferred", async () => {

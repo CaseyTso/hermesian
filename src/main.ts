@@ -203,8 +203,14 @@ export default class HermesianPlugin extends Plugin {
     return this.clients.peek(tabId);
   }
 
-  hasBusyClient(): boolean {
-    return this.clients.some((client) => client.isBusy || client.isOperating);
+  canApplyConnectionSettings(): boolean {
+    const aggregate = this.sidebarView?.getAggregateConversationControls();
+    if (aggregate) {
+      return aggregate.connectionSettings;
+    }
+    return !this.clients.some(
+      (client) => client.isBusy || client.isOperating,
+    );
   }
 
   async releaseClient(tabId: string): Promise<void> {
@@ -340,7 +346,7 @@ export default class HermesianPlugin extends Plugin {
   }
 
   async setReasoningEffort(tabId: string, effort: ReasoningEffort): Promise<void> {
-    if (this.hasBusyClient()) {
+    if (!this.canApplyConnectionSettings()) {
       throw new Error("Cannot change thinking depth while Hermes is responding");
     }
     await this.getClient(tabId).configureReasoningEffort(effort);

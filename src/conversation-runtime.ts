@@ -25,6 +25,7 @@ export interface ConversationRuntimeState {
 }
 
 export interface ConversationControlAvailability {
+  activate: boolean;
   add: boolean;
   close: boolean;
   composer: boolean;
@@ -32,9 +33,22 @@ export interface ConversationControlAvailability {
   history: boolean;
   model: boolean;
   reasoning: boolean;
+  restart: boolean;
   send: boolean;
   stop: boolean;
   tabNavigation: boolean;
+}
+
+export interface ConversationAggregateControlAvailability {
+  connectionSettings: boolean;
+  reasoning: boolean;
+  tabNavigation: boolean;
+}
+
+export interface ConversationControls {
+  active: ConversationControlAvailability;
+  aggregate: ConversationAggregateControlAvailability;
+  byTab: ReadonlyMap<string, ConversationControlAvailability>;
 }
 
 function isConnectionLoading(tab: TabOperationState): boolean {
@@ -61,6 +75,9 @@ export function deriveConversationControlAvailability(
   const anyPermissionPending = Array.from(state.tabs.values()).some(
     (tab) => tab.permissionPending,
   );
+  const anyTabClosing = Array.from(state.tabs.values()).some(
+    (tab) => tab.closing,
+  );
   const activeTabBusy = activeTab?.prompt === "running";
   const activeTabLoading = activeTab ? isConnectionLoading(activeTab) : false;
   const activeSessionOperation = activeTab
@@ -75,8 +92,30 @@ export function deriveConversationControlAvailability(
     activePermissionPending ||
     activeTab?.closing === true;
   const hasSession = activeTab?.connection === "ready" && activeTab.hasSession;
+  const aggregate = Object.freeze({
+    connectionSettings:
+      !globalBusy &&
+      !anyTabBusy &&
+      !anyTabLoading &&
+      !anySessionOperation &&
+      !anyPermissionPending &&
+      !anyTabClosing,
+    reasoning:
+      !globalBusy &&
+      !anyTabBusy &&
+      !anyTabLoading &&
+      !anySessionOperation &&
+      !anyPermissionPending &&
+      !anyTabClosing,
+    tabNavigation: !globalBusy && !anyPermissionPending,
+  });
 
   return {
+    activate:
+      Boolean(activeTab) &&
+      aggregate.tabNavigation &&
+      !activeTabLoading &&
+      activeTab?.closing !== true,
     add:
       Boolean(activeTab) &&
       !globalBusy &&
@@ -99,16 +138,86 @@ export function deriveConversationControlAvailability(
     hasSession,
     history: !activeSessionBusy,
     model: !activeSessionBusy,
-    reasoning:
-      !globalBusy &&
-      !anyTabBusy &&
-      !anyTabLoading &&
-      !anySessionOperation &&
-      !anyPermissionPending,
+    reasoning: aggregate.reasoning,
+    restart: !activeSessionBusy,
     send: !activeSessionBusy && hasSession,
     stop: activeTabBusy === true,
-    tabNavigation: !globalBusy && !anyPermissionPending,
+    tabNavigation: aggregate.tabNavigation,
   };
+}
+
+interface ConversationAggregateFacts {
+  anyTabBusy: boolean;
+  anyTabClosing: boolean;
+  anyTabLoading: boolean;
+  anyPermissionPending: boolean;
+  anySessionOperation: boolean;
+  globalBusy: boolean;
+}
+
+function computeAggregateFacts(state: ConversationRuntimeState): ConversationAggregateFacts {
+  let anyTabBusy = false;
+  let anyTabClosing = false;
+  let anyTabLoading = false;
+  let anyPermissionPending = false;
+  let anySessionOperation = false;
+  for (const tab of state.tabs.values()) {
+    if (tab.prompt === "running") anyTabBusy = true;
+    if (tab.closing) anyTabClosing = true;
+    if (isConnectionLoading(tab)) anyTabLoading = true;
+    if (tab.permissionPending) anyPermissionPending = true;
+    if (isSessionOperationRunning(tab)) anySessionOperation = true;
+  }
+  return Object.freeze({
+    anyTabBusy,
+    anyTabClosing,
+    anyTabLoading,
+    anyPermissionPending,
+    anySessionOperation,
+    globalBusy: state.initializing || state.globalOperation !== "idle",
+  });
+}
+
+export function deriveConversationAggregateControls(
+  facts: ConversationAggregateFacts,
+): ConversationAggregateControlAvailability {
+  const connectionSettings =
+    !facts.globalBusy &&
+    !facts.anyTabBusy &&
+    !facts.anyTabLoading &&
+    !facts.anySessionOperation &&
+    !facts.anyPermissionPending &&
+    !facts.anyTabClosing;
+  return Object.freeze({
+    connectionSettings,
+    reasoning: connectionSettings,
+    tabNavigation: !facts.globalBusy && !facts.anyPermissionPending,
+  });
+}
+
+export function deriveConversationControls(
+  state: ConversationRuntimeState,
+): ConversationControls {
+  const facts = computeAggregateFacts(state);
+  const aggregate = deriveConversationAggregateControls(facts);
+  const byTab = new Map<string, ConversationControlAvailability>();
+  for (const tabId of state.tabs.keys()) {
+    byTab.set(
+      tabId,
+      Object.freeze(deriveConversationControlAvailability(state, tabId)),
+    );
+  }
+  const active = state.activeTabId
+    ? byTab.get(state.activeTabId)
+    : undefined;
+  const fallback = Object.freeze(
+    deriveConversationControlAvailability(state, state.activeTabId),
+  );
+  return Object.freeze({
+    active: active ?? fallback,
+    aggregate,
+    byTab,
+  });
 }
 
 export function createInitialConversationRuntimeState(

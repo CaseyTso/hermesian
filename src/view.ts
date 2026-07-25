@@ -30,9 +30,8 @@ import {
   type PersistedConversationWorkspace,
 } from "./conversation-tabs";
 import {
-  deriveConversationControlAvailability,
-  type ConversationRuntimeState,
-  type TabOperationState,
+  type ConversationAggregateControlAvailability,
+  type ConversationControlAvailability,
 } from "./conversation-runtime";
 import { linkifyExternalUrls } from "./external-links";
 import { HERMESIAN_ICON_ID } from "./hermes-icon";
@@ -91,6 +90,22 @@ export const HERMESIAN_VIEW_TYPE = "hermesian-sidebar";
 const OBSIDIAN_OUTPUT_RULES = `<hermesian_output_rules>
 When referring to a note in the current Obsidian Vault, use an Obsidian wikilink such as [[folder/note|note]]. Preserve heading (#) and block (^) suffixes when relevant. Do not wrap wikilinks in backticks or code blocks.
 </hermesian_output_rules>`;
+
+const DISABLED_CONVERSATION_CONTROLS: ConversationControlAvailability =
+  Object.freeze({
+    activate: false,
+    add: false,
+    close: false,
+    composer: false,
+    hasSession: false,
+    history: false,
+    model: false,
+    reasoning: false,
+    restart: false,
+    send: false,
+    stop: false,
+    tabNavigation: false,
+  });
 
 interface PendingPermission {
   card: HTMLElement;
@@ -296,6 +311,12 @@ export class HermesianSidebarView extends ItemView {
     if (!this.conversationWorkspace || this.conversationWorkspace.activeTabId === tabId) {
       this.renderSessionState(state);
     }
+  }
+
+  getAggregateConversationControls():
+    | ConversationAggregateControlAvailability
+    | undefined {
+    return this.controller?.getSnapshot().controls.aggregate;
   }
 
   requestPermission(
@@ -640,22 +661,15 @@ export class HermesianSidebarView extends ItemView {
     );
   }
 
-  private conversationRuntimeState(_state: HermesSessionState): ConversationRuntimeState {
-    const snapshot = this.controller?.getSnapshot();
-    return {
-      activeTabId: snapshot?.workspace?.activeTabId ?? this.conversationWorkspace?.activeTabId,
-      globalOperation: snapshot?.globalOperation ?? "idle",
-      initializing: snapshot?.initializing ?? true,
-      tabs: snapshot?.tabOperations ?? new Map<string, TabOperationState>(),
-    };
-  }
-
-  private controlAvailability(state = this.activeSessionState()) {
-    return deriveConversationControlAvailability(this.conversationRuntimeState(state));
+  private controlAvailability() {
+    return this.controller?.getSnapshot().controls.active ?? DISABLED_CONVERSATION_CONTROLS;
   }
 
   private tabControlAvailability(tabId: string) {
-    return deriveConversationControlAvailability(this.conversationRuntimeState(this.activeSessionState()), tabId);
+    return (
+      this.controller?.getSnapshot().controls.byTab.get(tabId) ??
+      DISABLED_CONVERSATION_CONTROLS
+    );
   }
 
   private async ensureClientForTab(
@@ -1126,7 +1140,7 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
     const activeTab = this.activeConversationTab();
-    if (!activeTab || this.plugin.hasBusyClient()) {
+    if (!activeTab || !this.plugin.canApplyConnectionSettings()) {
       return;
     }
     this.captureActiveConversationRuntime();
@@ -1160,7 +1174,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private renderSessionState(state: HermesSessionState): void {
-    const availability = this.controlAvailability(state);
+    const availability = this.controlAvailability();
     this.renderAddConversationControl();
     this.historyButtonEl.disabled = !availability.history;
     this.reasoningButtonEl.disabled = !availability.reasoning;

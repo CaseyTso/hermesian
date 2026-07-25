@@ -1,6 +1,8 @@
 import type { HermesSessionState, HermesHistoryItem } from "./types";
 import {
   ConversationOperationCoordinator,
+  deriveConversationControls,
+  type ConversationControls,
   type ConversationRuntimeState,
   type TabOperationState,
 } from "./conversation-runtime";
@@ -64,6 +66,7 @@ export interface ConversationControllerDependencies<
 }
 
 export interface ConversationControllerSnapshot {
+  controls: ConversationControls;
   globalOperation: "idle" | "reconnecting";
   initializing: boolean;
   sessionStates: ReadonlyMap<string, HermesSessionState>;
@@ -209,11 +212,19 @@ export class ConversationController<TClient extends ConversationClient> {
   ) {
     this.dependencies = dependencies;
     const workspace = copyWorkspace(dependencies.workspace.getWorkspace());
+    const tabOperations = runtimeForWorkspace(workspace);
+    const controls = deriveConversationControls({
+      activeTabId: workspace?.activeTabId,
+      globalOperation: "idle",
+      initializing: true,
+      tabs: tabOperations,
+    });
     this.snapshot = Object.freeze({
+      controls,
       globalOperation: "idle",
       initializing: true,
       sessionStates: new Map(),
-      tabOperations: runtimeForWorkspace(workspace),
+      tabOperations,
       transitionGeneration: this.operations.getTransitionGeneration(),
       workspace,
     });
@@ -1036,7 +1047,13 @@ export class ConversationController<TClient extends ConversationClient> {
   }
 
   private publish(snapshot: ConversationControllerSnapshot): void {
-    this.snapshot = Object.freeze(snapshot);
+    const controls = deriveConversationControls({
+      activeTabId: snapshot.workspace?.activeTabId,
+      globalOperation: snapshot.globalOperation,
+      initializing: snapshot.initializing,
+      tabs: snapshot.tabOperations,
+    });
+    this.snapshot = Object.freeze({ ...snapshot, controls });
     for (const listener of this.listeners) {
       listener(this.snapshot);
     }
