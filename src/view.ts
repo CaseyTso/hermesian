@@ -22,7 +22,6 @@ import {
   type ConversationInitializationResult,
 } from "./conversation-controller";
 import {
-  activateConversationTab,
   isActiveConversationSession,
   shouldAutoScrollConversation,
   updateConversationTab,
@@ -719,26 +718,38 @@ export class HermesianSidebarView extends ItemView {
     this.messageCaches.delete(tabId);
   }
 
-  private revealActiveTurnForPermission(tabId: string): void {
+  private async revealActiveTurnForPermission(tabId: string): Promise<void> {
     const workspace = this.conversationWorkspace;
-    if (!workspace) {
+    if (!workspace || !this.controller) {
       return;
     }
     if (workspace.activeTabId === tabId) {
       return;
     }
     this.captureActiveConversationRuntime();
-    this.conversationWorkspace = activateConversationTab(workspace, tabId);
-    this.showConversationMessages(tabId);
-    this.restoreActiveConversationRuntime();
-    this.renderSessionState(
-      this.controller?.getSnapshot().sessionStates.get(tabId) ?? this.plugin.getClient(tabId).currentSessionState,
-    );
-    this.renderConversationTabs();
-    this.updateControls(false);
-    void this.plugin.flushConversationWorkspace(this.conversationWorkspace).catch((error) => {
-      new Notice(`Hermesian could not save the active conversation: ${this.messageFor(error)}`);
-    });
+    try {
+      const result = await this.controller.revealForPermission(
+        tabId,
+        `${tabId}:${this.permissions.size}`,
+      );
+      this.conversationWorkspace = result.workspace;
+      this.showConversationMessages(tabId);
+      this.restoreActiveConversationRuntime();
+      this.renderSessionState(
+        this.controller.getSnapshot().sessionStates.get(tabId) ??
+          this.plugin.getClient(tabId).currentSessionState,
+      );
+      this.renderConversationTabs();
+      this.updateControls(false);
+    } catch (error) {
+      if (
+        error instanceof ConversationControllerError &&
+        (error.code === "cancelled" || error.code === "operation_stale")
+      ) {
+        return;
+      }
+      new Notice(`Hermesian could not reveal this conversation: ${this.messageFor(error)}`);
+    }
   }
 
   private captureActiveConversationRuntime(): void {

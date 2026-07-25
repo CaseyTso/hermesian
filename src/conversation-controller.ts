@@ -575,8 +575,19 @@ export class ConversationController<TClient extends ConversationClient> {
   }
 
   switchConversation(tabId: string): Promise<SwitchConversationResult> {
+    if (this.isNavigationBlockedByPermission(tabId)) {
+      return Promise.reject(
+        this.controllerError("cancelled", "Navigation is blocked by a pending permission", tabId),
+      );
+    }
     const blocked = this.blockedDuringStartup<SwitchConversationResult>("switchConversation", tabId);
     return blocked ?? this.switchConversationInternal(tabId);
+  }
+
+  private isNavigationBlockedByPermission(callerTabId: string): boolean {
+    return Array.from(this.permissionTokens.entries()).some(
+      ([, ownerTabId]) => ownerTabId !== callerTabId,
+    );
   }
 
   private async switchConversationInternal(tabId: string): Promise<SwitchConversationResult> {
@@ -1060,6 +1071,70 @@ export class ConversationController<TClient extends ConversationClient> {
 
   setPermissionPending(tabId: string, pending: boolean): void {
     this.updateTabOperation(tabId, { permissionPending: pending });
+  }
+
+  async revealForPermission(
+    tabId: string,
+    permissionId: string,
+  ): Promise<SwitchConversationResult> {
+    if (this.permissionTokens.get(permissionId) !== tabId) {
+      throw this.controllerError(
+        "cancelled",
+        "Permission token does not match the requested tab",
+        tabId,
+      );
+    }
+    const workspace = copyWorkspace(
+      this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+    );
+    if (!workspace) {
+      throw this.controllerError("workspace_conflict", "Conversation workspace is unavailable", tabId);
+    }
+    if (workspace.activeTabId === tabId) {
+      const target = workspace.tabs.find((tab) => tab.id === tabId);
+      return {
+        sessionId: target?.sessionId ?? undefined,
+        started: false,
+        tabId,
+        workspace,
+      };
+    }
+
+    this.operations.invalidateTransition();
+    this.publish({
+      ...this.snapshot,
+      transitionGeneration: this.operations.getTransitionGeneration(),
+    });
+    const generation = this.operations.getTransitionGeneration();
+    const activeWorkspace = await this.enqueueWorkspaceCommit(async () => {
+      this.assertCurrentTransition(generation);
+      const latestWorkspace = copyWorkspace(
+        this.dependencies.workspace.getWorkspace() ?? workspace,
+      );
+      if (!latestWorkspace?.tabs.some((tab) => tab.id === tabId)) {
+        throw this.controllerError(
+          "workspace_conflict",
+          "Conversation tab was removed during permission reveal",
+          tabId,
+        );
+      }
+      const nextWorkspace = activateConversationTab(latestWorkspace, tabId);
+      await this.dependencies.workspace.setWorkspace(nextWorkspace, {
+        flush: true,
+        save: true,
+      });
+      this.assertCurrentTransition(generation);
+      this.publishWorkspace(nextWorkspace);
+      return nextWorkspace;
+    });
+
+    const target = activeWorkspace.tabs.find((tab) => tab.id === tabId);
+    return {
+      sessionId: target?.sessionId ?? undefined,
+      started: false,
+      tabId,
+      workspace: copyWorkspace(activeWorkspace)!,
+    };
   }
 
   invalidateVisibleTransition(_reason: string): void {

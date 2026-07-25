@@ -1506,3 +1506,76 @@ describe("ConversationController client and permission state", () => {
     expect(controller.getSnapshot().tabOperations.get("tab-b")?.prompt).toBe("running");
   });
 });
+
+describe("ConversationController permission reveal", () => {
+  async function readyControllerWithTabs(
+    ...tabIds: string[]
+  ): Promise<{
+    controller: ConversationController<FakeClient>;
+    deps: ConversationControllerDependencies<FakeClient>;
+    clients: Map<string, FakeClient>;
+  }> {
+    let workspace = createConversationWorkspace("base", "base-session");
+    const clients = new Map<string, FakeClient>([["base", fakeClient("base")]]);
+    for (const targetId of tabIds) {
+      const target = fakeClient(targetId);
+      clients.set(targetId, target);
+      workspace = addPendingConversationTab(workspace, targetId);
+      workspace = replaceConversationSession(workspace, targetId, `${targetId}-session`);
+    }
+    workspace = { ...workspace, activeTabId: "base" };
+    const deps = dependencies(workspace, clients.get("base")!, clients);
+    const controller = new ConversationController(deps);
+    await controller.initialize();
+    return { controller, deps, clients };
+  }
+
+  it("reveals hidden tab for permission through controller", async () => {
+    const { controller, deps } = await readyControllerWithTabs("tab-b");
+
+    controller.beginPermission("tab-b", "tab-b:perm-1");
+    await controller.revealForPermission("tab-b", "tab-b:perm-1");
+
+    const ws = deps.workspace.getWorkspace();
+    expect(ws?.activeTabId).toBe("tab-b");
+    expect(controller.getSnapshot().tabOperations.get("tab-b")?.permissionPending).toBe(true);
+    expect(controller.getSnapshot().tabOperations.get("base")?.closing).toBe(false);
+  });
+
+  it("stales a delayed switch when permission invalidates transition", async () => {
+    const { controller, deps, clients } = await readyControllerWithTabs("tab-b", "tab-c");
+    const loadC = deferred<HermesHistoryItem[]>();
+    clients.get("tab-c")!.loadSessionHistory = vi.fn(() => loadC.promise);
+
+    const switchingC = controller.switchConversation("tab-c");
+    controller.beginPermission("tab-b", "tab-b:perm-1");
+    await controller.revealForPermission("tab-b", "tab-b:perm-1");
+
+    loadC.resolve([]);
+    await expect(switchingC).rejects.toMatchObject({ code: "cancelled" });
+
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-b");
+  });
+
+  it("rejects explicit switch while permission is pending", async () => {
+    const { controller, deps } = await readyControllerWithTabs("tab-b", "tab-c");
+
+    controller.beginPermission("tab-b", "tab-b:perm-1");
+    await controller.revealForPermission("tab-b", "tab-b:perm-1");
+
+    await expect(controller.switchConversation("tab-c")).rejects.toMatchObject({
+      code: "cancelled",
+    });
+
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-b");
+  });
+
+  it("clears permission pending on complete", async () => {
+    const { controller } = await readyControllerWithTabs("tab-b");
+
+    controller.beginPermission("tab-b", "tab-b:perm-1");
+    controller.completePermission("tab-b:perm-1");
+
+    expect(controller.getSnapshot().tabOperations.get("tab-b")?.permissionPending).toBe(false);
+  });
+});
