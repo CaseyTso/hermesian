@@ -579,7 +579,7 @@ describe("ConversationController close", () => {
     expect(target.connect).not.toHaveBeenCalled();
   });
 
-  it("removes an active tab before preparing its replacement", async () => {
+  it("prepares a replacement before removing the active tab", async () => {
     const history = deferred<HermesHistoryItem[]>();
     let workspace = createConversationWorkspace("base", "base-session");
     workspace = addPendingConversationTab(workspace, "tab-b");
@@ -597,8 +597,10 @@ describe("ConversationController close", () => {
     );
 
     const closing = controller.closeConversation("base");
-    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["tab-b"]);
-    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-b");
+    // While the replacement is still being prepared, the old tab must remain.
+    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["base", "tab-b"]);
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("base");
+    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
     history.resolve([]);
 
     const result = await closing;
@@ -620,21 +622,21 @@ describe("ConversationController close", () => {
     );
 
     const closing = controller.closeConversation("base");
+    // While the replacement is being prepared, the old tab must remain.
     const pending = deps.workspace.getWorkspace()!;
-    expect(pending.tabs).toEqual(
-      expect.arrayContaining([expect.objectContaining({ id: "replacement", sessionId: null })]),
-    );
-    expect(pending.tabs.some((tab) => tab.id === "base")).toBe(false);
+    expect(pending.tabs.some((tab) => tab.id === "base")).toBe(true);
+    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
     const result = await closing;
     expect(result.replacementTabId).toBe("replacement");
     expect(result.workspace.tabs).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: "replacement", sessionId: "replacement-session" })]),
     );
+    expect(result.workspace.tabs.some((tab) => tab.id === "base")).toBe(false);
     expect(deps.clients.releaseClient).toHaveBeenCalledWith("base");
     expect(replacement.connect).toHaveBeenCalledOnce();
   });
 
-  it("does not restore a closed tab when replacement preparation fails", async () => {
+  it("preserves the closed tab when replacement preparation fails", async () => {
     let workspace = createConversationWorkspace("base", "base-session");
     workspace = addPendingConversationTab(workspace, "tab-b");
     workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
@@ -653,8 +655,10 @@ describe("ConversationController close", () => {
     );
 
     await expect(controller.closeConversation("base")).rejects.toThrow("replacement unavailable");
-    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["tab-b"]);
-    expect(deps.workspace.getWorkspace()?.tabs.some((tab) => tab.id === "base")).toBe(false);
+    // Failed replacement must not delete the old tab or release its client.
+    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["base", "tab-b"]);
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("base");
+    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
   });
 
   it("rejects closing a missing tab without changing workspace", async () => {

@@ -626,54 +626,79 @@ export class ConversationController<TClient extends ConversationClient> {
     this.updateTabOperation(tabId, { closing: true });
     let replacementTabId: string | undefined;
     try {
-      let updatedWorkspace: PersistedConversationWorkspace | undefined;
-      if (workspace.tabs.length === 1) {
-        replacementTabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
-        updatedWorkspace = removeConversationTab(
-          addPendingConversationTab(workspace, replacementTabId),
-          tabId,
-        );
-      } else {
-        updatedWorkspace = removeConversationTab(workspace, tabId);
-      }
-      if (!updatedWorkspace) {
-        throw this.controllerError("workspace_conflict", "Conversation replacement could not be created", tabId);
-      }
+      if (closingActive) {
+        // Prepare successor/replacement BEFORE deleting or releasing anything.
+        let successorWorkspace: PersistedConversationWorkspace;
+        let successorTabId: string;
 
-      await this.dependencies.workspace.setWorkspace(updatedWorkspace, {
-        flush: true,
-        save: true,
-      });
-      this.assertCurrentTransition(generation);
-      this.publishWorkspace(updatedWorkspace);
-      await this.dependencies.clients.releaseClient(tabId);
-      this.assertCurrentTransition(generation);
+        if (workspace.tabs.length === 1) {
+          replacementTabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
+          successorWorkspace = addPendingConversationTab(workspace, replacementTabId);
+          successorTabId = replacementTabId;
+        } else {
+          // Use removeConversationTab to find the neighbor that will become active.
+          const removed = removeConversationTab(workspace, tabId);
+          if (!removed) {
+            throw this.controllerError("workspace_conflict", "Conversation replacement could not be created", tabId);
+          }
+          successorWorkspace = removed;
+          successorTabId = removed.activeTabId;
+        }
 
-      const replacement = updatedWorkspace.tabs.find(
-        (candidate) => candidate.id === updatedWorkspace?.activeTabId,
-      );
-      if (closingActive && replacement && updatedWorkspace.activeTabId !== tabId) {
+        // Prepare the successor client/session while the old tab is still in workspace.
+        // ensureClientForTabInternal works with the workspace override that includes the pending successor.
         const prepared = await this.ensureClientForTabInternal(
-          replacement.id,
-          updatedWorkspace,
+          successorTabId,
+          successorWorkspace,
           generation,
         );
         this.assertCurrentTransition(generation);
+
+        // Successor is ready — now commit: remove old tab, persist, release old client.
+        // prepared.workspace already has the successor with its session; remove the old tab from it.
+        const committedWorkspace = removeConversationTab(prepared.workspace, tabId);
+        if (!committedWorkspace) {
+          throw this.controllerError("workspace_conflict", "Conversation tab could not be removed after replacement", tabId);
+        }
+        await this.dependencies.workspace.setWorkspace(committedWorkspace, {
+          flush: true,
+          save: true,
+        });
+        this.assertCurrentTransition(generation);
+        this.publishWorkspace(committedWorkspace);
+        await this.dependencies.clients.releaseClient(tabId);
+        this.assertCurrentTransition(generation);
+
         return {
           items: prepared.items,
           replacementTabId,
           sessionId: prepared.sessionId,
           started: prepared.started,
           tabId,
-          workspace: copyWorkspace(prepared.workspace)!,
+          workspace: copyWorkspace(committedWorkspace)!,
+        };
+      } else {
+        // Inactive tab close — no successor needed, but still prepare-first semantically:
+        // just remove and release the target.
+        const updatedWorkspace = removeConversationTab(workspace, tabId);
+        if (!updatedWorkspace) {
+          throw this.controllerError("workspace_conflict", "Conversation tab could not be removed", tabId);
+        }
+        await this.dependencies.workspace.setWorkspace(updatedWorkspace, {
+          flush: true,
+          save: true,
+        });
+        this.assertCurrentTransition(generation);
+        this.publishWorkspace(updatedWorkspace);
+        await this.dependencies.clients.releaseClient(tabId);
+        this.assertCurrentTransition(generation);
+
+        return {
+          replacementTabId,
+          tabId,
+          workspace: copyWorkspace(updatedWorkspace)!,
         };
       }
-
-      return {
-        replacementTabId,
-        tabId,
-        workspace: copyWorkspace(updatedWorkspace)!,
-      };
     } finally {
       this.operations.complete(token);
       if (this.isCurrentTransition(generation)) {
