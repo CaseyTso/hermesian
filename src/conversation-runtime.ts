@@ -136,6 +136,53 @@ export function updateTabOperation(
   return { ...state, tabs };
 }
 
+export interface ConversationOperationToken {
+  readonly generation: number;
+  readonly sequence: number;
+  readonly tabId: string;
+}
+
+export class ConversationOperationCoordinator {
+  private generation = 0;
+  private sequence = 0;
+  private readonly currentOperations = new Map<string, ConversationOperationToken>();
+
+  begin(tabId: string): ConversationOperationToken {
+    const token: ConversationOperationToken = Object.freeze({
+      generation: this.generation,
+      sequence: ++this.sequence,
+      tabId,
+    });
+    this.currentOperations.set(tabId, token);
+    return token;
+  }
+
+  complete(token: ConversationOperationToken): void {
+    if (this.currentOperations.get(token.tabId) === token) {
+      this.currentOperations.delete(token.tabId);
+    }
+  }
+
+  isCurrent(token: ConversationOperationToken): boolean {
+    return (
+      token.generation === this.generation &&
+      this.currentOperations.get(token.tabId) === token
+    );
+  }
+
+  beginTransition(): number {
+    return ++this.generation;
+  }
+
+  invalidateTransition(): void {
+    this.generation += 1;
+  }
+
+  isCurrentTransition(generation: number): boolean {
+    return generation === this.generation;
+  }
+}
+
 export function removeTabOperation(
   state: ConversationRuntimeState,
   tabId: string,

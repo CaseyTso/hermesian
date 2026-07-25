@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ConversationOperationCoordinator,
   deriveConversationControlAvailability,
+  removeTabOperation,
   type ConversationRuntimeState,
   type TabOperationState,
 } from "../src/conversation-runtime";
@@ -206,5 +208,68 @@ describe("conversation runtime control availability", () => {
     const availability = deriveConversationControlAvailability(state);
 
     expect(availability.send).toBe(availability.composer && availability.hasSession);
+  });
+});
+
+describe("conversation runtime operation ownership", () => {
+  it("does not let an older operation clear a newer operation on the same tab", () => {
+    const coordinator = new ConversationOperationCoordinator();
+    const first = coordinator.begin("tab-a");
+    const second = coordinator.begin("tab-a");
+
+    expect(coordinator.isCurrent(first)).toBe(false);
+    expect(coordinator.isCurrent(second)).toBe(true);
+
+    coordinator.complete(first);
+    expect(coordinator.isCurrent(second)).toBe(true);
+
+    coordinator.complete(second);
+    expect(coordinator.isCurrent(second)).toBe(false);
+  });
+
+  it("keeps operation ownership independent for different tabs", () => {
+    const coordinator = new ConversationOperationCoordinator();
+    const tabA = coordinator.begin("tab-a");
+    const tabB = coordinator.begin("tab-b");
+
+    expect(coordinator.isCurrent(tabA)).toBe(true);
+    expect(coordinator.isCurrent(tabB)).toBe(true);
+  });
+
+  it("invalidates a pending transition generation", () => {
+    const coordinator = new ConversationOperationCoordinator();
+    const firstGeneration = coordinator.beginTransition();
+
+    expect(coordinator.isCurrentTransition(firstGeneration)).toBe(true);
+    coordinator.invalidateTransition();
+    expect(coordinator.isCurrentTransition(firstGeneration)).toBe(false);
+
+    const secondGeneration = coordinator.beginTransition();
+    expect(coordinator.isCurrentTransition(secondGeneration)).toBe(true);
+  });
+
+  it("invalidates a switch even when the permission owner is already active", () => {
+    const coordinator = new ConversationOperationCoordinator();
+    const generation = coordinator.beginTransition();
+
+    coordinator.invalidateTransition();
+
+    expect(coordinator.isCurrentTransition(generation)).toBe(false);
+  });
+
+  it("removes only the closed tab runtime state", () => {
+    const state = runtimeState(
+      new Map([
+        ["tab-a", tabState()],
+        ["tab-b", tabState({ prompt: "running" })],
+      ]),
+      { activeTabId: "tab-b" },
+    );
+
+    const updated = removeTabOperation(state, "tab-a");
+
+    expect(updated.tabs.has("tab-a")).toBe(false);
+    expect(updated.tabs.has("tab-b")).toBe(true);
+    expect(updated.activeTabId).toBe("tab-b");
   });
 });
