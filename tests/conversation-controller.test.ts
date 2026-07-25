@@ -1379,6 +1379,43 @@ describe("ConversationController client and permission state", () => {
     });
   });
 
+  it("drops factory-time session state when client is acquired before publish", async () => {
+    const workspace = createConversationWorkspace("base", "base-session");
+    let currentWorkspace = workspace;
+    let capturedController: ConversationController<FakeClient> | undefined;
+    const newClient = fakeClient("new-tab");
+    const factoryState = sessionState(true);
+
+    const deps: ConversationControllerDependencies<FakeClient> = {
+      clients: {
+        acquireClient: vi.fn((tabId: string) => {
+          capturedController?.updateClientState(tabId, factoryState);
+          return newClient;
+        }),
+        getClient: vi.fn(() => newClient),
+        isCurrentClient: vi.fn(() => true),
+        releaseClient: vi.fn(async () => undefined),
+      },
+      workspace: {
+        getWorkspace: vi.fn(() => currentWorkspace),
+        setWorkspace: vi.fn((next) => {
+          currentWorkspace = next;
+        }),
+      },
+      createTabId: () => "new-tab",
+    };
+
+    const controller = new ConversationController(deps);
+    capturedController = controller;
+    await controller.initialize();
+    await controller.addConversation();
+
+    expect(controller.getSnapshot().sessionStates.get("new-tab")).toBeDefined();
+    expect(controller.getSnapshot().sessionStates.get("new-tab")).toMatchObject({
+      switchingModel: true,
+    });
+  });
+
   it("ignores state replay for a stale or unknown tab slot", async () => {
     const controller = new ConversationController(
       dependencies(createConversationWorkspace("base", "base-session"), fakeClient("base")),

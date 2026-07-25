@@ -517,8 +517,8 @@ export class ConversationController<TClient extends ConversationClient> {
     const pendingWorkspace = addPendingConversationTab(currentWorkspace, tabId);
     const token = this.operations.begin(tabId);
     let succeeded = false;
-    const client = this.dependencies.clients.acquireClient(tabId);
     this.publishWorkspace(pendingWorkspace);
+    const client = this.dependencies.clients.acquireClient(tabId);
     this.updateTabOperation(tabId, {
       connection: "loading",
       hasSession: false,
