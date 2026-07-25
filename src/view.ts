@@ -21,8 +21,6 @@ import {
   activateConversationTab,
   addPendingConversationTab,
   ConversationTransitionCoordinator,
-  conversationControlAvailability,
-  conversationControlsBusy,
   createConversationWorkspace,
   isActiveConversationSession,
   removeConversationTab,
@@ -32,6 +30,11 @@ import {
   type PersistedConversationTab,
   type PersistedConversationWorkspace,
 } from "./conversation-tabs";
+import {
+  deriveConversationControlAvailability,
+  type ConversationRuntimeState,
+  type TabOperationState,
+} from "./conversation-runtime";
 import { linkifyExternalUrls } from "./external-links";
 import { HERMESIAN_ICON_ID } from "./hermes-icon";
 import {
@@ -840,23 +843,36 @@ export class HermesianSidebarView extends ItemView {
     return (activeTab && this.sessionStates.get(activeTab.id)) ?? this.sessionState;
   }
 
-  private controlAvailability(state = this.activeSessionState()) {
-    const activeTab = this.activeConversationTab();
-    const activeTabId = activeTab?.id;
-    return conversationControlAvailability({
-      activeTabBusy: Boolean(activeTabId && this.isTabBusy(activeTabId)),
-      activeTabLoading: Boolean(activeTabId && this.clientLoadingTabs.has(activeTabId)),
-      activeTabPermissionPending: Boolean(
-        activeTabId && this.hasPendingPermission(activeTabId),
-      ),
-      anyTabBusy: this.plugin.hasBusyClient(),
-      anyTabLoading: this.clientLoadingTabs.size > 0,
-      anyPermissionPending: this.permissions.size > 0,
-      controlsBusy: this.controlsBusy,
-      hasSession: Boolean(activeTab?.sessionId),
+  private conversationRuntimeState(state: HermesSessionState): ConversationRuntimeState {
+    const tabs = new Map<string, TabOperationState>();
+    for (const tab of this.conversationWorkspace?.tabs ?? []) {
+      const sessionState = this.sessionStates.get(tab.id);
+      tabs.set(tab.id, {
+        closing: this.closingConversationTabId === tab.id,
+        connection: this.clientLoadingTabs.has(tab.id)
+          ? "loading"
+          : tab.sessionId
+            ? "ready"
+            : "deferred",
+        hasSession: Boolean(tab.sessionId),
+        permissionPending: this.hasPendingPermission(tab.id),
+        prompt: this.isTabBusy(tab.id) ? "running" : "idle",
+        sessionOperation:
+          (sessionState?.switchingModel ?? (tab.id === this.conversationWorkspace?.activeTabId && state.switchingModel))
+            ? "model"
+            : "idle",
+      });
+    }
+    return {
+      activeTabId: this.conversationWorkspace?.activeTabId,
+      globalOperation: this.controlsBusy ? "reconnecting" : "idle",
       initializing: this.initializing,
-      switchingModel: state.switchingModel,
-    });
+      tabs,
+    };
+  }
+
+  private controlAvailability(state = this.activeSessionState()) {
+    return deriveConversationControlAvailability(this.conversationRuntimeState(state));
   }
 
   private async ensureClientForTab(
@@ -2339,10 +2355,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private updateControls(busy: boolean, _showStop = busy): void {
-    this.controlsBusy = conversationControlsBusy(
-      busy || this.closingConversationTabId !== undefined,
-      this.initializing,
-    );
+    this.controlsBusy = busy || this.closingConversationTabId !== undefined;
     if (this.controlsBusy) {
       this.hideSlashMenu();
     }
