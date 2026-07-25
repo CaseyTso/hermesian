@@ -547,6 +547,20 @@ describe("ConversationController switch", () => {
 
   it("keeps the previous active tab when target preparation fails", async () => {
     const { controller, deps, clients } = await readySwitchController(["tab-b"]);
+    controller["snapshot"] = {
+      ...controller.getSnapshot(),
+      tabOperations: new Map(controller.getSnapshot().tabOperations).set(
+        "tab-b",
+        Object.freeze({
+          closing: false,
+          connection: "deferred" as const,
+          hasSession: true,
+          permissionPending: false,
+          prompt: "idle" as const,
+          sessionOperation: "idle" as const,
+        }),
+      ),
+    };
     clients.get("tab-b")!.connect = vi.fn(async () => {
       throw new Error("connection unavailable");
     });
@@ -1349,6 +1363,33 @@ describe("ConversationController history and restart", () => {
     expect(deps.workspace.getWorkspace()?.tabs.find((tab) => tab.id === "tab-b")?.sessionId).toBe(
       "old-session",
     );
+  });
+
+  it("does not reconnect a ready inactive tab during switch", async () => {
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = {
+      ...workspace,
+      activeTabId: "base",
+    };
+    const clientB = fakeClient("tab-b");
+    clientB.sessionId = "tab-b-session";
+    const connectSpy = vi.spyOn(clientB, "connect");
+    const { controller } = await readySessionController(
+      workspace,
+      new Map([
+        ["base", fakeClient("base")],
+        ["tab-b", clientB],
+      ]),
+    );
+
+    const result = await controller.switchConversation("tab-b");
+
+    expect(result.tabId).toBe("tab-b");
+    expect(result.started).toBe(false);
+    expect(result.workspace.activeTabId).toBe("tab-b");
+    expect(connectSpy).not.toHaveBeenCalled();
   });
 });
 

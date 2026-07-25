@@ -596,6 +596,48 @@ export class ConversationController<TClient extends ConversationClient> {
       };
     }
 
+    const tabOp = this.snapshot.tabOperations.get(tabId);
+    if (tabOp?.connection === "ready" && tabOp.hasSession && target.sessionId) {
+      const generation = this.operations.beginTransition();
+      this.publish({ ...this.snapshot, transitionGeneration: generation });
+      this.assertCurrentTransition(generation);
+      const activeWorkspace = await this.enqueueWorkspaceCommit(async () => {
+        this.assertCurrentTransition(generation);
+        const latestWorkspace = copyWorkspace(
+          this.dependencies.workspace.getWorkspace() ?? workspace,
+        );
+        const latestTarget = latestWorkspace?.tabs.find((tab) => tab.id === tabId);
+        if (!latestWorkspace || !latestTarget) {
+          throw this.controllerError(
+            "workspace_conflict",
+            "Conversation tab was removed during switch",
+            tabId,
+          );
+        }
+        if (latestTarget.sessionId !== target.sessionId) {
+          throw this.controllerError(
+            "workspace_conflict",
+            "Conversation tab binding changed during switch",
+            tabId,
+          );
+        }
+        const nextWorkspace = activateConversationTab(latestWorkspace, tabId);
+        await this.dependencies.workspace.setWorkspace(nextWorkspace, {
+          flush: true,
+          save: true,
+        });
+        this.assertCurrentTransition(generation);
+        this.publishWorkspace(nextWorkspace);
+        return nextWorkspace;
+      });
+      return {
+        sessionId: target.sessionId,
+        started: false,
+        tabId,
+        workspace: copyWorkspace(activeWorkspace)!,
+      };
+    }
+
     const generation = this.operations.beginTransition();
     this.publish({
       ...this.snapshot,
