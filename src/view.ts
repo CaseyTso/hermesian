@@ -25,10 +25,8 @@ import {
 } from "./conversation-controller";
 import {
   activateConversationTab,
-  addPendingConversationTab,
   ConversationTransitionCoordinator,
   isActiveConversationSession,
-  removeConversationTab,
   replaceConversationSession,
   shouldAutoScrollConversation,
   updateConversationTab,
@@ -1054,10 +1052,11 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private async closeConversation(tabId: string): Promise<void> {
-    const initialWorkspace = this.conversationWorkspace;
+    const workspace = this.conversationWorkspace;
     if (
-      !initialWorkspace ||
-      !initialWorkspace.tabs.some((tab) => tab.id === tabId) ||
+      !this.controller ||
+      !workspace ||
+      !workspace.tabs.some((tab) => tab.id === tabId) ||
       this.initializing ||
       this.controlsBusy ||
       this.closingConversationTabId !== undefined ||
@@ -1073,86 +1072,47 @@ export class HermesianSidebarView extends ItemView {
     this.captureActiveConversationRuntime();
     this.closingConversationTabId = tabId;
     this.updateControls(true);
-    const workspace = this.conversationWorkspace ?? initialWorkspace;
-    const closingActiveTab = workspace.activeTabId === tabId;
     try {
-      if (workspace.tabs.length === 1) {
-        const replacementTabId = crypto.randomUUID();
-        const withReplacement = addPendingConversationTab(workspace, replacementTabId);
-        const updated = removeConversationTab(withReplacement, tabId);
-        if (!updated) {
-          throw new Error("Hermesian could not create a replacement conversation tab");
-        }
-        this.conversationWorkspace = updated;
-        this.tabSelections.delete(tabId);
-        this.pendingImages.delete(tabId);
-        this.tabSelections.set(replacementTabId, undefined);
-        this.showConversationMessages(replacementTabId);
-        this.resetConversationView(replacementTabId);
-        this.forgetConversationMessages(tabId);
-        this.turnRuntimes.delete(tabId);
-        this.sessionStates.delete(tabId);
-        await this.plugin.releaseClient(tabId);
-        const { sessionId } = await this.ensureClientForTab(replacementTabId);
-        this.conversationWorkspace = replaceConversationSession(
-          this.conversationWorkspace,
-          replacementTabId,
-          sessionId,
-        );
-        this.loadedMessageTabIds.add(replacementTabId);
-        this.restoreActiveConversationRuntime();
-        this.renderConversationTabs();
-        this.appendSystemMessage(
-          "Conversation closed. A new Hermes conversation started.",
-          false,
-          replacementTabId,
-        );
-        await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-        return;
-      }
-
-      const updated = removeConversationTab(workspace, tabId);
-      if (!updated) {
-        throw new Error("Hermesian could not close that conversation tab");
-      }
-
-      if (!closingActiveTab) {
-        this.conversationWorkspace = updated;
-        this.tabSelections.delete(tabId);
-        this.pendingImages.delete(tabId);
-        this.forgetConversationMessages(tabId);
-        this.turnRuntimes.delete(tabId);
-        this.sessionStates.delete(tabId);
-        await this.plugin.releaseClient(tabId);
-        this.renderConversationTabs();
-        await this.plugin.flushConversationWorkspace(updated);
-        return;
-      }
-
-      const target = updated.tabs.find((tab) => tab.id === updated.activeTabId);
-      if (!target) {
-        throw new Error("The next conversation tab could not be found");
-      }
-      this.conversationWorkspace = updated;
+      const result = await this.controller.closeConversation(tabId);
+      this.conversationWorkspace = result.workspace;
       this.tabSelections.delete(tabId);
       this.pendingImages.delete(tabId);
-      this.showConversationMessages(target.id);
       this.forgetConversationMessages(tabId);
       this.turnRuntimes.delete(tabId);
       this.sessionStates.delete(tabId);
-      await this.plugin.releaseClient(tabId);
-      const { items, sessionId, started } = await this.ensureClientForTab(target.id);
-      if (items) {
-        await this.renderHistorySession({ cwd: "", sessionId }, items, false);
-      } else if (started) {
-        this.resetConversationView(target.id);
-        this.loadedMessageTabIds.add(target.id);
-        this.appendSystemMessage("New Hermes conversation started.", false, target.id);
+
+      const activeTabId = result.workspace.activeTabId;
+      this.showConversationMessages(activeTabId);
+      if (result.items && result.sessionId) {
+        await this.renderHistorySession(
+          { cwd: "", sessionId: result.sessionId },
+          result.items,
+          false,
+          activeTabId,
+        );
+      } else if (result.started) {
+        this.showConversationMessages(activeTabId);
+        this.resetConversationView(activeTabId);
+        this.loadedMessageTabIds.add(activeTabId);
+        this.appendSystemMessage("New Hermes conversation started.", false, activeTabId);
+      }
+      if (result.replacementTabId) {
+        this.showConversationMessages(result.replacementTabId);
+        this.appendSystemMessage(
+          "Conversation closed. A new Hermes conversation started.",
+          false,
+          result.replacementTabId,
+        );
       }
       this.restoreActiveConversationRuntime();
       this.renderConversationTabs();
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
     } catch (error) {
+      if (
+        error instanceof ConversationControllerError &&
+        (error.code === "cancelled" || error.code === "operation_stale")
+      ) {
+        return;
+      }
       new Notice(`Hermesian could not close that conversation: ${this.messageFor(error)}`);
     } finally {
       this.closingConversationTabId = undefined;

@@ -535,3 +535,139 @@ describe("ConversationController switch", () => {
     expect(deps.workspace.getWorkspace()?.activeTabId).toBe("base");
   });
 });
+
+describe("ConversationController close", () => {
+  async function readyCloseController(
+    workspace: ReturnType<typeof createConversationWorkspace>,
+    clients: Map<string, FakeClient>,
+    createTabId?: () => string,
+  ): Promise<{
+    controller: ConversationController<FakeClient>;
+    deps: ConversationControllerDependencies<FakeClient>;
+  }> {
+    const deps = dependencies(
+      workspace,
+      clients.get("base")!,
+      clients,
+      createTabId,
+    );
+    const controller = new ConversationController(deps);
+    await controller.initialize();
+    return { controller, deps };
+  }
+
+  it("removes an inactive tab and releases only that client", async () => {
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const target = fakeClient("tab-b");
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", target],
+      ]),
+    );
+
+    const result = await controller.closeConversation("tab-b");
+    expect(result).toMatchObject({ tabId: "tab-b" });
+    expect(result.workspace.activeTabId).toBe("base");
+    expect(result.workspace.tabs.map((tab) => tab.id)).toEqual(["base"]);
+    expect(deps.clients.releaseClient).toHaveBeenCalledWith("tab-b");
+    expect(target.connect).not.toHaveBeenCalled();
+  });
+
+  it("removes an active tab before preparing its replacement", async () => {
+    const history = deferred<HermesHistoryItem[]>();
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const target = fakeClient("tab-b");
+    target.loadSessionHistory = vi.fn(() => history.promise);
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", target],
+      ]),
+    );
+
+    const closing = controller.closeConversation("base");
+    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["tab-b"]);
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-b");
+    history.resolve([]);
+
+    const result = await closing;
+    expect(result.workspace.activeTabId).toBe("tab-b");
+    expect(result.workspace.tabs).toHaveLength(1);
+    expect(deps.clients.releaseClient).toHaveBeenCalledWith("base");
+  });
+
+  it("creates and connects a replacement when closing the last tab", async () => {
+    const replacement = fakeClient("replacement");
+    const base = fakeClient("base");
+    const { controller, deps } = await readyCloseController(
+      createConversationWorkspace("base", "base-session"),
+      new Map([
+        ["base", base],
+        ["replacement", replacement],
+      ]),
+      () => "replacement",
+    );
+
+    const closing = controller.closeConversation("base");
+    const pending = deps.workspace.getWorkspace()!;
+    expect(pending.tabs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "replacement", sessionId: null })]),
+    );
+    expect(pending.tabs.some((tab) => tab.id === "base")).toBe(false);
+    const result = await closing;
+    expect(result.replacementTabId).toBe("replacement");
+    expect(result.workspace.tabs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "replacement", sessionId: "replacement-session" })]),
+    );
+    expect(deps.clients.releaseClient).toHaveBeenCalledWith("base");
+    expect(replacement.connect).toHaveBeenCalledOnce();
+  });
+
+  it("does not restore a closed tab when replacement preparation fails", async () => {
+    let workspace = createConversationWorkspace("base", "base-session");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = { ...workspace, activeTabId: "base" };
+    const base = fakeClient("base");
+    const target = fakeClient("tab-b");
+    target.connect = vi.fn(async () => {
+      throw new Error("replacement unavailable");
+    });
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([
+        ["base", base],
+        ["tab-b", target],
+      ]),
+    );
+
+    await expect(controller.closeConversation("base")).rejects.toThrow("replacement unavailable");
+    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["tab-b"]);
+    expect(deps.workspace.getWorkspace()?.tabs.some((tab) => tab.id === "base")).toBe(false);
+  });
+
+  it("rejects closing a missing tab without changing workspace", async () => {
+    const base = fakeClient("base");
+    const { controller, deps } = await readyCloseController(
+      createConversationWorkspace("base", "base-session"),
+      new Map([["base", base]]),
+    );
+
+    await expect(controller.closeConversation("missing")).rejects.toMatchObject({
+      code: "workspace_conflict",
+      tabId: "missing",
+    });
+    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["base"]);
+  });
+});

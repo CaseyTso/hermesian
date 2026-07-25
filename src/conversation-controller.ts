@@ -7,6 +7,7 @@ import {
 import {
   activateConversationTab,
   addPendingConversationTab,
+  removeConversationTab,
   replaceConversationSession,
   type PersistedConversationTab,
   type PersistedConversationWorkspace,
@@ -102,8 +103,12 @@ export interface SwitchConversationResult {
 }
 
 export interface CloseConversationResult {
+  items?: HermesHistoryItem[];
   replacementTabId?: string;
+  sessionId?: string;
+  started?: boolean;
   tabId: string;
+  workspace: PersistedConversationWorkspace;
 }
 
 export interface HistoryBindResult {
@@ -581,7 +586,80 @@ export class ConversationController<TClient extends ConversationClient> {
 
   closeConversation(tabId: string): Promise<CloseConversationResult> {
     const blocked = this.blockedDuringStartup<CloseConversationResult>("closeConversation", tabId);
-    return blocked ?? this.notImplemented("closeConversation");
+    return blocked ?? this.closeConversationInternal(tabId);
+  }
+
+  private async closeConversationInternal(tabId: string): Promise<CloseConversationResult> {
+    const workspace = copyWorkspace(
+      this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+    );
+    const target = workspace?.tabs.find((tab) => tab.id === tabId);
+    if (!workspace || !target) {
+      throw this.controllerError("workspace_conflict", "Conversation tab was not found", tabId);
+    }
+    const closingActive = workspace.activeTabId === tabId;
+    const generation = this.operations.beginTransition();
+    const token = this.operations.begin(tabId);
+    this.updateTabOperation(tabId, { closing: true });
+    let replacementTabId: string | undefined;
+    try {
+      let updatedWorkspace: PersistedConversationWorkspace | undefined;
+      if (workspace.tabs.length === 1) {
+        replacementTabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
+        updatedWorkspace = removeConversationTab(
+          addPendingConversationTab(workspace, replacementTabId),
+          tabId,
+        );
+      } else {
+        updatedWorkspace = removeConversationTab(workspace, tabId);
+      }
+      if (!updatedWorkspace) {
+        throw this.controllerError("workspace_conflict", "Conversation replacement could not be created", tabId);
+      }
+
+      await this.dependencies.workspace.setWorkspace(updatedWorkspace, {
+        flush: true,
+        save: true,
+      });
+      this.assertCurrentTransition(generation);
+      this.publishWorkspace(updatedWorkspace);
+      await this.dependencies.clients.releaseClient(tabId);
+      this.assertCurrentTransition(generation);
+
+      const replacement = updatedWorkspace.tabs.find(
+        (candidate) => candidate.id === updatedWorkspace?.activeTabId,
+      );
+      if (closingActive && replacement && updatedWorkspace.activeTabId !== tabId) {
+        const prepared = await this.ensureClientForTabInternal(
+          replacement.id,
+          updatedWorkspace,
+          generation,
+        );
+        this.assertCurrentTransition(generation);
+        return {
+          items: prepared.items,
+          replacementTabId,
+          sessionId: prepared.sessionId,
+          started: prepared.started,
+          tabId,
+          workspace: copyWorkspace(prepared.workspace)!,
+        };
+      }
+
+      return {
+        replacementTabId,
+        tabId,
+        workspace: copyWorkspace(updatedWorkspace)!,
+      };
+    } finally {
+      this.operations.complete(token);
+      if (this.isCurrentTransition(generation)) {
+        const current = this.snapshot.tabOperations.get(tabId);
+        if (current) {
+          this.updateTabOperation(tabId, { closing: false });
+        }
+      }
+    }
   }
 
   bindHistorySession(tabId: string, _sessionId: string): Promise<HistoryBindResult> {
