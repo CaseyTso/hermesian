@@ -23,6 +23,7 @@
   "devDependencies": {
     "@types/node": "24.10.0",
     "esbuild": "0.28.1",
+    "happy-dom": "^20.11.1",
     "obsidian": "1.13.1",
     "typescript": "5.9.3",
     "vitest": "4.1.10"

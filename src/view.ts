@@ -61,6 +61,10 @@ import {
   HermesReasoningSuggestModal,
 } from "./ui/conversation-modals";
 import {
+  renderConversationTabsView,
+  type ConversationTabsCallbacks,
+} from "./ui/conversation-tabs-view";
+import {
   buildSlashOutboundPrompt,
   buildSlashMenuItems,
   slashMenuInsertion,
@@ -833,45 +837,22 @@ export class HermesianSidebarView extends ItemView {
     if (!this.conversationTabsEl) {
       return;
     }
-    this.conversationTabsEl.empty();
     const workspace = this.conversationWorkspace;
     if (!workspace) {
+      this.conversationTabsEl.empty();
       return;
     }
-    for (const tab of workspace.tabs) {
-      const active = tab.id === workspace.activeTabId;
-      const deferred = tab.sessionId === null;
-      const working = this.isTabBusy(tab.id);
-      const loading = deferred || this.isTabLoading(tab.id);
-      const activityLabel = working ? ", responding" : loading ? ", starting" : "";
-      const activityTitle = working ? " · Responding" : loading ? " · Starting" : "";
-      const button = this.conversationTabsEl.createEl("button", {
-        attr: {
-          "aria-busy": String(working || loading),
-          "aria-label": `Conversation ${tab.label}${activityLabel}`,
-          "aria-selected": String(active),
-          "data-conversation-tab-id": tab.id,
-          role: "tab",
-          title: `Conversation ${tab.label}${activityTitle} · Right-click to close`,
-          type: "button",
-        },
-        cls: `hermesian-conversation-tab${active ? " is-active" : ""}${working ? " is-working" : ""}${loading ? " is-loading" : ""}${deferred ? " is-deferred" : ""}`,
-        text: String(tab.label),
-      });
-      button.disabled = !this.controlAvailability().tabNavigation;
-      button.addEventListener("click", () => {
-        void this.switchConversation(tab.id);
-      });
-      button.addEventListener("contextmenu", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-        void this.closeConversation(tab.id);
-      });
-    }
-    this.conversationTabsEl
-      .querySelector<HTMLElement>(".hermesian-conversation-tab.is-active")
-      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const callbacks: ConversationTabsCallbacks = {
+      onActivate: (tabId) => { void this.switchConversation(tabId); },
+      onClose: (tabId) => { void this.closeConversation(tabId); },
+    };
+    renderConversationTabsView(this.conversationTabsEl, {
+      activeTabId: workspace.activeTabId,
+      isTabBusy: (tabId) => this.isTabBusy(tabId),
+      isTabLoading: (tabId) => this.isTabLoading(tabId),
+      tabNavigationDisabled: !this.controlAvailability().tabNavigation,
+      tabs: workspace.tabs,
+    }, callbacks);
   }
 
   private async addConversation(): Promise<void> {
