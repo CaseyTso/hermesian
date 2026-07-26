@@ -62,6 +62,7 @@ describe("HermesAcpClient session safety", () => {
       settings: () => ({
         acceptHooks: true,
         autoApproveVaultEdits: true,
+        debugLogging: false,
         hermesExecutable: "hermes",
         profile: "default",
         reasoningEffort: "default",
@@ -88,6 +89,7 @@ describe("HermesAcpClient session safety", () => {
       settings: () => ({
         acceptHooks: true,
         autoApproveVaultEdits: true,
+        debugLogging: false,
         hermesExecutable: "hermes",
         profile: "default",
         reasoningEffort: "default",
@@ -120,6 +122,7 @@ describe("HermesAcpClient session safety", () => {
       settings: () => ({
         acceptHooks: true,
         autoApproveVaultEdits: true,
+        debugLogging: false,
         hermesExecutable: "hermes",
         profile: "default",
         reasoningEffort: "default",
