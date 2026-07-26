@@ -2036,3 +2036,184 @@ describe("ConversationController snapshot isolation", () => {
     expect(snap1.tabOperations.has("hacked")).toBe(false);
   });
 });
+
+describe("ConversationController ensureConversationReady", () => {
+  async function readyHydrationController(
+    tabState: "unloaded" | "deferred" | "ready" = "ready",
+  ): Promise<{
+    controller: ConversationController<FakeClient>;
+    deps: ConversationControllerDependencies<FakeClient>;
+    clients: Map<string, FakeClient>;
+  }> {
+    // Build workspace directly to control sessionId
+    const sessionId = tabState === "ready" || tabState === "unloaded" ? "main-session" : null;
+    let workspace = {
+      activeTabId: "main",
+      nextLabel: 2,
+      tabs: [{
+        draft: "",
+        id: "main",
+        includeCurrentDocumentContext: true,
+        label: 1,
+        sessionId,
+      }],
+      version: 2 as const,
+    } as PersistedConversationWorkspace;
+    const clients = new Map<string, FakeClient>();
+    const main = fakeClient("main");
+    clients.set("main", main);
+    const deps = dependencies(workspace, main, clients);
+    const controller = new ConversationController(deps);
+    await controller.initialize();
+    return { controller, deps, clients };
+  }
+
+  it("returns immediately for a ready owner without reconnecting", async () => {
+    const { controller, clients } = await readyHydrationController("ready");
+    // initialize already called connect+load, so main is ready
+    const connectCount = (clients.get("main")!.connect as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    const result = await controller.ensureConversationReady("main");
+    expect(result.tabId).toBe("main");
+    expect((clients.get("main")!.connect as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(connectCount);
+  });
+
+  it("deduplicates concurrent hydration promises", async () => {
+    const connect = deferred<void>();
+    const { controller } = await readyHydrationController("ready");
+    const injected = fakeClient("fresh");
+    controller["dependencies"].clients.acquireClient = vi.fn(() => injected);
+    injected.connect = vi.fn(async () => {
+      await connect.promise;
+      injected.sessionId = "hydrated-session";
+    });
+
+    const p1 = controller.ensureConversationReady("main");
+    const p2 = controller.ensureConversationReady("main");
+
+    // Both must resolve to the same hydration result
+    connect.resolve();
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1.sessionId).toBe(r2.sessionId);
+    expect(r1.tabId).toBe("main");
+  });
+
+  it("creates a new session for a deferred owner", async () => {
+    const { controller, deps } = await readyHydrationController("ready");
+    // Force main to deferred state
+    controller["publish"]({
+      ...controller.getSnapshot(),
+      tabOperations: new Map(controller.getSnapshot().tabOperations).set(
+        "main",
+        Object.freeze({
+          closing: false,
+          connection: "deferred" as const,
+          hasSession: false,
+          permissionPending: false,
+          prompt: "idle" as const,
+          sessionOperation: "idle" as const,
+        }),
+      ),
+    });
+    const injected = fakeClient("fresh");
+    injected.sessionId = undefined;
+    injected.connect = vi.fn(async () => { injected.sessionId = "created-session"; });
+    controller["dependencies"].clients.acquireClient = vi.fn(() => injected);
+
+    const result = await controller.ensureConversationReady("main");
+    expect(result.tabId).toBe("main");
+    expect(result.sessionId).toBe("created-session");
+    // Workspace should reflect the new session binding
+    const ws = deps.workspace.getWorkspace()!;
+    const tab = ws.tabs.find((t) => t.id === "main");
+    expect(tab?.sessionId).toBe("created-session");
+  });
+
+  it("loads existing session for an unloaded owner", async () => {
+    const history = deferred<HermesHistoryItem[]>();
+    const { controller, clients } = await readyHydrationController("unloaded");
+    const target = clients.get("main")!;
+    target.connect = vi.fn(async () => undefined);
+    target.loadSessionHistory = vi.fn(() => history.promise);
+    // Force state to unloaded
+    controller["publish"]({
+      ...controller.getSnapshot(),
+      tabOperations: new Map(controller.getSnapshot().tabOperations).set(
+        "main",
+        Object.freeze({
+          closing: false,
+          connection: "unloaded" as const,
+          hasSession: true,
+          permissionPending: false,
+          prompt: "idle" as const,
+          sessionOperation: "idle" as const,
+        }),
+      ),
+    });
+
+    const p = controller.ensureConversationReady("main");
+    history.resolve([{ content: "hi", timestamp: "2024-01-01T00:00:00Z" } as unknown as HermesHistoryItem]);
+    const result = await p;
+    expect(result.items).toHaveLength(1);
+    expect(target.connect).toHaveBeenCalled();
+    expect(target.loadSessionHistory).toHaveBeenCalledWith("main-session");
+  });
+
+  it("sets connection to failed and rejects on hydration error", async () => {
+    const { controller } = await readyHydrationController("ready");
+    // Force main to deferred
+    controller["publish"]({
+      ...controller.getSnapshot(),
+      tabOperations: new Map(controller.getSnapshot().tabOperations).set(
+        "main",
+        Object.freeze({
+          closing: false,
+          connection: "deferred" as const,
+          hasSession: false,
+          permissionPending: false,
+          prompt: "idle" as const,
+          sessionOperation: "idle" as const,
+        }),
+      ),
+    });
+    const injected = fakeClient("fresh");
+    injected.sessionId = undefined;
+    injected.connect = vi.fn(async () => { throw new Error("connect failed"); });
+    controller["dependencies"].clients.acquireClient = vi.fn(() => injected);
+
+    await expect(controller.ensureConversationReady("main")).rejects.toThrow("connect failed");
+    expect(controller.getSnapshot().tabOperations.get("main")?.connection).toBe("failed");
+  });
+
+  it("retries successfully after a previous failure", async () => {
+    const { controller } = await readyHydrationController("ready");
+    // Force main to deferred
+    controller["publish"]({
+      ...controller.getSnapshot(),
+      tabOperations: new Map(controller.getSnapshot().tabOperations).set(
+        "main",
+        Object.freeze({
+          closing: false,
+          connection: "deferred" as const,
+          hasSession: false,
+          permissionPending: false,
+          prompt: "idle" as const,
+          sessionOperation: "idle" as const,
+        }),
+      ),
+    });
+
+    const failClient = fakeClient("fail");
+    failClient.sessionId = undefined;
+    failClient.connect = vi.fn(async () => { throw new Error("connect failed"); });
+    controller["dependencies"].clients.acquireClient = vi.fn(() => failClient);
+    await expect(controller.ensureConversationReady("main")).rejects.toThrow("connect failed");
+
+    const okClient = fakeClient("ok");
+    okClient.sessionId = "ok-session";
+    okClient.connect = vi.fn(async () => undefined);
+    controller["dependencies"].clients.acquireClient = vi.fn(() => okClient);
+    const result = await controller.ensureConversationReady("main");
+    expect(result.sessionId).toBe("ok-session");
+  });
+});
