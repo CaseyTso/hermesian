@@ -18,8 +18,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.2.1",
-    "diff": "8.0.4",
-    "zod": "4.4.3"
+    "diff": "8.0.4"
   },
   "devDependencies": {
     "@types/node": "24.10.0",
