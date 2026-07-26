@@ -248,6 +248,76 @@ export function removeConversationTab(
   );
 }
 
+// ── Close intent ───────────────────────────────────────────────
+
+export interface CloseConversationIntent {
+  closingTabId: string;
+  intendedSuccessorTabId: string;
+  replacementTabId?: string;
+}
+
+export function createCloseIntent(
+  workspace: PersistedConversationWorkspace,
+  tabId: string,
+  createTabId: () => string,
+): CloseConversationIntent {
+  if (workspace.tabs.length === 1) {
+    const replacementTabId = createTabId();
+    return {
+      closingTabId: tabId,
+      intendedSuccessorTabId: replacementTabId,
+      replacementTabId,
+    };
+  }
+
+  const index = workspace.tabs.findIndex((tab) => tab.id === tabId);
+  if (index < 0) {
+    throw new Error(`Conversation tab ${tabId} not found in workspace`);
+  }
+  const neighbor = workspace.tabs[index + 1] ?? workspace.tabs[index - 1];
+  return {
+    closingTabId: tabId,
+    intendedSuccessorTabId: neighbor.id,
+  };
+}
+
+export function applyCloseIntent(
+  latestWorkspace: PersistedConversationWorkspace,
+  intent: CloseConversationIntent,
+): PersistedConversationWorkspace {
+  const closingTabId = intent.closingTabId;
+  if (!latestWorkspace.tabs.some((tab) => tab.id === closingTabId)) {
+    throw new Error(`Conversation tab ${closingTabId} was already removed`);
+  }
+
+  // Build post-close workspace using the deterministic successor rule
+  let workspace: PersistedConversationWorkspace;
+  if (intent.replacementTabId) {
+    workspace = addPendingConversationTab(latestWorkspace, intent.replacementTabId);
+    const removed = removeConversationTab(workspace, closingTabId);
+    if (!removed) {
+      throw new Error("Failed to create replacement conversation tab");
+    }
+    workspace = removed;
+  } else {
+    const removed = removeConversationTab(latestWorkspace, closingTabId);
+    if (!removed) {
+      throw new Error("Failed to remove conversation tab");
+    }
+    workspace = removed;
+  }
+
+  // If user selected another owner while close was pending, preserve it
+  const latestActive = latestWorkspace.activeTabId;
+  if (latestActive !== closingTabId && workspace.activeTabId !== latestActive) {
+    if (workspace.tabs.some((tab) => tab.id === latestActive)) {
+      workspace = activateConversationTab(workspace, latestActive);
+    }
+  }
+
+  return workspace;
+}
+
 export function updateConversationTab(
   workspace: PersistedConversationWorkspace,
   tabId: string,

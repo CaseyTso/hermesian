@@ -6,32 +6,31 @@ import type {
 } from "@agentclientprotocol/sdk";
 import { diffLines } from "diff";
 import {
-  type App,
   ItemView,
   MarkdownRenderer,
   MarkdownView,
   Notice,
-  SuggestModal,
   WorkspaceLeaf,
   setIcon,
 } from "obsidian";
 
 import type HermesianPlugin from "./main";
 import {
-  activateConversationTab,
-  addPendingConversationTab,
-  ConversationTransitionCoordinator,
-  conversationControlAvailability,
-  conversationControlsBusy,
-  createConversationWorkspace,
+  ConversationController,
+  ConversationControllerError,
+  type ConversationControllerSnapshot,
+  type ConversationInitializationResult,
+} from "./conversation-controller";
+import {
   isActiveConversationSession,
-  removeConversationTab,
-  replaceConversationSession,
-  shouldAutoScrollConversation,
   updateConversationTab,
   type PersistedConversationTab,
   type PersistedConversationWorkspace,
 } from "./conversation-tabs";
+import {
+  type ConversationAggregateControlAvailability,
+  type ConversationControlAvailability,
+} from "./conversation-runtime";
 import { linkifyExternalUrls } from "./external-links";
 import { HERMESIAN_ICON_ID } from "./hermes-icon";
 import {
@@ -48,11 +47,36 @@ import {
   formatContextUsage,
 } from "./session-state";
 import {
+  buildActiveNotePrompt,
   buildDocumentPrompt,
   buildSelectionPrompt,
   validateSelectionEdit,
 } from "./selection-context";
-import { REASONING_EFFORTS, reasoningEffortLabel } from "./session-history";
+import { reasoningEffortLabel } from "./session-history";
+import {
+  HermesModelSuggestModal,
+  HermesHistorySuggestModal,
+  HermesReasoningSuggestModal,
+} from "./ui/conversation-modals";
+import {
+  renderConversationTabsView,
+  type ConversationTabsCallbacks,
+} from "./ui/conversation-tabs-view";
+import {
+  createSidebarShell,
+  type SidebarShellCallbacks,
+} from "./ui/sidebar-shell";
+import {
+  MessageRenderer,
+  TurnManager,
+  type TurnCallbacks,
+} from "./ui/message-renderer";
+import {
+  applyComposerState,
+  createComposerView,
+  type ComposerCallbacks,
+  type ComposerState,
+} from "./ui/composer-view";
 import {
   buildSlashOutboundPrompt,
   buildSlashMenuItems,
@@ -78,22 +102,26 @@ const OBSIDIAN_OUTPUT_RULES = `<hermesian_output_rules>
 When referring to a note in the current Obsidian Vault, use an Obsidian wikilink such as [[folder/note|note]]. Preserve heading (#) and block (^) suffixes when relevant. Do not wrap wikilinks in backticks or code blocks.
 </hermesian_output_rules>`;
 
+const DISABLED_CONVERSATION_CONTROLS: ConversationControlAvailability =
+  Object.freeze({
+    activate: false,
+    add: false,
+    close: false,
+    composer: false,
+    hasSession: false,
+    history: false,
+    model: false,
+    reasoning: false,
+    restart: false,
+    send: false,
+    stop: false,
+    tabNavigation: false,
+  });
+
 interface PendingPermission {
   card: HTMLElement;
   resolve: (response: RequestPermissionResponse) => void;
   tabId: string;
-}
-
-interface ConversationTurnRuntime {
-  activeEditScope?: SelectionContext | MarkdownDocumentContext;
-  activeTurnEl?: HTMLElement;
-  assistantContentEl?: HTMLElement;
-  assistantText: string;
-  busy: boolean;
-  completionPromise?: Promise<void>;
-  thoughtContentEl?: HTMLElement;
-  toolEls: Map<string, HTMLElement>;
-  turnActivityEl?: HTMLElement;
 }
 
 function rejectionFor(options: PermissionOption[]): RequestPermissionResponse {
@@ -127,135 +155,19 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
-class HermesModelSuggestModal extends SuggestModal<HermesModelOption> {
-  constructor(
-    app: App,
-    private readonly models: HermesModelOption[],
-    private readonly currentSwitchId: string | undefined,
-    private readonly choose: (model: HermesModelOption) => void,
-  ) {
-    super(app);
-    this.setPlaceholder("Search provider or model…");
-  }
-
-  getSuggestions(query: string): HermesModelOption[] {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) {
-      return this.models;
-    }
-    return this.models.filter((model) =>
-      [model.providerName, model.providerId, model.name, model.modelId, model.description]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalized),
-    );
-  }
-
-  renderSuggestion(model: HermesModelOption, element: HTMLElement): void {
-    const row = element.createDiv({ cls: "hermesian-model-suggestion" });
-    const copy = row.createDiv({ cls: "hermesian-model-suggestion-copy" });
-    copy.createDiv({ text: model.name, cls: "hermesian-model-suggestion-name" });
-    copy.createDiv({
-      text: `${model.providerName}${model.description ? ` · ${model.description}` : ""}`,
-      cls: "hermesian-model-suggestion-provider",
-    });
-    if (model.switchId === this.currentSwitchId) {
-      const check = row.createSpan({ cls: "hermesian-model-suggestion-check" });
-      setIcon(check, "check");
-    }
-  }
-
-  onChooseSuggestion(model: HermesModelOption): void {
-    this.choose(model);
-  }
-}
-
-class HermesHistorySuggestModal extends SuggestModal<HermesHistoryEntry> {
-  constructor(
-    app: App,
-    private readonly sessions: HermesHistoryEntry[],
-    private readonly choose: (session: HermesHistoryEntry) => void,
-  ) {
-    super(app);
-    this.setPlaceholder("Search historical Hermes sessions…");
-  }
-
-  getSuggestions(query: string): HermesHistoryEntry[] {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) {
-      return this.sessions;
-    }
-    return this.sessions.filter((session) =>
-      [session.title ?? "", session.sessionId, session.cwd]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalized),
-    );
-  }
-
-  renderSuggestion(session: HermesHistoryEntry, element: HTMLElement): void {
-    const row = element.createDiv({ cls: "hermesian-history-suggestion" });
-    row.createDiv({
-      text: session.title || "Untitled Hermes session",
-      cls: "hermesian-history-title",
-    });
-    row.createDiv({
-      text: `${session.updatedAt ?? "No timestamp"} · ${session.sessionId}`,
-      cls: "hermesian-history-meta",
-    });
-  }
-
-  onChooseSuggestion(session: HermesHistoryEntry): void {
-    this.choose(session);
-  }
-}
-
-class HermesReasoningSuggestModal extends SuggestModal<ReasoningEffort> {
-  constructor(
-    app: App,
-    private readonly current: ReasoningEffort,
-    private readonly choose: (effort: ReasoningEffort) => void,
-  ) {
-    super(app);
-    this.setPlaceholder("Select thinking depth…");
-  }
-
-  getSuggestions(query: string): ReasoningEffort[] {
-    const normalized = query.trim().toLowerCase();
-    return normalized
-      ? REASONING_EFFORTS.filter((effort) =>
-          reasoningEffortLabel(effort).toLowerCase().includes(normalized),
-        )
-      : REASONING_EFFORTS;
-  }
-
-  renderSuggestion(effort: ReasoningEffort, element: HTMLElement): void {
-    const row = element.createDiv({ cls: "hermesian-reasoning-option" });
-    row.createSpan({ text: reasoningEffortLabel(effort) });
-    if (effort === this.current) {
-      const check = row.createSpan({ cls: "hermesian-reasoning-check" });
-      setIcon(check, "check");
-    }
-  }
-
-  onChooseSuggestion(effort: ReasoningEffort): void {
-    this.choose(effort);
-  }
-}
-
 export class HermesianSidebarView extends ItemView {
   private addConversationButtonEl!: HTMLButtonElement;
   private composerEl!: HTMLTextAreaElement;
   private conversationTabsEl!: HTMLElement;
   private conversationWorkspace: PersistedConversationWorkspace | undefined;
+  private controller: ConversationController<HermesAcpClient> | undefined;
+  private controllerUnsubscribe: (() => void) | undefined;
   private contextProgressEl!: HTMLElement;
   private contextUsageEl!: HTMLElement;
-  private controlsBusy = false;
   private currentFileBarEl!: HTMLButtonElement;
   private currentFileLabelEl!: HTMLElement;
   private currentFilePath: string | undefined;
   private includeCurrentDocumentContext = true;
-  private initializing = true;
   private historyButtonEl!: HTMLButtonElement;
   private imageAttachmentBarEl!: HTMLElement;
   private messagesEl!: HTMLElement;
@@ -263,33 +175,24 @@ export class HermesianSidebarView extends ItemView {
   private modelLabelEl!: HTMLElement;
   private pendingSelection: SelectionContext | undefined;
   private readonly permissions = new Map<string, PendingPermission>();
-  private readonly clientLoadingTabs = new Set<string>();
   private readonly loadedMessageTabIds = new Set<string>();
-  private readonly messageCaches = new Map<string, HTMLElement>();
+  private messageRenderer!: MessageRenderer;
+  private turnManager!: TurnManager;
+  private readonly editScopes = new Map<
+    string,
+    SelectionContext | MarkdownDocumentContext | undefined
+  >();
   private readonly pendingImages = new Map<string, PastedImageAttachment[]>();
-  private readonly sessionStates = new Map<string, HermesSessionState>();
-  private readonly turnRuntimes = new Map<string, ConversationTurnRuntime>();
   private reasoningButtonEl!: HTMLButtonElement;
   private reasoningLabelEl!: HTMLElement;
   private selectionBarEl!: HTMLElement;
   private sendButtonEl!: HTMLButtonElement;
-  private sessionState: HermesSessionState = {
-    catalogLoading: false,
-    commands: [],
-    models: [],
-    skillCatalogLoading: false,
-    skills: [],
-    switchingModel: false,
-  };
   private slashMenuEl!: HTMLElement;
+  private stopButtonEl!: HTMLButtonElement;
+  private readonly tabSelections = new Map<string, SelectionContext | undefined>();
   private slashMenuIndex = 0;
   private slashMenuItems: SlashMenuItem[] = [];
   private statusEl!: HTMLElement;
-  private stopButtonEl!: HTMLButtonElement;
-  private readonly tabSelections = new Map<string, SelectionContext | undefined>();
-  private readonly transitions = new ConversationTransitionCoordinator();
-  private closingConversationTabId: string | undefined;
-  private visibleMessagesTabId: string | undefined;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -311,31 +214,35 @@ export class HermesianSidebarView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    this.initializing = true;
     this.renderShell();
     this.updateControls(true, false);
     this.plugin.attachView(this);
+    this.controller = new ConversationController(
+      this.plugin.getConversationControllerDependencies(),
+    );
+    this.controllerUnsubscribe = this.controller.subscribe((snapshot) => {
+      this.handleControllerSnapshot(snapshot);
+    });
     try {
-      const persisted = this.plugin.getConversationWorkspace();
-      const activeTabId = persisted?.activeTabId ?? crypto.randomUUID();
-      const client = this.plugin.getClient(activeTabId);
-      await client.connect();
-      await this.initializeConversationWorkspace(activeTabId, client, persisted);
+      const result = await this.controller.initialize();
+      await this.initializeConversationWorkspace(result);
     } catch (error) {
       new Notice(`Hermesian connection failed: ${this.messageFor(error)}`);
-    } finally {
-      this.initializing = false;
-      this.updateControls(false);
     }
   }
 
   async onClose(): Promise<void> {
     this.captureActiveConversationRuntime();
     await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-    for (const permission of this.permissions.values()) {
+    for (const [permissionId, permission] of this.permissions) {
+      this.controller?.completePermission(permissionId);
       permission.resolve({ outcome: { outcome: "cancelled" } });
     }
     this.permissions.clear();
+    this.controllerUnsubscribe?.();
+    this.controllerUnsubscribe = undefined;
+    await this.controller?.shutdown();
+    this.controller = undefined;
     await this.plugin.releaseView(this);
   }
 
@@ -390,22 +297,28 @@ export class HermesianSidebarView extends ItemView {
       case "error":
         this.appendSystemMessage(`Error: ${event.message}`, true, tabId);
         if (hermesEventEndsTurn(event)) {
-          this.turnRuntime(tabId).activeEditScope = undefined;
+          this.editScopes.set(tabId, undefined);
           void this.finishFailedTurn(tabId);
         }
         return;
       case "turn-stop":
-        this.turnRuntime(tabId).activeEditScope = undefined;
+        this.editScopes.set(tabId, undefined);
         void this.finishTurn(tabId, event.reason);
         return;
     }
   }
 
   handleHermesSessionState(tabId: string, state: HermesSessionState): void {
-    this.sessionStates.set(tabId, state);
+    this.controller?.updateClientState(tabId, state);
     if (!this.conversationWorkspace || this.conversationWorkspace.activeTabId === tabId) {
       this.renderSessionState(state);
     }
+  }
+
+  getAggregateConversationControls():
+    | ConversationAggregateControlAvailability
+    | undefined {
+    return this.controller?.getSnapshot().controls.aggregate;
   }
 
   requestPermission(
@@ -413,9 +326,9 @@ export class HermesianSidebarView extends ItemView {
     request: PermissionRequest,
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
-    this.revealActiveTurnForPermission(tabId);
-    const runtime = this.turnRuntime(tabId);
     const permissionId = `${tabId}:${request.toolCall.toolCallId}`;
+    this.controller?.beginPermission(tabId, permissionId);
+    this.revealActiveTurnForPermission(tabId);
     const diffs = (request.toolCall.content ?? [])
       .filter(
         (content): content is Extract<ToolCallContent, { type: "diff" }> =>
@@ -427,15 +340,17 @@ export class HermesianSidebarView extends ItemView {
         path: content.path,
       }));
     if (request.toolCall.kind === "edit" || diffs.length > 0) {
-      const validation = validateSelectionEdit(runtime.activeEditScope, diffs);
+      const validation = validateSelectionEdit(this.editScopes.get(tabId), diffs);
       if (validation.allowed === false) {
         this.appendSystemMessage(`Blocked edit: ${validation.reason}`, true, tabId);
+        this.controller?.completePermission(permissionId);
         return Promise.resolve(rejectionFor(request.options));
       }
     }
     try {
       const automatic = this.plugin.automaticPermissionResponse(request);
       if (automatic) {
+        this.controller?.completePermission(permissionId);
         return Promise.resolve(automatic);
       }
     } catch (error) {
@@ -444,9 +359,11 @@ export class HermesianSidebarView extends ItemView {
         true,
         tabId,
       );
+      this.controller?.completePermission(permissionId);
       return Promise.resolve(rejectionFor(request.options));
     }
     if (signal.aborted) {
+      this.controller?.completePermission(permissionId);
       return Promise.resolve({ outcome: { outcome: "cancelled" } });
     }
 
@@ -468,6 +385,7 @@ export class HermesianSidebarView extends ItemView {
           return;
         }
         this.permissions.delete(permissionId);
+        this.controller?.completePermission(permissionId);
         this.renderAddConversationControl();
         this.renderConversationTabs();
         actions.querySelectorAll("button").forEach((button: Element) => {
@@ -496,76 +414,102 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private renderShell(): void {
-    const root = this.containerEl.children[1] as HTMLElement;
-    root.empty();
-    root.addClass("hermesian-view");
-
-    const header = root.createDiv({ cls: "hermesian-header" });
-    const identity = header.createDiv({ cls: "hermesian-identity" });
-    const logo = identity.createSpan({ cls: "hermesian-logo" });
-    setIcon(logo, HERMESIAN_ICON_ID);
-    identity.createSpan({ text: "Hermesian", cls: "hermesian-title" });
-    this.statusEl = identity.createSpan({
-      attr: {
-        "aria-atomic": "true",
-        "aria-live": "polite",
-        role: "status",
+    const callbacks: SidebarShellCallbacks = {
+      onAddConversation: () => {
+        void this.addConversation();
       },
-      text: "Disconnected",
-      cls: "hermesian-status",
-    });
-
-    const headerActions = header.createDiv({ cls: "hermesian-header-actions" });
-    this.addConversationButtonEl = headerActions.createEl("button", {
-      attr: {
-        "aria-label": "Add conversation",
-        title: "Add conversation",
-        type: "button",
+      onMessagesClick: (event: MouseEvent) => {
+        this.openRenderedLink(event);
       },
-      cls: "clickable-icon",
-    });
-    setIcon(this.addConversationButtonEl, "square-plus");
-    this.addConversationButtonEl.addEventListener("click", () => {
-      void this.addConversation();
-    });
-    this.historyButtonEl = headerActions.createEl("button", {
-      attr: {
-        "aria-label": "View Hermes history",
-        title: "Browse and resume historical sessions",
+      onOpenHistory: () => {
+        void this.openHistoryPicker();
       },
-      cls: "clickable-icon",
-    });
-    setIcon(this.historyButtonEl, "history");
-    this.historyButtonEl.addEventListener("click", () => {
-      void this.openHistoryPicker();
-    });
+    };
 
-    this.conversationTabsEl = root.createDiv({
-      attr: { "aria-label": "Hermes conversations", role: "tablist" },
-      cls: "hermesian-conversation-tabs",
-    });
+    const shell = createSidebarShell(this.containerEl, callbacks);
+    this.statusEl = shell.statusEl;
+    this.addConversationButtonEl = shell.addConversationButtonEl;
+    this.historyButtonEl = shell.historyButtonEl;
+    this.conversationTabsEl = shell.conversationTabsEl;
+    this.messagesEl = shell.messagesEl;
+    this.messageRenderer = new MessageRenderer(this.messagesEl);
 
-    this.messagesEl = root.createDiv({ cls: "hermesian-messages" });
-    this.messagesEl.addEventListener("click", (event) => {
-      this.openRenderedLink(event);
-    });
+    const turnCallbacks: TurnCallbacks = {
+      onTurnComplete: (_tabId: string) => {
+        this.renderConversationTabs();
+        if (this.conversationWorkspace?.activeTabId === _tabId) {
+          this.updateControls(false);
+        }
+      },
+    };
+    this.turnManager = new TurnManager(this.messageRenderer, turnCallbacks);
+
+    // Wire icons (needs Obsidian's setIcon)
+    setIcon(shell.root.querySelector(".hermesian-logo")!, HERMESIAN_ICON_ID);
+    setIcon(shell.addConversationButtonEl, "square-plus");
+    setIcon(shell.historyButtonEl, "history");
+
     this.appendSystemMessage(
-      "Select text in a Markdown note, run “Ask Hermes about selection”, then describe the change you want.",
+      "Select text in a Markdown note, run 'Ask Hermes about selection', then describe the change you want.",
     );
 
-    const composer = root.createDiv({ cls: "hermesian-composer" });
-    const composerContexts = composer.createDiv({ cls: "hermesian-composer-contexts" });
-    this.currentFileBarEl = composerContexts.createEl("button", {
-      attr: { type: "button" },
-      cls: "hermesian-current-file",
-    }) as HTMLButtonElement;
-    const currentFileIcon = this.currentFileBarEl.createSpan({
-      cls: "hermesian-current-file-icon",
-    });
-    setIcon(currentFileIcon, "file-text");
-    this.currentFileLabelEl = this.currentFileBarEl.createSpan({
-      cls: "hermesian-current-file-label",
-    });
+    const composerCallbacks: ComposerCallbacks = {
+      onDraftChange: (_draft: string) => {
+        this.renderSlashMenu(true);
+        this.captureActiveConversationRuntime();
+      },
+      onPaste: (event: ClipboardEvent) => {
+        void this.handleComposerPaste(event);
+      },
+      onSend: () => {
+        void this.sendMessage();
+      },
+      onStop: () => {
+        const activeTab = this.activeConversationTab();
+        if (activeTab) {
+          void this.plugin.getClient(activeTab.id).cancel();
+        }
+      },
+    };
+
+    const initialComposerState: ComposerState = {
+      disabled: true,
+      draft: "",
+      placeholder: "Ask Hermes…  ↵ to send · Shift+↵ for new line",
+      sendEnabled: false,
+      stopVisible: false,
+    };
+
+    const composerElements = createComposerView(
+      shell.root,
+      initialComposerState,
+      composerCallbacks,
+    );
+    this.currentFileBarEl = composerElements.currentFileBarEl;
+    this.currentFileLabelEl = composerElements.currentFileLabelEl;
+    this.selectionBarEl = composerElements.selectionBarEl;
+    this.imageAttachmentBarEl = composerElements.imageAttachmentBarEl;
+    this.composerEl = composerElements.composerEl;
+    this.slashMenuEl = composerElements.slashMenuEl;
+    this.modelButtonEl = composerElements.modelButtonEl;
+    this.modelLabelEl = composerElements.modelLabelEl;
+    this.reasoningButtonEl = composerElements.reasoningButtonEl;
+    this.reasoningLabelEl = composerElements.reasoningLabelEl;
+    this.sendButtonEl = composerElements.sendButtonEl;
+    this.stopButtonEl = composerElements.stopButtonEl;
+    this.contextProgressEl = composerElements.contextProgressEl;
+    this.contextUsageEl = composerElements.contextUsageEl;
+
+    // Wire icons (needs Obsidian's setIcon)
+    setIcon(composerElements.currentFileBarEl.querySelector(".hermesian-current-file-icon")!, "file-text");
+    setIcon(composerElements.modelButtonEl.querySelector(".hermesian-model-icon")!, "bot");
+    setIcon(composerElements.modelButtonEl.querySelector(".hermesian-model-chevron")!, "chevron-down");
+    setIcon(composerElements.reasoningButtonEl.querySelector(".hermesian-reasoning-icon")!, "brain");
+    setIcon(composerElements.addSelectionButtonEl.querySelector("span")!, "paperclip");
+    setIcon(composerElements.sendButtonEl.querySelector("span")!, "arrow-right");
+    setIcon(composerElements.stopButtonEl.querySelector("span")!, "square");
+
+    // Wire event handlers
     this.currentFileBarEl.addEventListener("click", () => {
       if (!this.currentFilePath) {
         return;
@@ -576,25 +520,6 @@ export class HermesianSidebarView extends ItemView {
     });
     this.renderCurrentFile();
 
-    this.selectionBarEl = composerContexts.createDiv({ cls: "hermesian-selection-bar" });
-    this.selectionBarEl.hide();
-    this.imageAttachmentBarEl = composerContexts.createDiv({
-      cls: "hermesian-image-attachment-bar",
-    });
-    this.imageAttachmentBarEl.hide();
-
-    this.composerEl = composer.createEl("textarea", {
-      attr: {
-        "aria-autocomplete": "list",
-        "aria-controls": "hermesian-slash-menu",
-        "aria-expanded": "false",
-        "aria-label": "Message Hermes",
-        placeholder: "Ask Hermes…  ↵ to send · Shift+↵ for new line",
-        role: "combobox",
-        rows: "3",
-      },
-      cls: "hermesian-input",
-    });
     this.composerEl.addEventListener("keydown", (event) => {
       if (this.handleSlashMenuKeydown(event)) {
         return;
@@ -604,13 +529,6 @@ export class HermesianSidebarView extends ItemView {
         void this.sendMessage();
       }
     });
-    this.composerEl.addEventListener("paste", (event) => {
-      void this.handleComposerPaste(event);
-    });
-    this.composerEl.addEventListener("input", () => {
-      this.renderSlashMenu(true);
-      this.captureActiveConversationRuntime();
-    });
     this.composerEl.addEventListener("blur", () => {
       window.setTimeout(() => {
         if (!this.slashMenuEl.contains(this.containerEl.ownerDocument.activeElement)) {
@@ -619,63 +537,22 @@ export class HermesianSidebarView extends ItemView {
       }, 0);
     });
 
-    this.slashMenuEl = composer.createDiv({
-      attr: {
-        "aria-label": "Hermes slash commands and skills",
-        id: "hermesian-slash-menu",
-        role: "listbox",
-      },
-      cls: "hermesian-slash-menu",
-    });
-    this.slashMenuEl.hide();
-
-    const composerFooter = composer.createDiv({ cls: "hermesian-composer-footer" });
-    const controlRow = composerFooter.createDiv({ cls: "hermesian-control-row" });
-    this.modelButtonEl = controlRow.createEl("button", {
-      attr: { "aria-label": "Select Hermes model" },
-      cls: "hermesian-model-button",
-    });
-    const modelIcon = this.modelButtonEl.createSpan({ cls: "hermesian-model-icon" });
-    setIcon(modelIcon, "bot");
-    this.modelLabelEl = this.modelButtonEl.createSpan({
-      text: "Loading model…",
-      cls: "hermesian-model-label",
-    });
-    const chevron = this.modelButtonEl.createSpan({ cls: "hermesian-model-chevron" });
-    setIcon(chevron, "chevron-down");
     this.modelButtonEl.addEventListener("click", () => this.openModelPicker());
-
-    this.reasoningButtonEl = controlRow.createEl("button", {
-      attr: { "aria-label": "Adjust Hermes thinking depth" },
-      cls: "hermesian-reasoning-button",
-    });
-    const reasoningIcon = this.reasoningButtonEl.createSpan({ cls: "hermesian-reasoning-icon" });
-    setIcon(reasoningIcon, "brain");
-    this.reasoningLabelEl = this.reasoningButtonEl.createSpan({ cls: "hermesian-reasoning-label" });
     this.renderReasoningButton();
     this.reasoningButtonEl.addEventListener("click", () => {
       void this.openReasoningPicker();
     });
 
-    const addSelectionButton = controlRow.createEl("button", {
-      attr: {
-        "aria-label": "Add selection",
-        title: "Add selection",
-        type: "button",
-      },
-      cls: "clickable-icon hermesian-add-selection",
-    });
-    setIcon(addSelectionButton, "paperclip");
     let selectionSource: MarkdownView | undefined;
     let renderedSelection = "";
-    addSelectionButton.addEventListener("pointerdown", (event) => {
+    composerElements.addSelectionButtonEl.addEventListener("pointerdown", (event) => {
       selectionSource =
         this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
       renderedSelection =
         this.containerEl.ownerDocument.getSelection()?.toString() ?? "";
       event.preventDefault();
     });
-    addSelectionButton.addEventListener("click", () => {
+    composerElements.addSelectionButtonEl.addEventListener("click", () => {
       const source = selectionSource;
       const selectedText = renderedSelection;
       selectionSource = undefined;
@@ -683,122 +560,51 @@ export class HermesianSidebarView extends ItemView {
       void this.plugin.captureAndAttachSelection(source, selectedText);
     });
 
-    this.sendButtonEl = controlRow.createEl("button", {
-      attr: {
-        "aria-label": "Send message",
-        title: "Send message",
-        type: "button",
-      },
-      cls: "clickable-icon hermesian-primary-action is-send",
-    });
-    const sendIcon = this.sendButtonEl.createSpan();
-    setIcon(sendIcon, "arrow-right");
-    this.sendButtonEl.addEventListener("click", () => {
-      void this.sendMessage();
-    });
-
-    this.stopButtonEl = controlRow.createEl("button", {
-      attr: {
-        "aria-label": "Stop response",
-        title: "Stop response",
-        type: "button",
-      },
-      cls: "clickable-icon hermesian-primary-action is-stop",
-    });
-    const stopIcon = this.stopButtonEl.createSpan();
-    setIcon(stopIcon, "square");
-    this.stopButtonEl.hide();
-    this.stopButtonEl.addEventListener("click", () => {
-      const activeTab = this.activeConversationTab();
-      if (activeTab) {
-        void this.plugin.getClient(activeTab.id).cancel();
-      }
-    });
-
-    const context = composerFooter.createDiv({ cls: "hermesian-context" });
-    this.contextUsageEl = context.createDiv({
-      text: "Context —",
-      cls: "hermesian-context-label",
-    });
-    const contextTrack = context.createDiv({ cls: "hermesian-context-track" });
-    this.contextProgressEl = contextTrack.createDiv({
-      cls: "hermesian-context-progress",
+    this.modelButtonEl.addEventListener("click", () => this.openModelPicker());
+    this.renderReasoningButton();
+    this.reasoningButtonEl.addEventListener("click", () => {
+      void this.openReasoningPicker();
     });
   }
 
   private async initializeConversationWorkspace(
-    initialTabId: string,
-    client: HermesAcpClient,
-    persisted: PersistedConversationWorkspace | undefined,
+    result: ConversationInitializationResult,
   ): Promise<void> {
-    if (!persisted) {
-      const sessionId = client.sessionId;
-      if (!sessionId) {
-        throw new Error("Hermes ACP did not create an initial session");
-      }
-      this.conversationWorkspace = createConversationWorkspace(
-        initialTabId,
-        sessionId,
-      );
-      this.showConversationMessages(initialTabId);
-      this.loadedMessageTabIds.add(initialTabId);
-      this.restoreActiveConversationRuntime();
-      this.renderConversationTabs();
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-      return;
-    }
-
-    this.conversationWorkspace = persisted;
-    const activeTab = this.activeConversationTab();
-    if (!activeTab) {
-      throw new Error("The saved conversation workspace has no active tab");
-    }
-    this.showConversationMessages(activeTab.id);
+    this.conversationWorkspace = result.workspace;
+    this.showConversationMessages(result.tabId);
     this.renderConversationTabs();
 
-    this.updateControls(true, false);
-    try {
-      let restoredItems: HermesHistoryItem[] | undefined;
-      let restoredSessionId = activeTab.sessionId;
-      if (restoredSessionId) {
-        try {
-          restoredItems = await client.loadSessionHistory(restoredSessionId);
-        } catch (error) {
-          await client.newSession();
-          const replacementSessionId = client.sessionId;
-          if (!replacementSessionId) {
-            throw error;
-          }
-          this.conversationWorkspace = replaceConversationSession(
-            this.conversationWorkspace,
-            activeTab.id,
-            replacementSessionId,
-          );
-          restoredSessionId = replacementSessionId;
-          this.resetConversationView(activeTab.id);
-          this.appendSystemMessage(
-            "The saved Hermes session could not be restored. A new session was started for this tab.",
-            true,
-          );
-        }
-      } else {
-        restoredSessionId = await this.bindPendingConversation(activeTab.id, true);
-        this.resetConversationView(activeTab.id);
-        this.loadedMessageTabIds.add(activeTab.id);
-        this.appendSystemMessage("New Hermes conversation started.");
-      }
-      if (restoredItems && restoredSessionId) {
-        await this.renderHistorySession(
-          { cwd: "", sessionId: restoredSessionId },
-          restoredItems,
-          false,
-        );
-      }
-      this.restoreActiveConversationRuntime();
-      this.renderConversationTabs();
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-    } finally {
-      this.updateControls(false);
+    if (result.items) {
+      await this.renderHistorySession(
+        { cwd: "", sessionId: result.sessionId },
+        result.items,
+        false,
+      );
+    } else if (result.started) {
+      this.resetConversationView(result.tabId);
+      this.loadedMessageTabIds.add(result.tabId);
+      this.appendSystemMessage(
+        result.replaced
+          ? "The saved Hermes session could not be restored. A new session was started for this tab."
+          : "New Hermes conversation started.",
+        result.replaced,
+      );
+    }
+
+    this.restoreActiveConversationRuntime();
+    this.renderConversationTabs();
+  }
+
+  private handleControllerSnapshot(
+    snapshot: ConversationControllerSnapshot,
+  ): void {
+    if (snapshot.workspace) {
+      this.conversationWorkspace = snapshot.workspace;
+    }
+    if (this.sendButtonEl) {
+      this.updateControls(
+        snapshot.initializing || snapshot.globalOperation !== "idle",
+      );
     }
   }
 
@@ -808,182 +614,115 @@ export class HermesianSidebarView extends ItemView {
     );
   }
 
-  private turnRuntime(tabId: string): ConversationTurnRuntime {
-    let runtime = this.turnRuntimes.get(tabId);
-    if (!runtime) {
-      runtime = {
-        assistantText: "",
-        busy: false,
-        toolEls: new Map<string, HTMLElement>(),
-      };
-      this.turnRuntimes.set(tabId, runtime);
-    }
-    return runtime;
+  private turnRuntime(tabId: string) {
+    return this.turnManager.ensure(tabId);
   }
 
   private isTabBusy(tabId: string): boolean {
     return (
-      this.turnRuntimes.get(tabId)?.busy === true ||
+      this.controller?.getSnapshot().tabOperations.get(tabId)?.prompt === "running" ||
+      this.turnManager.isBusy(tabId) ||
       this.plugin.peekClient(tabId)?.isBusy === true
     );
   }
 
+  private isTabLoading(tabId: string): boolean {
+    return this.controller?.getSnapshot().tabOperations.get(tabId)?.connection === "loading";
+  }
+
+  private isTabClosing(tabId: string): boolean {
+    return this.controller?.getSnapshot().tabOperations.get(tabId)?.closing === true;
+  }
+
   private hasPendingPermission(tabId: string): boolean {
-    return Array.from(this.permissions.values()).some(
-      (permission) => permission.tabId === tabId,
-    );
+    return this.controller?.getSnapshot().tabOperations.get(tabId)?.permissionPending === true;
   }
 
 
   private activeSessionState(): HermesSessionState {
     const activeTab = this.activeConversationTab();
-    return (activeTab && this.sessionStates.get(activeTab.id)) ?? this.sessionState;
+    return (
+      (activeTab && this.controller?.getSnapshot().sessionStates.get(activeTab.id)) ??
+      (activeTab ? this.plugin.peekClient(activeTab.id)?.currentSessionState : undefined) ??
+      {
+        catalogLoading: false,
+        commands: [],
+        models: [],
+        skillCatalogLoading: false,
+        skills: [],
+        switchingModel: false,
+      }
+    );
   }
 
-  private controlAvailability(state = this.activeSessionState()) {
-    const activeTab = this.activeConversationTab();
-    const activeTabId = activeTab?.id;
-    return conversationControlAvailability({
-      activeTabBusy: Boolean(activeTabId && this.isTabBusy(activeTabId)),
-      activeTabLoading: Boolean(activeTabId && this.clientLoadingTabs.has(activeTabId)),
-      activeTabPermissionPending: Boolean(
-        activeTabId && this.hasPendingPermission(activeTabId),
-      ),
-      anyTabBusy: this.plugin.hasBusyClient(),
-      anyTabLoading: this.clientLoadingTabs.size > 0,
-      anyPermissionPending: this.permissions.size > 0,
-      controlsBusy: this.controlsBusy,
-      hasSession: Boolean(activeTab?.sessionId),
-      initializing: this.initializing,
-      switchingModel: state.switchingModel,
-    });
+  private controlAvailability() {
+    return this.controller?.getSnapshot().controls.active ?? DISABLED_CONVERSATION_CONTROLS;
+  }
+
+  private tabControlAvailability(tabId: string) {
+    return (
+      this.controller?.getSnapshot().controls.byTab.get(tabId) ??
+      DISABLED_CONVERSATION_CONTROLS
+    );
   }
 
   private async ensureClientForTab(
     tabId: string,
-  ): Promise<{ items?: HermesHistoryItem[]; sessionId: string; started: boolean }> {
-    const workspace = this.conversationWorkspace;
-    const tab = workspace?.tabs.find((candidate) => candidate.id === tabId);
-    if (!workspace || !tab) {
-      throw new Error("The conversation tab could not be found");
+  ): Promise<{
+    items?: HermesHistoryItem[];
+    replaced: boolean;
+    sessionId: string;
+    started: boolean;
+  }> {
+    if (!this.controller) {
+      throw new Error("Conversation controller is unavailable");
     }
-    const client = this.plugin.getClient(tabId);
-    this.clientLoadingTabs.add(tabId);
-    if (workspace.activeTabId === tabId) {
-      this.updateControls(false);
-    }
-    try {
-      await client.connect();
-      if (
-        tab.sessionId &&
-        (client.sessionId !== tab.sessionId || !this.loadedMessageTabIds.has(tabId))
-      ) {
-        const items = await client.loadSessionHistory(tab.sessionId);
-        return { items, sessionId: tab.sessionId, started: false };
-      }
-      const sessionId = tab.sessionId ?? client.sessionId;
-      if (!sessionId) {
-        throw new Error("Hermes ACP did not return a session ID");
-      }
-      if (!tab.sessionId) {
-        this.conversationWorkspace = replaceConversationSession(
-          this.conversationWorkspace ?? workspace,
-          tabId,
-          sessionId,
-        );
-      }
-      return { sessionId, started: !tab.sessionId };
-    } finally {
-      this.clientLoadingTabs.delete(tabId);
-      if (this.conversationWorkspace?.activeTabId === tabId) {
-        this.updateControls(false);
-      }
-    }
-  }
-
-  private async bindPendingConversation(
-    tabId: string,
-    useCurrentSession = false,
-  ): Promise<string> {
-    const workspace = this.conversationWorkspace;
-    const tab = workspace?.tabs.find((candidate) => candidate.id === tabId);
-    if (!workspace || !tab) {
-      throw new Error("The deferred conversation tab could not be found");
-    }
-    if (tab.sessionId) {
-      return tab.sessionId;
-    }
-
-    const client = this.plugin.getClient(tabId);
-    let sessionId = useCurrentSession ? client.sessionId : undefined;
-    if (!sessionId) {
-      await client.connect();
-      sessionId = client.sessionId;
-    }
-    if (!sessionId) {
-      throw new Error("Hermes ACP did not return a new session ID");
-    }
-
-    this.conversationWorkspace = replaceConversationSession(
-      this.conversationWorkspace ?? workspace,
-      tabId,
-      sessionId,
-    );
-    return sessionId;
-  }
-
-  private ensureMessageCache(tabId: string): HTMLElement {
-    let cache = this.messageCaches.get(tabId);
-    if (!cache) {
-      cache = this.containerEl.ownerDocument.createElement("div");
-      this.messageCaches.set(tabId, cache);
-    }
-    return cache;
+    const result = await this.controller.ensureClientForTab(tabId);
+    this.conversationWorkspace = result.workspace;
+    return result;
   }
 
   private showConversationMessages(tabId: string): void {
-    if (!this.visibleMessagesTabId) {
-      this.visibleMessagesTabId = tabId;
-      return;
-    }
-    if (this.visibleMessagesTabId === tabId) {
-      return;
-    }
-
-    const visibleCache = this.ensureMessageCache(this.visibleMessagesTabId);
-    visibleCache.replaceChildren(...Array.from(this.messagesEl.childNodes));
-    const targetCache = this.ensureMessageCache(tabId);
-    this.messagesEl.replaceChildren(...Array.from(targetCache.childNodes));
-    this.visibleMessagesTabId = tabId;
-    this.scrollToBottom();
+    this.messageRenderer.show(tabId);
   }
 
   private forgetConversationMessages(tabId: string): void {
     this.loadedMessageTabIds.delete(tabId);
-    this.messageCaches.delete(tabId);
+    this.messageRenderer.forget(tabId);
   }
 
-  private revealActiveTurnForPermission(tabId: string): void {
+  private async revealActiveTurnForPermission(tabId: string): Promise<void> {
     const workspace = this.conversationWorkspace;
-    if (!workspace) {
+    if (!workspace || !this.controller) {
       return;
     }
-    this.transitions.invalidateSwitch();
     if (workspace.activeTabId === tabId) {
       return;
     }
     this.captureActiveConversationRuntime();
-    this.conversationWorkspace = activateConversationTab(workspace, tabId);
-    this.showConversationMessages(tabId);
-    this.restoreActiveConversationRuntime();
-    this.renderSessionState(
-      this.sessionStates.get(tabId) ?? this.plugin.getClient(tabId).currentSessionState,
-    );
-    this.renderConversationTabs();
-    this.updateControls(false);
-    void this.plugin.flushConversationWorkspace(this.conversationWorkspace).catch((error) => {
-      new Notice(`Hermesian could not save the active conversation: ${this.messageFor(error)}`);
-    });
+    try {
+      const result = await this.controller.revealForPermission(
+        tabId,
+        `${tabId}:${this.permissions.size}`,
+      );
+      this.conversationWorkspace = result.workspace;
+      this.showConversationMessages(tabId);
+      this.restoreActiveConversationRuntime();
+      this.renderSessionState(
+        this.controller.getSnapshot().sessionStates.get(tabId) ??
+          this.plugin.getClient(tabId).currentSessionState,
+      );
+      this.renderConversationTabs();
+      this.updateControls(false);
+    } catch (error) {
+      if (
+        error instanceof ConversationControllerError &&
+        (error.code === "cancelled" || error.code === "operation_stale")
+      ) {
+        return;
+      }
+      new Notice(`Hermesian could not reveal this conversation: ${this.messageFor(error)}`);
+    }
   }
 
   private captureActiveConversationRuntime(): void {
@@ -1018,270 +757,239 @@ export class HermesianSidebarView extends ItemView {
     if (!this.conversationTabsEl) {
       return;
     }
-    this.conversationTabsEl.empty();
     const workspace = this.conversationWorkspace;
     if (!workspace) {
+      this.conversationTabsEl.empty();
       return;
     }
-    for (const tab of workspace.tabs) {
-      const active = tab.id === workspace.activeTabId;
-      const deferred = tab.sessionId === null;
-      const working = this.isTabBusy(tab.id);
-      const loading = deferred || this.clientLoadingTabs.has(tab.id);
-      const activityLabel = working ? ", responding" : loading ? ", starting" : "";
-      const activityTitle = working ? " · Responding" : loading ? " · Starting" : "";
-      const button = this.conversationTabsEl.createEl("button", {
-        attr: {
-          "aria-busy": String(working || loading),
-          "aria-label": `Conversation ${tab.label}${activityLabel}`,
-          "aria-selected": String(active),
-          "data-conversation-tab-id": tab.id,
-          role: "tab",
-          title: `Conversation ${tab.label}${activityTitle} · Right-click to close`,
-          type: "button",
-        },
-        cls: `hermesian-conversation-tab${active ? " is-active" : ""}${working ? " is-working" : ""}${loading ? " is-loading" : ""}${deferred ? " is-deferred" : ""}`,
-        text: String(tab.label),
-      });
-      button.disabled = this.initializing || this.controlsBusy;
-      button.addEventListener("click", () => {
-        void this.switchConversation(tab.id);
-      });
-      button.addEventListener("contextmenu", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-        void this.closeConversation(tab.id);
-      });
-    }
-    this.conversationTabsEl
-      .querySelector<HTMLElement>(".hermesian-conversation-tab.is-active")
-      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const callbacks: ConversationTabsCallbacks = {
+      onActivate: (tabId) => { void this.switchConversation(tabId); },
+      onClose: (tabId) => { void this.closeConversation(tabId); },
+    };
+    renderConversationTabsView(this.conversationTabsEl, {
+      activeTabId: workspace.activeTabId,
+      isTabBusy: (tabId) => this.isTabBusy(tabId),
+      isTabLoading: (tabId) => this.isTabLoading(tabId),
+      tabNavigationDisabled: !this.controlAvailability().tabNavigation,
+      tabs: workspace.tabs,
+    }, callbacks);
   }
 
   private async addConversation(): Promise<void> {
     if (
-      this.initializing ||
-      this.controlsBusy ||
-      this.closingConversationTabId !== undefined ||
+      !this.controller ||
+      !this.controlAvailability().add ||
+      this.isTabClosing(this.activeConversationTab()?.id ?? "") ||
       this.activeSessionState().switchingModel
     ) {
       return;
     }
-    this.transitions.invalidateSwitch();
     this.captureActiveConversationRuntime();
-    const workspace = this.conversationWorkspace;
-    if (!workspace) {
-      return;
-    }
-    const tabId = crypto.randomUUID();
-    this.conversationWorkspace = addPendingConversationTab(workspace, tabId);
-    this.pendingSelection = undefined;
-    this.tabSelections.set(tabId, undefined);
-    this.showConversationMessages(tabId);
-    this.resetConversationView(tabId);
-    this.restoreActiveConversationRuntime();
-    this.renderConversationTabs();
-    this.appendSystemMessage("Starting a new Hermes conversation…", false, tabId);
-    this.updateControls(false);
-    try {
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-      const client = this.plugin.getClient(tabId);
-      await client.connect();
-      const sessionId = client.sessionId;
-      if (!sessionId) {
-        throw new Error("Hermes ACP did not return a new session ID");
-      }
-      this.conversationWorkspace = replaceConversationSession(
-        this.conversationWorkspace,
-        tabId,
-        sessionId,
-      );
-      if (this.conversationWorkspace.activeTabId === tabId) {
-        this.showConversationMessages(tabId);
-        this.resetConversationView(tabId);
-      }
-      this.loadedMessageTabIds.add(tabId);
+    const existingTabIds = new Set(
+      this.conversationWorkspace?.tabs.map((tab) => tab.id) ?? [],
+    );
+    const adding = this.controller.addConversation();
+    const pendingWorkspace = this.controller.getSnapshot().workspace;
+    const pendingTabId = pendingWorkspace?.activeTabId;
+    if (pendingTabId && !existingTabIds.has(pendingTabId)) {
+      this.pendingSelection = undefined;
+      this.tabSelections.set(pendingTabId, undefined);
+      this.showConversationMessages(pendingTabId);
+      this.resetConversationView(pendingTabId);
+      this.restoreActiveConversationRuntime();
       this.renderConversationTabs();
-      this.appendSystemMessage("New Hermes conversation started.", false, tabId);
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
+      this.appendSystemMessage(
+        "Starting a new Hermes conversation…",
+        false,
+        pendingTabId,
+      );
+    }
+
+    try {
+      const result = await adding;
+      this.conversationWorkspace = result.workspace;
+      this.loadedMessageTabIds.add(result.tabId);
+      if (result.workspace.activeTabId === result.tabId) {
+        this.showConversationMessages(result.tabId);
+        this.resetConversationView(result.tabId);
+        this.restoreActiveConversationRuntime();
+      }
+      this.renderConversationTabs();
+      this.appendSystemMessage(
+        "New Hermes conversation started.",
+        false,
+        result.tabId,
+      );
     } catch (error) {
       new Notice(`Hermesian could not add a conversation: ${this.messageFor(error)}`);
-    } finally {
-      this.updateControls(false);
     }
   }
 
   private async closeConversation(tabId: string): Promise<void> {
-    const initialWorkspace = this.conversationWorkspace;
+    const workspace = this.conversationWorkspace;
     if (
-      !initialWorkspace ||
-      !initialWorkspace.tabs.some((tab) => tab.id === tabId) ||
-      this.initializing ||
-      this.controlsBusy ||
-      this.closingConversationTabId !== undefined ||
+      !this.controller ||
+      !workspace ||
+      !workspace.tabs.some((tab) => tab.id === tabId) ||
+      !this.tabControlAvailability(tabId).close ||
+      this.isTabClosing(tabId) ||
       this.isTabBusy(tabId) ||
-      this.clientLoadingTabs.size > 0 ||
       this.hasPendingPermission(tabId) ||
-      this.sessionStates.get(tabId)?.switchingModel
+      this.controller?.getSnapshot().sessionStates.get(tabId)?.switchingModel
     ) {
       return;
     }
 
-    this.transitions.invalidateSwitch();
     this.captureActiveConversationRuntime();
-    this.closingConversationTabId = tabId;
     this.updateControls(true);
-    const workspace = this.conversationWorkspace ?? initialWorkspace;
-    const closingActiveTab = workspace.activeTabId === tabId;
     try {
-      if (workspace.tabs.length === 1) {
-        const replacementTabId = crypto.randomUUID();
-        const withReplacement = addPendingConversationTab(workspace, replacementTabId);
-        const updated = removeConversationTab(withReplacement, tabId);
-        if (!updated) {
-          throw new Error("Hermesian could not create a replacement conversation tab");
-        }
-        this.conversationWorkspace = updated;
-        this.tabSelections.delete(tabId);
-        this.pendingImages.delete(tabId);
-        this.tabSelections.set(replacementTabId, undefined);
-        this.showConversationMessages(replacementTabId);
-        this.resetConversationView(replacementTabId);
-        this.forgetConversationMessages(tabId);
-        this.turnRuntimes.delete(tabId);
-        this.sessionStates.delete(tabId);
-        await this.plugin.releaseClient(tabId);
-        const { sessionId } = await this.ensureClientForTab(replacementTabId);
-        this.conversationWorkspace = replaceConversationSession(
-          this.conversationWorkspace,
-          replacementTabId,
-          sessionId,
-        );
-        this.loadedMessageTabIds.add(replacementTabId);
-        this.restoreActiveConversationRuntime();
-        this.renderConversationTabs();
+      const result = await this.controller.closeConversation(tabId);
+      this.conversationWorkspace = result.workspace;
+      this.tabSelections.delete(tabId);
+      this.pendingImages.delete(tabId);
+      this.forgetConversationMessages(tabId);
+      this.turnManager.delete(tabId);
+
+      const activeTabId = result.workspace.activeTabId;
+      this.showConversationMessages(activeTabId);
+      // Start owner-scoped hydration for the replacement when needed
+      if (result.replacementTabId) {
+        this.showConversationMessages(result.replacementTabId);
         this.appendSystemMessage(
           "Conversation closed. A new Hermes conversation started.",
           false,
-          replacementTabId,
+          result.replacementTabId,
         );
-        await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
-        return;
-      }
-
-      const updated = removeConversationTab(workspace, tabId);
-      if (!updated) {
-        throw new Error("Hermesian could not close that conversation tab");
-      }
-
-      if (!closingActiveTab) {
-        this.conversationWorkspace = updated;
-        this.tabSelections.delete(tabId);
-        this.pendingImages.delete(tabId);
-        this.forgetConversationMessages(tabId);
-        this.turnRuntimes.delete(tabId);
-        this.sessionStates.delete(tabId);
-        await this.plugin.releaseClient(tabId);
-        this.renderConversationTabs();
-        await this.plugin.flushConversationWorkspace(updated);
-        return;
-      }
-
-      const target = updated.tabs.find((tab) => tab.id === updated.activeTabId);
-      if (!target) {
-        throw new Error("The next conversation tab could not be found");
-      }
-      this.conversationWorkspace = updated;
-      this.tabSelections.delete(tabId);
-      this.pendingImages.delete(tabId);
-      this.showConversationMessages(target.id);
-      this.forgetConversationMessages(tabId);
-      this.turnRuntimes.delete(tabId);
-      this.sessionStates.delete(tabId);
-      await this.plugin.releaseClient(tabId);
-      const { items, sessionId, started } = await this.ensureClientForTab(target.id);
-      if (items) {
-        await this.renderHistorySession({ cwd: "", sessionId }, items, false);
-      } else if (started) {
-        this.resetConversationView(target.id);
-        this.loadedMessageTabIds.add(target.id);
-        this.appendSystemMessage("New Hermes conversation started.", false, target.id);
+        this.startConversationHydration(result.replacementTabId);
+      } else if (activeTabId) {
+        const tabOp = this.controller.getSnapshot().tabOperations.get(activeTabId);
+        if (tabOp && tabOp.connection !== "ready" && tabOp.connection !== "loading") {
+          this.startConversationHydration(activeTabId);
+        }
       }
       this.restoreActiveConversationRuntime();
       this.renderConversationTabs();
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
     } catch (error) {
+      if (
+        error instanceof ConversationControllerError &&
+        (error.code === "cancelled" || error.code === "operation_stale")
+      ) {
+        return;
+      }
       new Notice(`Hermesian could not close that conversation: ${this.messageFor(error)}`);
     } finally {
-      this.closingConversationTabId = undefined;
       this.updateControls(false);
     }
   }
 
-  private async switchConversation(tabId: string): Promise<void> {
-    const workspace = this.conversationWorkspace;
-    if (
-      !workspace ||
-      workspace.activeTabId === tabId ||
-      this.initializing ||
-      this.controlsBusy ||
-      this.closingConversationTabId !== undefined ||
-      this.clientLoadingTabs.has(tabId)
-    ) {
+  private startConversationHydration(tabId: string): void {
+    if (!this.controller) {
       return;
     }
-    const target = workspace.tabs.find((tab) => tab.id === tabId);
-    if (!target) {
+    const ownerId = tabId;
+    this.controller
+      .ensureConversationReady(ownerId)
+      .then((result) => {
+        const snapshot = this.controller?.getSnapshot();
+        if (!snapshot || !snapshot.workspace?.tabs.some((t) => t.id === ownerId)) {
+          return; // owner was removed
+        }
+        if (result.items && result.sessionId && !result.started) {
+          void this.renderHistorySession(
+            { cwd: "", sessionId: result.sessionId },
+            result.items,
+            false,
+            ownerId,
+          );
+          this.loadedMessageTabIds.add(ownerId);
+        } else if (result.started) {
+          this.resetConversationView(ownerId);
+          this.loadedMessageTabIds.add(ownerId);
+          this.appendSystemMessage(
+            "New Hermes conversation started.",
+            false,
+            ownerId,
+          );
+        }
+        const activeNow = snapshot.workspace?.activeTabId;
+        if (activeNow === ownerId) {
+          this.showConversationMessages(ownerId);
+        }
+        this.restoreActiveConversationRuntime();
+        this.renderConversationTabs();
+      })
+      .catch((_error) => {
+        const snapshot = this.controller?.getSnapshot();
+        if (
+          snapshot &&
+          snapshot.workspace?.tabs.some((t) => t.id === ownerId) &&
+          snapshot.tabOperations.get(ownerId)?.connection === "failed"
+        ) {
+          this.appendSystemMessage(
+            `Unable to load this conversation. Select the tab to retry.`,
+            false,
+            ownerId,
+          );
+        }
+      });
+  }
+
+  private async switchConversation(tabId: string): Promise<void> {
+    if (
+      !this.controller ||
+      !this.controlAvailability().tabNavigation ||
+      this.isTabClosing(tabId) ||
+      this.isTabLoading(tabId)
+    ) {
       return;
     }
 
     this.captureActiveConversationRuntime();
-    const generation = this.transitions.beginSwitch();
-    this.renderConversationTabs();
-    this.updateControls(false);
     try {
-      const { items, sessionId, started } = await this.ensureClientForTab(target.id);
-      if (!this.transitions.isCurrentSwitch(generation)) {
-        if (started && this.conversationWorkspace) {
-          await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
+      // Fast path: if switching to already-active tab that needs hydration
+      const activeTabId = this.controller?.getSnapshot().workspace?.activeTabId;
+      if (activeTabId === tabId) {
+        const tabOp = this.controller?.getSnapshot().tabOperations.get(tabId);
+        if (tabOp && tabOp.connection !== "ready" && tabOp.connection !== "loading") {
+          this.startConversationHydration(tabId);
+          return;
         }
-        return;
+        if (tabOp?.connection === "ready") {
+          return; // already active and ready
+        }
       }
-      const latestWorkspace = this.conversationWorkspace;
-      if (!latestWorkspace?.tabs.some((tab) => tab.id === target.id)) {
-        return;
+      const result = await this.controller.switchConversation(tabId);
+      this.conversationWorkspace = result.workspace;
+      if (result.items && result.sessionId) {
+        await this.renderHistorySession(
+          { cwd: "", sessionId: result.sessionId },
+          result.items,
+          false,
+          result.tabId,
+        );
+      } else if (result.started) {
+        this.resetConversationView(result.tabId);
+        this.loadedMessageTabIds.add(result.tabId);
+        this.appendSystemMessage(
+          "New Hermes conversation started.",
+          false,
+          result.tabId,
+        );
       }
-      if (items) {
-        await this.renderHistorySession({ cwd: "", sessionId }, items, false, target.id);
-      } else if (started) {
-        this.resetConversationView(target.id);
-        this.loadedMessageTabIds.add(target.id);
-        this.appendSystemMessage("New Hermes conversation started.", false, target.id);
-      }
-      if (!this.transitions.isCurrentSwitch(generation)) {
-        return;
-      }
-      const readyWorkspace = this.conversationWorkspace;
-      if (!readyWorkspace?.tabs.some((tab) => tab.id === target.id)) {
-        return;
-      }
-      this.conversationWorkspace = activateConversationTab(readyWorkspace, target.id);
-      this.showConversationMessages(target.id);
+      this.showConversationMessages(result.tabId);
       this.restoreActiveConversationRuntime();
       this.renderSessionState(
-        this.sessionStates.get(target.id) ?? this.plugin.getClient(target.id).currentSessionState,
+        this.controller?.getSnapshot().sessionStates.get(result.tabId) ?? this.plugin.getClient(result.tabId).currentSessionState,
       );
       this.renderConversationTabs();
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
     } catch (error) {
-      if (this.transitions.isCurrentSwitch(generation)) {
-        new Notice(`Hermesian could not switch conversations: ${this.messageFor(error)}`);
+      if (
+        error instanceof ConversationControllerError &&
+        (error.code === "cancelled" || error.code === "operation_stale")
+      ) {
+        return;
       }
-    } finally {
-      if (this.transitions.isCurrentSwitch(generation)) {
-        this.updateControls(false);
-      }
+      new Notice(`Hermesian could not switch conversations: ${this.messageFor(error)}`);
     }
   }
 
@@ -1320,7 +1028,6 @@ export class HermesianSidebarView extends ItemView {
     if (!activeTab) {
       return;
     }
-    this.clientLoadingTabs.add(activeTab.id);
     this.updateControls(false);
     try {
       const sessions = await this.plugin.getClient(activeTab.id).listSessions();
@@ -1329,65 +1036,57 @@ export class HermesianSidebarView extends ItemView {
         return;
       }
       new HermesHistorySuggestModal(this.app, sessions, (session) => {
-        void this.chooseHistorySession(activeTab.id, session);
+        void this.chooseHistorySession(session);
       }).open();
     } catch (error) {
       new Notice(`Hermesian history failed: ${this.messageFor(error)}`);
     } finally {
-      this.clientLoadingTabs.delete(activeTab.id);
       this.updateControls(false);
     }
   }
 
   private async chooseHistorySession(
-    tabId: string,
     session: HermesHistoryEntry,
   ): Promise<void> {
     const workspace = this.conversationWorkspace;
-    const targetTab = workspace?.tabs.find((tab) => tab.id === tabId);
     if (
-      !workspace ||
-      !targetTab ||
-      this.isTabBusy(tabId) ||
-      this.clientLoadingTabs.has(tabId)
+      !this.controller ||
+      !workspace
     ) {
       return;
     }
-    const existingOwner = workspace.tabs.find(
-      (tab) => tab.id !== tabId && tab.sessionId === session.sessionId,
-    );
-    if (existingOwner) {
-      await this.switchConversation(existingOwner.id);
-      new Notice(`That Hermes session is already open in conversation ${existingOwner.label}.`);
-      return;
-    }
-    if (!this.transitions.reserveSession(tabId, session.sessionId)) {
-      new Notice("That Hermes session is already opening in another conversation.");
-      return;
-    }
     this.captureActiveConversationRuntime();
-    this.clientLoadingTabs.add(tabId);
     this.updateControls(false);
     try {
-      const items = await this.plugin
-        .getClient(tabId)
-        .loadSessionHistory(session.sessionId);
-      if (this.conversationWorkspace) {
-        this.conversationWorkspace = replaceConversationSession(
-          this.conversationWorkspace,
-          tabId,
-          session.sessionId,
+      const result = await this.controller.openHistorySession(session.sessionId);
+      this.conversationWorkspace = result.workspace;
+
+      if (result.reused) {
+        this.showConversationMessages(result.tabId);
+        this.restoreActiveConversationRuntime();
+        this.renderConversationTabs();
+        const owner = result.workspace.tabs.find((tab) => tab.id === result.tabId);
+        new Notice(
+          `That Hermes session is already open in conversation ${owner?.label ?? result.tabId}.`,
         );
-        await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
+        return;
       }
-      await this.renderHistorySession(session, items, true, tabId);
-      this.turnRuntime(tabId).activeEditScope = undefined;
+
+      this.loadedMessageTabIds.add(result.tabId);
+      if (result.items) {
+        await this.renderHistorySession(session, result.items, true, result.tabId);
+      }
+      this.editScopes.set(result.tabId, undefined);
+      this.showConversationMessages(result.tabId);
+      this.restoreActiveConversationRuntime();
       this.renderConversationTabs();
     } catch (error) {
+      if (error instanceof ConversationControllerError && error.code === "session_reserved") {
+        new Notice("That Hermes session is already opening in another conversation.");
+        return;
+      }
       new Notice(`Hermesian could not load that session: ${this.messageFor(error)}`);
     } finally {
-      this.transitions.releaseSession(tabId, session.sessionId);
-      this.clientLoadingTabs.delete(tabId);
       this.updateControls(false);
     }
   }
@@ -1471,33 +1170,46 @@ export class HermesianSidebarView extends ItemView {
     if (this.reasoningButtonEl.disabled) {
       return;
     }
+    const activeTab = this.activeConversationTab();
+    if (!activeTab) {
+      return;
+    }
+    const targetTabId = activeTab.id;
+    let settled = false;
+
     new HermesReasoningSuggestModal(
       this.app,
       this.plugin.getReasoningEffort(),
       (effort) => {
-        void this.chooseReasoningEffort(effort);
+        if (settled) {
+          return;
+        }
+        settled = true;
+        void this.chooseReasoningEffort(targetTabId, effort);
       },
     ).open();
   }
 
-  private async chooseReasoningEffort(effort: ReasoningEffort): Promise<void> {
+  private async chooseReasoningEffort(
+    tabId: string,
+    effort: ReasoningEffort,
+  ): Promise<void> {
     if (effort === this.plugin.getReasoningEffort()) {
       return;
     }
-    const activeTab = this.activeConversationTab();
-    if (!activeTab || this.plugin.hasBusyClient()) {
+    if (!this.plugin.canApplyConnectionSettings()) {
       return;
     }
     this.captureActiveConversationRuntime();
     this.updateControls(true, false);
     try {
-      await this.plugin.setReasoningEffort(activeTab.id, effort);
-      await this.ensureClientForTab(activeTab.id);
+      await this.plugin.setReasoningEffort(tabId, effort);
+      await this.ensureClientForTab(tabId);
       this.renderReasoningButton();
       this.appendSystemMessage(
         `Thinking depth set to ${reasoningEffortLabel(effort)}. The current Hermes session was restored.`,
         false,
-        activeTab.id,
+        tabId,
       );
     } catch (error) {
       new Notice(`Hermesian thinking-depth update failed: ${this.messageFor(error)}`);
@@ -1519,8 +1231,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private renderSessionState(state: HermesSessionState): void {
-    this.sessionState = state;
-    const availability = this.controlAvailability(state);
+    const availability = this.controlAvailability();
     this.renderAddConversationControl();
     this.historyButtonEl.disabled = !availability.history;
     this.reasoningButtonEl.disabled = !availability.reasoning;
@@ -1560,7 +1271,7 @@ export class HermesianSidebarView extends ItemView {
   private renderSlashMenu(resetIndex: boolean): void {
     const value = this.composerEl.value;
     if (
-      this.controlsBusy ||
+      !this.controlAvailability().composer ||
       this.composerEl.selectionStart !== value.length ||
       this.composerEl.selectionEnd !== value.length
     ) {
@@ -1569,10 +1280,11 @@ export class HermesianSidebarView extends ItemView {
     }
 
     const previous = this.slashMenuItems[this.slashMenuIndex];
+    const state = this.activeSessionState();
     const items = buildSlashMenuItems(
       value,
-      this.sessionState.commands,
-      this.sessionState.skills,
+      state.commands,
+      state.skills,
     );
     if (items.length === 0) {
       this.hideSlashMenu();
@@ -1846,10 +1558,9 @@ export class HermesianSidebarView extends ItemView {
     const activeTab = this.activeConversationTab();
     if (
       !activeTab ||
-      this.initializing ||
-      this.controlsBusy ||
+      !this.controlAvailability().send ||
       this.isTabBusy(activeTab.id) ||
-      this.clientLoadingTabs.has(activeTab.id) ||
+      this.isTabLoading(activeTab.id) ||
       this.hasPendingPermission(activeTab.id)
     ) {
       return;
@@ -1898,6 +1609,8 @@ export class HermesianSidebarView extends ItemView {
     }
 
     const selection = isSlashCommand ? undefined : this.pendingSelection;
+    const activeFilePath = this.plugin.getCurrentMarkdownFilePath();
+    this.setCurrentFile(activeFilePath);
     const documentContext =
       isSlashCommand || selection || !this.includeCurrentDocumentContext
         ? undefined
@@ -1909,9 +1622,11 @@ export class HermesianSidebarView extends ItemView {
       ? buildSelectionPrompt(selection, request)
       : documentContext
         ? buildDocumentPrompt(documentContext, request)
-        : request;
+        : isSlashCommand
+          ? request
+          : buildActiveNotePrompt(activeFilePath, request);
     const runtime = this.turnRuntime(activeTab.id);
-    runtime.activeEditScope = selection ?? documentContext;
+    this.editScopes.set(activeTab.id, selection ?? documentContext);
     this.appendUserMessage(request, selection, documentContext, activeTab.id, pendingImages);
     this.composerEl.value = "";
     this.hideSlashMenu();
@@ -1924,6 +1639,7 @@ export class HermesianSidebarView extends ItemView {
     this.captureActiveConversationRuntime();
     this.resetStreamingMessage(activeTab.id);
     runtime.busy = true;
+    this.controller?.setPromptRunning(activeTab.id, true);
     runtime.activeTurnEl = this.messageContainer(activeTab.id).createDiv({
       cls: "hermesian-turn",
     });
@@ -1947,13 +1663,14 @@ export class HermesianSidebarView extends ItemView {
           this.renderImageAttachmentBar();
         }
       }
-      runtime.activeEditScope = undefined;
+      this.editScopes.set(activeTab.id, undefined);
       await this.finishFailedTurn(activeTab.id);
     } finally {
       if (runtime.completionPromise) {
         await runtime.completionPromise;
       }
       runtime.busy = false;
+      this.controller?.setPromptRunning(activeTab.id, false);
       this.renderConversationTabs();
       if (this.conversationWorkspace?.activeTabId === activeTab.id) {
         this.updateControls(false);
@@ -1964,38 +1681,38 @@ export class HermesianSidebarView extends ItemView {
   async startNewSession(): Promise<void> {
     const activeTab = this.activeConversationTab();
     if (
+      !this.controller ||
       !activeTab ||
-      this.controlsBusy ||
+      !this.controlAvailability().composer ||
       this.isTabBusy(activeTab.id) ||
       this.activeSessionState().switchingModel ||
       this.hasPendingPermission(activeTab.id)
     ) {
       return;
     }
+    const tabId = activeTab.id;
     this.captureActiveConversationRuntime();
-    this.clientLoadingTabs.add(activeTab.id);
     this.updateControls(false);
     try {
-      const client = this.plugin.getClient(activeTab.id);
-      await client.newSession();
-      const sessionId = client.sessionId;
-      if (!sessionId) {
-        throw new Error("Hermes ACP did not return a new session ID");
+      const result = await this.controller.restartConversation(tabId);
+      this.conversationWorkspace = result.workspace;
+      this.resetConversationView(tabId);
+      this.editScopes.set(tabId, undefined);
+      this.appendSystemMessage("New Hermes session started.", false, tabId);
+      if (this.conversationWorkspace.activeTabId === tabId) {
+        this.showConversationMessages(tabId);
+        this.restoreActiveConversationRuntime();
       }
-      this.conversationWorkspace = replaceConversationSession(
-        this.conversationWorkspace!,
-        activeTab.id,
-        sessionId,
-      );
-      this.resetConversationView(activeTab.id);
-      this.turnRuntime(activeTab.id).activeEditScope = undefined;
-      this.appendSystemMessage("New Hermes session started.", false, activeTab.id);
       this.renderConversationTabs();
-      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
     } catch (error) {
+      if (
+        error instanceof ConversationControllerError &&
+        (error.code === "cancelled" || error.code === "operation_stale")
+      ) {
+        return;
+      }
       new Notice(`Hermesian: ${this.messageFor(error)}`);
     } finally {
-      this.clientLoadingTabs.delete(activeTab.id);
       this.updateControls(false);
     }
   }
@@ -2038,32 +1755,12 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private appendAssistantDelta(tabId: string, text: string): void {
-    const runtime = this.turnRuntime(tabId);
-    this.ensureTurnActivity(tabId);
-    if (!runtime.assistantContentEl) {
-      const message = runtime.activeTurnEl!.createDiv({
-        cls: "hermesian-message is-assistant",
-      });
-      runtime.assistantContentEl = message.createDiv({
-        cls: "hermesian-message-content is-streaming",
-      });
-    }
-    runtime.assistantText += text;
-    runtime.assistantContentEl.setText(runtime.assistantText);
+    this.turnManager.appendDelta(tabId, text);
     this.scrollToBottom(tabId);
   }
 
   private appendThoughtDelta(tabId: string, text: string): void {
-    const runtime = this.turnRuntime(tabId);
-    if (!runtime.thoughtContentEl) {
-      const details = this.ensureTurnActivity(tabId).createEl("details", {
-        cls: "hermesian-thought",
-      });
-      details.open = true;
-      details.createEl("summary", { text: "Thinking" });
-      runtime.thoughtContentEl = details.createEl("pre");
-    }
-    runtime.thoughtContentEl.textContent = `${runtime.thoughtContentEl.textContent ?? ""}${text}`;
+    this.turnManager.appendThought(tabId, text);
     this.scrollToBottom(tabId);
   }
 
@@ -2077,7 +1774,7 @@ export class HermesianSidebarView extends ItemView {
     if (!target || !text) {
       return;
     }
-    await this.renderMarkdown(target, text, runtime.activeEditScope?.filePath);
+    await this.renderMarkdown(target, text, this.editScopes.get(tabId)?.filePath);
     this.scrollToBottom(tabId);
   }
 
@@ -2146,87 +1843,32 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private messageContainer(tabId: string): HTMLElement {
-    return this.visibleMessagesTabId === tabId
-      ? this.messagesEl
-      : this.ensureMessageCache(tabId);
+    return this.messageRenderer.containerFor(tabId);
   }
 
   private ensureTurnActivity(tabId: string): HTMLElement {
-    const runtime = this.turnRuntime(tabId);
-    if (!runtime.activeTurnEl) {
-      runtime.activeTurnEl = this.messageContainer(tabId).createDiv({
-        cls: "hermesian-turn",
-      });
-    }
-    if (!runtime.turnActivityEl) {
-      runtime.turnActivityEl = runtime.activeTurnEl.createDiv({
-        cls: "hermesian-turn-activity",
-      });
-    }
-    return runtime.turnActivityEl;
+    return this.turnManager.ensureActivity(tabId);
   }
 
   private async finishTurn(tabId: string, reason: string): Promise<void> {
-    return this.completeTurn(tabId, async () => {
+    return this.turnManager.complete(tabId, async () => {
       await this.finalizeAssistantMessage(tabId);
       this.appendStopReason(tabId, reason);
     });
   }
 
   private async finishFailedTurn(tabId: string): Promise<void> {
-    return this.completeTurn(tabId, () => this.finalizeAssistantMessage(tabId));
-  }
-
-  private completeTurn(tabId: string, finalize: () => Promise<void>): Promise<void> {
-    const runtime = this.turnRuntime(tabId);
-    if (runtime.completionPromise) {
-      return runtime.completionPromise;
-    }
-    const completion = this.completeTurnInternal(tabId, finalize);
-    runtime.completionPromise = completion;
-    void completion.finally(() => {
-      if (runtime.completionPromise === completion) {
-        runtime.completionPromise = undefined;
-      }
-    });
-    return completion;
-  }
-
-  private async completeTurnInternal(
-    tabId: string,
-    finalize: () => Promise<void>,
-  ): Promise<void> {
-    const runtime = this.turnRuntime(tabId);
-    try {
-      await finalize();
-    } catch (error) {
-      new Notice(`Hermesian could not finalize the response: ${this.messageFor(error)}`);
-    } finally {
-      runtime.busy = false;
-      runtime.activeTurnEl = undefined;
-      runtime.turnActivityEl = undefined;
-      runtime.thoughtContentEl = undefined;
-      this.renderConversationTabs();
-      if (this.conversationWorkspace?.activeTabId === tabId) {
-        this.updateControls(false);
-      }
-    }
+    return this.turnManager.complete(tabId, () =>
+      this.finalizeAssistantMessage(tabId),
+    );
   }
 
   private resetStreamingMessage(tabId: string): void {
-    const runtime = this.turnRuntime(tabId);
-    runtime.assistantContentEl = undefined;
-    runtime.assistantText = "";
-    runtime.thoughtContentEl = undefined;
+    this.turnManager.resetStreaming(tabId);
   }
 
   private resetConversationView(tabId: string): void {
-    this.messageContainer(tabId).empty();
-    const runtime = this.turnRuntime(tabId);
-    runtime.toolEls.clear();
-    this.resetStreamingMessage(tabId);
-    runtime.activeTurnEl = undefined;
-    runtime.turnActivityEl = undefined;
+    this.turnManager.resetView(tabId);
     this.updateComposerPlaceholder();
   }
 
@@ -2315,7 +1957,7 @@ export class HermesianSidebarView extends ItemView {
     error = false,
     tabId = this.conversationWorkspace?.activeTabId,
   ): void {
-    const runtime = tabId ? this.turnRuntimes.get(tabId) : undefined;
+    const runtime = tabId ? this.turnManager.ensure(tabId) : undefined;
     const parent = tabId
       ? runtime?.activeTurnEl
         ? this.ensureTurnActivity(tabId)
@@ -2338,50 +1980,45 @@ export class HermesianSidebarView extends ItemView {
     }
   }
 
-  private updateControls(busy: boolean, _showStop = busy): void {
-    this.controlsBusy = conversationControlsBusy(
-      busy || this.closingConversationTabId !== undefined,
-      this.initializing,
-    );
-    if (this.controlsBusy) {
+  private updateControls(_busy: boolean, _showStop = _busy): void {
+    const availability = this.controlAvailability();
+    if (!availability.composer) {
       this.hideSlashMenu();
     }
-    const availability = this.controlAvailability();
-    this.sendButtonEl.disabled = !availability.send;
-    this.composerEl.disabled = !availability.composer;
+    applyComposerState(
+      {
+        composerEl: this.composerEl,
+        sendButtonEl: this.sendButtonEl,
+        stopButtonEl: this.stopButtonEl,
+      },
+      {
+        disabled: !availability.composer,
+        draft: this.composerEl.value,
+        placeholder: this.composerPlaceholder(),
+        sendEnabled: availability.send,
+        stopVisible: availability.stop,
+      },
+    );
     this.renderAddConversationControl();
     this.historyButtonEl.disabled = !availability.history;
     this.reasoningButtonEl.disabled = !availability.reasoning;
     this.renderConversationTabs();
     this.renderSessionState(this.activeSessionState());
-    this.updateComposerPlaceholder();
-    if (availability.stop) {
-      this.sendButtonEl.hide();
-      this.stopButtonEl.show();
-    } else {
-      this.stopButtonEl.hide();
-      this.sendButtonEl.show();
-      if (!this.controlsBusy) {
-        this.composerEl.focus();
-      }
-    }
+  }
+
+  private composerPlaceholder(): string {
+    const activeTabId = this.conversationWorkspace?.activeTabId;
+    return activeTabId && this.isTabLoading(activeTabId)
+      ? "Draft here — this conversation is starting"
+      : "Ask Hermes…  ↵ to send · Shift+↵ for new line";
   }
 
   private updateComposerPlaceholder(): void {
-    const activeTabId = this.conversationWorkspace?.activeTabId;
-    this.composerEl.placeholder =
-      activeTabId && this.clientLoadingTabs.has(activeTabId)
-        ? "Draft here — this conversation is starting"
-        : "Ask Hermes…  ↵ to send · Shift+↵ for new line";
+    this.composerEl.placeholder = this.composerPlaceholder();
   }
 
   private scrollToBottom(sourceTabId?: string): void {
-    window.requestAnimationFrame(() => {
-      if (!shouldAutoScrollConversation(this.visibleMessagesTabId, sourceTabId)) {
-        return;
-      }
-      this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
-    });
+    this.messageRenderer.scrollToBottom(sourceTabId);
   }
 
   private messageFor(error: unknown): string {

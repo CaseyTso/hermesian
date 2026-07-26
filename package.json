@@ -5,29 +5,34 @@
   "type": "module",
   "description": "Hermes Agent sidebar and selection-aware editing for Obsidian",
   "scripts": {
-    "dev": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs watch",
     "build": "node esbuild.config.mjs production",
+    "build:debug": "node esbuild.config.mjs debug",
     "typecheck": "tsc --noEmit --pretty false",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "smoke:acp": "node scripts/acp-smoke.mjs",
     "smoke:acp:parallel": "node scripts/acp-parallel-smoke.mjs",
     "deploy": "npm run build && node scripts/deploy.mjs",
+    "deploy:debug": "npm run build:debug && node scripts/deploy.mjs",
     "verify": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.2.1",
-    "diff": "8.0.4",
-    "zod": "4.4.3"
+    "diff": "8.0.4"
   },
   "devDependencies": {
     "@types/node": "24.10.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "esbuild": "0.28.1",
+    "happy-dom": "^20.11.1",
     "obsidian": "1.13.1",
     "typescript": "5.9.3",
     "vitest": "4.1.10"
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "license": "AGPL-3.0-only"
 }

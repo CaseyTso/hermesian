@@ -18,6 +18,9 @@ import {
   normalizeConversationWorkspace,
   type PersistedConversationWorkspace,
 } from "./conversation-tabs";
+import type {
+  ConversationControllerDependencies,
+} from "./conversation-controller";
 import { HERMESIAN_ICON_ID, HERMESIAN_ICON_SVG } from "./hermes-icon";
 import { chooseMarkdownSource } from "./markdown-source";
 import { isReasoningEffort } from "./session-history";
@@ -32,6 +35,7 @@ import {
   type HermesianSettings,
 } from "./settings";
 import { TabClientRegistry } from "./tab-client-registry";
+import { assignAndPersistWithRollback } from "./workspace-persistence";
 import {
   HERMESIAN_VIEW_TYPE,
   HermesianSidebarView,
@@ -55,6 +59,7 @@ export default class HermesianPlugin extends Plugin {
               Promise.resolve({ outcome: { outcome: "cancelled" } }))
             : Promise.resolve({ outcome: { outcome: "cancelled" } }),
         pluginVersion: this.manifest.version,
+        debugLogging: this.settings.debugLogging,
         settings: () => this.settings,
         vaultPath: this.getVaultPath(),
       });
@@ -167,6 +172,30 @@ export default class HermesianPlugin extends Plugin {
     return this.clients.getOrCreate(tabId);
   }
 
+  getConversationControllerDependencies(): ConversationControllerDependencies<HermesAcpClient> {
+    return {
+      clients: {
+        acquireClient: (tabId) => this.clients.getOrCreate(tabId),
+        getClient: (tabId) => this.clients.peek(tabId),
+        isCurrentClient: (tabId, client) => this.clients.peek(tabId) === client,
+        releaseClient: (tabId) => this.clients.release(tabId),
+      },
+      createTabId: () => crypto.randomUUID(),
+      reportBackgroundError: (_operation, _error) => {
+        if (this.settings.debugLogging) {
+          console.debug("[hermesian]", { event: "controller.background.failure" });
+        }
+      },
+      workspace: {
+        getWorkspace: () => this.getConversationWorkspace(),
+        setWorkspace: (workspace, options) =>
+          options?.flush
+            ? this.flushConversationWorkspace(workspace)
+            : this.setConversationWorkspace(workspace),
+      },
+    };
+  }
+
   automaticPermissionResponse(
     request: PermissionRequest,
   ): PermissionResponse | undefined {
@@ -181,8 +210,14 @@ export default class HermesianPlugin extends Plugin {
     return this.clients.peek(tabId);
   }
 
-  hasBusyClient(): boolean {
-    return this.clients.some((client) => client.isBusy || client.isOperating);
+  canApplyConnectionSettings(): boolean {
+    const aggregate = this.sidebarView?.getAggregateConversationControls();
+    if (aggregate) {
+      return aggregate.connectionSettings;
+    }
+    return !this.clients.some(
+      (client) => client.isBusy || client.isOperating,
+    );
   }
 
   async releaseClient(tabId: string): Promise<void> {
@@ -280,32 +315,108 @@ export default class HermesianPlugin extends Plugin {
     await this.flushConversationWorkspace();
   }
 
+  async savePluginSettings(): Promise<void> {
+    await this.savePluginData();
+  }
+
+  getConnectionSettings(): Pick<
+    HermesianSettings,
+    "acceptHooks" | "hermesExecutable" | "profile"
+  > {
+    return {
+      acceptHooks: this.settings.acceptHooks,
+      hermesExecutable: this.settings.hermesExecutable,
+      profile: this.settings.profile,
+    };
+  }
+
+  async applyConnectionSettings(
+    next: Pick<HermesianSettings, "acceptHooks" | "hermesExecutable" | "profile">,
+  ): Promise<boolean> {
+    if (!this.canApplyConnectionSettings()) {
+      new Notice(
+        "Cannot apply connection settings while Hermes is busy — wait for all conversations to finish and try again.",
+      );
+      return false;
+    }
+    const previous = this.getConnectionSettings();
+    this.settings.hermesExecutable = next.hermesExecutable;
+    this.settings.profile = next.profile;
+    this.settings.acceptHooks = next.acceptHooks;
+
+    try {
+      await this.savePluginSettings();
+      await this.disconnectAllClients();
+      new Notice("Hermesian connection settings applied.");
+      return true;
+    } catch (error) {
+      this.settings.hermesExecutable = previous.hermesExecutable;
+      this.settings.profile = previous.profile;
+      this.settings.acceptHooks = previous.acceptHooks;
+      new Notice(
+        `Hermesian: failed to apply connection settings — ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+  }
+
   getConversationWorkspace(): PersistedConversationWorkspace | undefined {
     return normalizeConversationWorkspace(this.conversationWorkspace);
   }
 
   setConversationWorkspace(workspace: PersistedConversationWorkspace): void {
     this.conversationWorkspace = workspace;
+    this.scheduleConversationWorkspaceSave();
+  }
+
+  private scheduleConversationWorkspaceSave(): void {
     if (this.conversationWorkspaceSaveTimer !== undefined) {
       window.clearTimeout(this.conversationWorkspaceSaveTimer);
     }
     this.conversationWorkspaceSaveTimer = window.setTimeout(() => {
       this.conversationWorkspaceSaveTimer = undefined;
-      void this.savePluginData();
+      void this.savePluginData().catch(() => {
+        // best-effort background save; persistence failure is already
+        // surfaced synchronously by flushConversationWorkspace
+      });
     }, 250);
+  }
+
+  private hasPendingWorkspaceSave(): boolean {
+    return this.conversationWorkspaceSaveTimer !== undefined;
+  }
+
+  private clearPendingWorkspaceSave(): void {
+    if (this.conversationWorkspaceSaveTimer !== undefined) {
+      window.clearTimeout(this.conversationWorkspaceSaveTimer);
+      this.conversationWorkspaceSaveTimer = undefined;
+    }
   }
 
   async flushConversationWorkspace(
     workspace?: PersistedConversationWorkspace,
   ): Promise<void> {
-    if (workspace) {
-      this.conversationWorkspace = workspace;
+    const effective = workspace ?? this.conversationWorkspace;
+    const hadPendingSave = this.hasPendingWorkspaceSave();
+    if (!effective) {
+      return;
     }
-    if (this.conversationWorkspaceSaveTimer !== undefined) {
-      window.clearTimeout(this.conversationWorkspaceSaveTimer);
-      this.conversationWorkspaceSaveTimer = undefined;
+    this.clearPendingWorkspaceSave();
+    try {
+      await assignAndPersistWithRollback(
+        {
+          get: () => this.conversationWorkspace,
+          set: (value) => { this.conversationWorkspace = value; },
+          persist: () => this.savePluginData(),
+        },
+        effective,
+      );
+    } catch (error) {
+      if (hadPendingSave) {
+        this.scheduleConversationWorkspaceSave();
+      }
+      throw error;
     }
-    await this.savePluginData();
   }
 
   async saveSettingsAndReconnect(): Promise<void> {
@@ -318,7 +429,7 @@ export default class HermesianPlugin extends Plugin {
   }
 
   async setReasoningEffort(tabId: string, effort: ReasoningEffort): Promise<void> {
-    if (this.hasBusyClient()) {
+    if (!this.canApplyConnectionSettings()) {
       throw new Error("Cannot change thinking depth while Hermes is responding");
     }
     await this.getClient(tabId).configureReasoningEffort(effort);
@@ -353,12 +464,16 @@ export default class HermesianPlugin extends Plugin {
     return adapter.getBasePath();
   }
 
-  private currentMarkdownFilePath(): string | undefined {
+  getCurrentMarkdownFilePath(): string | undefined {
     return (
       this.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path ??
       this.lastMarkdownView?.file?.path ??
       undefined
     );
+  }
+
+  private currentMarkdownFilePath(): string | undefined {
+    return this.getCurrentMarkdownFilePath();
   }
 
   private rememberMarkdownView(view: MarkdownView): void {
@@ -386,6 +501,10 @@ export default class HermesianPlugin extends Plugin {
         typeof saved.autoApproveVaultEdits === "boolean"
           ? saved.autoApproveVaultEdits
           : DEFAULT_SETTINGS.autoApproveVaultEdits,
+      debugLogging:
+        typeof saved.debugLogging === "boolean"
+          ? saved.debugLogging
+          : DEFAULT_SETTINGS.debugLogging,
       hermesExecutable:
         typeof saved.hermesExecutable === "string"
           ? saved.hermesExecutable

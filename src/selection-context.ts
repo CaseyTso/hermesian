@@ -173,6 +173,22 @@ export function buildDocumentPrompt(
   ].join("\n");
 }
 
+export function buildActiveNotePrompt(
+  filePath: string | undefined,
+  request: string,
+): string {
+  return [
+    "你正在通过 Hermesian 协助用户使用 Obsidian。",
+    "",
+    "<obsidian_context>",
+    `active_note: ${filePath ?? "none"}`,
+    "document_included: false",
+    "</obsidian_context>",
+    "",
+    `用户请求：${request.trim()}`,
+  ].join("\n");
+}
+
 export function validateSelectionEdit(
   context: SelectionContext | MarkdownDocumentContext | undefined,
   diffs: SelectionEditDiff[],

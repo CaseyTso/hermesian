@@ -1,9 +1,11 @@
 import * as acp from "@agentclientprotocol/sdk";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { Readable, Writable } from "node:stream";
+
+import { AcpProcess } from "./acp-process";
+import { createDebugLogger, type DebugLogger } from "./debug-logger";
 
 import { loadHermesModelCatalog } from "./hermes-model-catalog";
 import {
@@ -40,6 +42,7 @@ interface NewSessionResponseCompat extends acp.NewSessionResponse {
 }
 
 export interface HermesAcpClientOptions {
+  debugLogging?: boolean;
   onEvent: (event: HermesUiEvent) => void;
   onPermission: (
     request: PermissionRequest,
@@ -51,6 +54,7 @@ export interface HermesAcpClientOptions {
 }
 
 const STARTUP_TIMEOUT_MS = 30_000;
+const FINITE_OPERATION_TIMEOUT_MS = 30_000;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -167,9 +171,10 @@ export function automaticVaultEditApproval(
 
 export class HermesAcpClient {
   private activeSession: acp.ActiveSession | undefined;
+  #acpProcess?: AcpProcess;
+  readonly #logger: DebugLogger;
   private busy = false;
   private catalogGeneration = 0;
-  private child: ChildProcessWithoutNullStreams | undefined;
   private connectPromise: Promise<void> | undefined;
   private connection: acp.ClientConnection | undefined;
   private context: acp.ClientContext | undefined;
@@ -194,7 +199,9 @@ export class HermesAcpClient {
   private readonly sessionStateListeners = new Set<SessionStateListener>();
   private readonly toolTitles = new Map<string, string>();
 
-  constructor(private readonly options: HermesAcpClientOptions) {}
+  constructor(private readonly options: HermesAcpClientOptions) {
+    this.#logger = createDebugLogger(options.debugLogging === true);
+  }
 
   get isBusy(): boolean {
     return this.busy;
@@ -267,6 +274,7 @@ export class HermesAcpClient {
   }
 
   private async connectInternal(generation: number): Promise<void> {
+    this.#logger.debug("client.connect.start", { generation });
     this.intentionalShutdown = false;
     this.emit({ type: "status", status: "connecting", detail: "Starting Hermes ACP…" });
 
@@ -283,33 +291,26 @@ export class HermesAcpClient {
       env.HERMES_PROFILE = profile;
     }
 
-    const child = spawn(executable, args, {
+    const childProcess = AcpProcess.spawn({
+      command: executable,
+      args,
       cwd: this.options.vaultPath,
       env,
-      stdio: ["pipe", "pipe", "pipe"],
     });
-    this.child = child;
+    this.#acpProcess = childProcess;
 
-    let stderr = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr = `${stderr}${chunk}`.slice(-16_000);
-    });
-
-    const startupFailure = new Promise<never>((_resolve, reject) => {
-      child.once("error", (error) => reject(error));
-      child.once("exit", (code, signal) => {
-        if (!this.intentionalShutdown && !this.connection) {
-          const details = stderr.trim();
-          reject(
-            new Error(
-              `Hermes ACP exited during startup (code=${String(code)}, signal=${String(signal)})${
-                details ? `: ${details}` : ""
-              }`,
-            ),
-          );
-        }
-      });
+    const startupFailure = childProcess.waitForExit().then((exit) => {
+      if (!this.intentionalShutdown && !this.connection) {
+        const details = childProcess.stderrTail().trim();
+        throw new Error(
+          `Hermes ACP exited during startup (code=${String(exit.code)}, signal=${String(exit.signal)})${
+            details ? `: ${details}` : ""
+          }`,
+        );
+      }
+      // Exit was expected (intentional shutdown or already connected) —
+      // don't reject the race; keep this promise pending forever.
+      return new Promise<never>(() => {});
     });
 
     const app = acp
@@ -336,8 +337,8 @@ export class HermesAcpClient {
         readVaultTextFile(this.options.vaultPath, ctx.params),
       );
 
-    const output = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
-    const input = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
+    const output = Writable.toWeb(childProcess.stdin) as WritableStream<Uint8Array>;
+    const input = Readable.toWeb(childProcess.stdout) as ReadableStream<Uint8Array>;
     const stream = acp.ndJsonStream(output, input);
     const connection = app.connect(stream);
     this.connection = connection;
@@ -356,7 +357,7 @@ export class HermesAcpClient {
         this.emit({
           type: "status",
           status: "disconnected",
-          detail: stderr.trim() || "Hermes ACP connection closed",
+          detail: childProcess.stderrTail().trim() || "Hermes ACP connection closed",
         });
       }
     });
@@ -409,9 +410,7 @@ export class HermesAcpClient {
         this.emit({ type: "status", status: "error", detail: errorMessage(error) });
       } else {
         connection.close();
-        if (child.exitCode == null && child.signalCode == null) {
-          child.kill("SIGTERM");
-        }
+        childProcess.terminate({ graceMs: 500 }).catch(() => {});
       }
       throw error;
     }
@@ -464,9 +463,13 @@ export class HermesAcpClient {
       const entries: HermesHistoryEntry[] = [];
       let cursor: string | undefined;
       do {
-        const response = await context.request(
-          acp.methods.agent.session.list,
-          cursor ? { cursor } : {},
+        const response = await withTimeout(
+          context.request(
+            acp.methods.agent.session.list,
+            cursor ? { cursor } : {},
+          ),
+          FINITE_OPERATION_TIMEOUT_MS,
+          "Hermes ACP session/list",
         );
         entries.push(...normalizeSessionEntries(response.sessions));
         cursor = response.nextCursor ?? undefined;
@@ -500,11 +503,15 @@ export class HermesAcpClient {
       const capture = { sessionId, updates: [] as acp.SessionUpdate[] };
       this.historyCapture = capture;
       try {
-        const response = await this.context.request(acp.methods.agent.session.load, {
-          cwd: this.options.vaultPath,
-          mcpServers: [],
-          sessionId,
-        });
+        const response = await withTimeout(
+          this.context.request(acp.methods.agent.session.load, {
+            cwd: this.options.vaultPath,
+            mcpServers: [],
+            sessionId,
+          }),
+          FINITE_OPERATION_TIMEOUT_MS,
+          "Hermes ACP session/load",
+        );
         this.activeSession?.dispose();
         this.activeSession = undefined;
         this.resumedSessionId = sessionId;
@@ -558,13 +565,17 @@ export class HermesAcpClient {
       if (this.sessionState.currentModel?.switchId === model.switchId) {
         return;
       }
-      const response = await this.context.request<Record<string, never> | null, {
-        modelId: string;
-        sessionId: string;
-      }>("session/set_model", {
-        modelId: model.switchId,
-        sessionId,
-      });
+      const response = await withTimeout(
+        this.context.request<Record<string, never> | null, {
+          modelId: string;
+          sessionId: string;
+        }>("session/set_model", {
+          modelId: model.switchId,
+          sessionId,
+        }),
+        FINITE_OPERATION_TIMEOUT_MS,
+        "Hermes ACP session/set_model",
+      );
       if (response === null) {
         throw new Error("Hermes rejected the model switch");
       }
@@ -660,10 +671,14 @@ export class HermesAcpClient {
     this.connection?.close();
     this.connection = undefined;
 
-    const child = this.child;
-    this.child = undefined;
-    if (child && child.exitCode == null && child.signalCode == null) {
-      child.kill("SIGTERM");
+    const childProcess = this.#acpProcess;
+    this.#acpProcess = undefined;
+    if (childProcess) {
+      try {
+        await childProcess.terminate();
+      } catch {
+        // Process already exited or cleanup failed — continue
+      }
     }
     this.resetSessionState();
     this.emit({ type: "status", status: "disconnected" });
@@ -922,26 +937,28 @@ export class HermesAcpClient {
 }
 
 function runHermesCommand(executable: string, args: string[]): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr = `${stderr}${chunk}`.slice(-8_000);
-    });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(
-        new Error(
-          `Hermes config update failed (code=${String(code)}, signal=${String(signal)})${
-            stderr.trim() ? `: ${stderr.trim()}` : ""
-          }`,
-        ),
-      );
-    });
+  const childProcess = AcpProcess.spawn({
+    command: executable,
+    args,
+  });
+  const operation = childProcess.waitForExit().then((exit) => {
+    if (exit.code === 0) {
+      return;
+    }
+    const details = childProcess.stderrTail().trim();
+    throw new Error(
+      `Hermes config update failed (code=${String(exit.code)}, signal=${String(exit.signal)})${
+        details ? `: ${details}` : ""
+      }`,
+    );
+  });
+  return withTimeout(
+    operation,
+    FINITE_OPERATION_TIMEOUT_MS,
+    "Hermes config update",
+  ).catch((error) => {
+    // Ensure the child is terminated on any failure
+    childProcess.terminate({ graceMs: 500 }).catch(() => {});
+    throw error;
   });
 }

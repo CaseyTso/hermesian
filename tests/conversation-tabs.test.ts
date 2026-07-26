@@ -4,6 +4,8 @@ import {
   activateConversationTab,
   addPendingConversationTab,
   addConversationTab,
+  applyCloseIntent,
+  createCloseIntent,
   ConversationTransitionCoordinator,
   conversationControlAvailability,
   conversationControlsBusy,
@@ -446,5 +448,75 @@ describe("normalizeConversationWorkspace", () => {
     },
   ])("rejects invalid persisted data %#", (value) => {
     expect(normalizeConversationWorkspace(value)).toBeUndefined();
+  });
+});
+
+describe("close intent", () => {
+  function makeWorkspace(...tabIds: string[]) {
+    return tabIds.reduce(
+      (ws, id, i) => {
+        if (i === 0) return ws;
+        return addPendingConversationTab(ws, id);
+      },
+      createConversationWorkspace(tabIds[0], `${tabIds[0]}-session`),
+    );
+  }
+
+  it("selects the next neighbor as successor for active close", () => {
+    let ws = makeWorkspace("a", "b", "c");
+    ws = activateConversationTab(ws, "a");
+    const intent = createCloseIntent(ws, "a", () => "replacement");
+    expect(intent.closingTabId).toBe("a");
+    expect(intent.intendedSuccessorTabId).toBe("b");
+    expect(intent.replacementTabId).toBeUndefined();
+  });
+
+  it("creates a replacement for the last remaining tab", () => {
+    const ws = createConversationWorkspace("only", "only-session");
+    let n = 0;
+    const intent = createCloseIntent(ws, "only", () => `new-${++n}`);
+    expect(intent.intendedSuccessorTabId).toBe("new-1");
+    expect(intent.replacementTabId).toBe("new-1");
+  });
+
+  it("applyCloseIntent removes the closing tab and activates successor", () => {
+    let ws = makeWorkspace("a", "b", "c");
+    // Set "a" as active (makeWorkspace left "c" active)
+    ws = activateConversationTab(ws, "a");
+    const intent = createCloseIntent(ws, "a", () => "replacement");
+    const result = applyCloseIntent(ws, intent);
+    expect(result.tabs.map((t) => t.id)).toEqual(["b", "c"]);
+    expect(result.activeTabId).toBe("b");
+  });
+
+  it("preserves user selection when they switched during close", () => {
+    let ws = makeWorkspace("a", "b", "c");
+    ws = activateConversationTab(ws, "a");
+    const intent = createCloseIntent(ws, "a", () => "replacement");
+    const latest = activateConversationTab(ws, "c");
+    const result = applyCloseIntent(latest, intent);
+    expect(result.tabs.map((t) => t.id)).toEqual(["b", "c"]);
+    expect(result.activeTabId).toBe("c");
+  });
+
+  it("creates replacement and removes old tab atomically", () => {
+    const ws = createConversationWorkspace("only", "only-session");
+    let n = 0;
+    const intent = createCloseIntent(ws, "only", () => `new-${++n}`);
+    const result = applyCloseIntent(ws, intent);
+    expect(result.tabs.map((t) => t.id)).toEqual(["new-1"]);
+    expect(result.activeTabId).toBe("new-1");
+  });
+
+  it("throws if closing tab was already removed", () => {
+    const ws = makeWorkspace("a", "b");
+    const intent = createCloseIntent(ws, "a", () => "replacement");
+    const updated = activateConversationTab(
+      removeConversationTab(ws, "a")!,
+      "b",
+    );
+    expect(() => applyCloseIntent(updated, intent)).toThrow(
+      "already removed",
+    );
   });
 });
