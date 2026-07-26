@@ -2,6 +2,7 @@ export type DebugEvent =
   | "client.connect.start"
   | "client.connect.ready"
   | "client.process.exit"
+  | "controller.background.failure"
   | "session.operation.start"
   | "session.operation.finish"
   | "controller.transition.invalidated"

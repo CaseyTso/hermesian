@@ -64,6 +64,7 @@ export interface ConversationControllerDependencies<
 > {
   clients: ConversationClientPort<TClient>;
   createTabId?: () => string;
+  reportBackgroundError?: (operation: "releaseClient", error: unknown) => void;
   workspace: ConversationWorkspacePort;
 }
 
@@ -114,6 +115,8 @@ export interface CloseConversationResult {
   tabId: string;
   workspace: PersistedConversationWorkspace;
 }
+
+export type EnsureConversationReadyResult = EnsureClientResult;
 
 export interface HistoryBindResult {
   items: HermesHistoryItem[];
@@ -239,6 +242,10 @@ export class ConversationController<TClient extends ConversationClient> {
   private readonly listeners = new Set<
     (snapshot: ConversationControllerSnapshot) => void
   >();
+  private readonly hydrationPromises = new Map<
+    string,
+    Promise<EnsureConversationReadyResult>
+  >();
   private readonly historyReservations = new Map<string, string>();
   private readonly permissionTokens = new Map<string, string>();
   private readonly operations = new ConversationOperationCoordinator();
@@ -314,6 +321,43 @@ export class ConversationController<TClient extends ConversationClient> {
       this.snapshot.workspace,
       this.operations.beginTransition(),
     );
+  }
+
+  ensureConversationReady(
+    tabId: string,
+  ): Promise<EnsureConversationReadyResult> {
+    if (this.disposed) {
+      return Promise.reject(this.controllerError("cancelled", "Controller is shut down", tabId));
+    }
+    const existing = this.hydrationPromises.get(tabId);
+    if (existing) {
+      return existing;
+    }
+    const tabOp = this.snapshot.tabOperations.get(tabId);
+    if (!tabOp) {
+      return Promise.reject(
+        this.controllerError("workspace_conflict", "Conversation tab was not found", tabId),
+      );
+    }
+    if (tabOp.connection === "ready") {
+      const tab = this.snapshot.workspace?.tabs.find((t) => t.id === tabId);
+      return Promise.resolve({
+        items: undefined,
+        sessionId: tab?.sessionId ?? "",
+        started: false,
+        replaced: false,
+        tabId,
+        workspace: copyWorkspace(this.snapshot.workspace)!,
+      } as EnsureConversationReadyResult);
+    }
+    const promise = this.ensureConversationReadyInternal(tabId);
+    this.hydrationPromises.set(tabId, promise);
+    void promise.finally(() => {
+      if (this.hydrationPromises.get(tabId) === promise) {
+        this.hydrationPromises.delete(tabId);
+      }
+    });
+    return promise;
   }
 
   private async initializeInternal(): Promise<ConversationInitializationResult> {
@@ -461,6 +505,99 @@ export class ConversationController<TClient extends ConversationClient> {
       if (!succeeded && this.isCurrentTransition(generation)) {
         this.updateTabOperation(tabId, { connection: "failed" });
       }
+    }
+  }
+
+  private async ensureConversationReadyInternal(
+    tabId: string,
+  ): Promise<EnsureConversationReadyResult> {
+    const token = this.operations.begin(tabId);
+    this.updateTabOperation(tabId, { connection: "loading" });
+    try {
+      const latestWorkspace = copyWorkspace(
+        this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+      );
+      const tab = latestWorkspace?.tabs.find((t) => t.id === tabId);
+      if (!latestWorkspace || !tab) {
+        throw this.controllerError("workspace_conflict", "Owner tab was removed during hydration", tabId);
+      }
+      const client = this.dependencies.clients.acquireClient(tabId);
+      await client.connect();
+      const postConnectWorkspace = copyWorkspace(
+        this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+      );
+      const postTab = postConnectWorkspace?.tabs.find((t) => t.id === tabId);
+      if (!postConnectWorkspace || !postTab) {
+        throw this.controllerError("workspace_conflict", "Owner tab was removed after connect", tabId);
+      }
+      let items: HermesHistoryItem[] | undefined;
+      let started = false;
+      let sessionId: string | undefined;
+      let replaced = false;
+      let changedWorkspace = false;
+      let mergedWorkspace = postConnectWorkspace;
+      if (tab.sessionId) {
+        try {
+          items = await client.loadSessionHistory(tab.sessionId);
+          sessionId = client.sessionId ?? tab.sessionId;
+        } catch (_loadError) {
+          await client.newSession();
+          sessionId = client.sessionId;
+          if (!sessionId) {
+            throw this.controllerError("client_unavailable", "Hermes did not return a replacement session", tabId);
+          }
+          started = true;
+          replaced = true;
+        }
+      } else {
+        sessionId = client.sessionId;
+        if (!sessionId) {
+          throw this.controllerError("client_unavailable", "Hermes did not return a session ID", tabId);
+        }
+        started = true;
+      }
+      if (sessionId && sessionId !== tab.sessionId) {
+        mergedWorkspace = replaceConversationSession(mergedWorkspace, tabId, sessionId);
+        changedWorkspace = true;
+      }
+      if (changedWorkspace) {
+        const latest = copyWorkspace(
+          this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+        );
+        if (latest?.tabs.some((t) => t.id === tabId)) {
+          const withActive = { ...mergedWorkspace, activeTabId: latest.activeTabId };
+          await this.enqueueWorkspaceCommit(async () => {
+            await this.dependencies.workspace.setWorkspace(withActive, {
+              flush: true,
+              save: true,
+            });
+            this.publishWorkspace(withActive);
+            return withActive;
+          });
+        }
+      }
+      this.updateTabOperation(tabId, {
+        connection: "ready",
+        hasSession: true,
+        sessionOperation: "idle",
+      });
+      return {
+        items,
+        sessionId: sessionId ?? "",
+        started,
+        replaced,
+        tabId,
+        workspace: copyWorkspace(
+          this.dependencies.workspace.getWorkspace() ?? mergedWorkspace,
+        )!,
+      };
+    } catch (error) {
+      if (!this.disposed && this.snapshot.tabOperations.has(tabId)) {
+        this.updateTabOperation(tabId, { connection: "failed" });
+      }
+      throw error;
+    } finally {
+      this.operations.complete(token);
     }
   }
 
@@ -800,8 +937,8 @@ export class ConversationController<TClient extends ConversationClient> {
       });
 
       // Phase B: old client cleanup — fire-and-forget (don't block close)
-      void this.dependencies.clients.releaseClient(tabId).catch(() => {
-        // Best-effort; close already persisted
+      void this.dependencies.clients.releaseClient(tabId).catch((error: unknown) => {
+        this.dependencies.reportBackgroundError?.("releaseClient", error);
       });
 
       return {

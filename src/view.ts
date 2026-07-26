@@ -852,6 +852,7 @@ export class HermesianSidebarView extends ItemView {
 
       const activeTabId = result.workspace.activeTabId;
       this.showConversationMessages(activeTabId);
+      // Start owner-scoped hydration for the replacement when needed
       if (result.replacementTabId) {
         this.showConversationMessages(result.replacementTabId);
         this.appendSystemMessage(
@@ -859,6 +860,12 @@ export class HermesianSidebarView extends ItemView {
           false,
           result.replacementTabId,
         );
+        this.startConversationHydration(result.replacementTabId);
+      } else if (activeTabId) {
+        const tabOp = this.controller.getSnapshot().tabOperations.get(activeTabId);
+        if (tabOp && tabOp.connection !== "ready" && tabOp.connection !== "loading") {
+          this.startConversationHydration(activeTabId);
+        }
       }
       this.restoreActiveConversationRuntime();
       this.renderConversationTabs();
@@ -875,6 +882,58 @@ export class HermesianSidebarView extends ItemView {
     }
   }
 
+  private startConversationHydration(tabId: string): void {
+    if (!this.controller) {
+      return;
+    }
+    const ownerId = tabId;
+    this.controller
+      .ensureConversationReady(ownerId)
+      .then((result) => {
+        const snapshot = this.controller?.getSnapshot();
+        if (!snapshot || !snapshot.workspace?.tabs.some((t) => t.id === ownerId)) {
+          return; // owner was removed
+        }
+        if (result.items && result.sessionId && !result.started) {
+          void this.renderHistorySession(
+            { cwd: "", sessionId: result.sessionId },
+            result.items,
+            false,
+            ownerId,
+          );
+          this.loadedMessageTabIds.add(ownerId);
+        } else if (result.started) {
+          this.resetConversationView(ownerId);
+          this.loadedMessageTabIds.add(ownerId);
+          this.appendSystemMessage(
+            "New Hermes conversation started.",
+            false,
+            ownerId,
+          );
+        }
+        const activeNow = snapshot.workspace?.activeTabId;
+        if (activeNow === ownerId) {
+          this.showConversationMessages(ownerId);
+        }
+        this.restoreActiveConversationRuntime();
+        this.renderConversationTabs();
+      })
+      .catch((_error) => {
+        const snapshot = this.controller?.getSnapshot();
+        if (
+          snapshot &&
+          snapshot.workspace?.tabs.some((t) => t.id === ownerId) &&
+          snapshot.tabOperations.get(ownerId)?.connection === "failed"
+        ) {
+          this.appendSystemMessage(
+            `Unable to load this conversation. Select the tab to retry.`,
+            false,
+            ownerId,
+          );
+        }
+      });
+  }
+
   private async switchConversation(tabId: string): Promise<void> {
     if (
       !this.controller ||
@@ -887,6 +946,18 @@ export class HermesianSidebarView extends ItemView {
 
     this.captureActiveConversationRuntime();
     try {
+      // Fast path: if switching to already-active tab that needs hydration
+      const activeTabId = this.controller?.getSnapshot().workspace?.activeTabId;
+      if (activeTabId === tabId) {
+        const tabOp = this.controller?.getSnapshot().tabOperations.get(tabId);
+        if (tabOp && tabOp.connection !== "ready" && tabOp.connection !== "loading") {
+          this.startConversationHydration(tabId);
+          return;
+        }
+        if (tabOp?.connection === "ready") {
+          return; // already active and ready
+        }
+      }
       const result = await this.controller.switchConversation(tabId);
       this.conversationWorkspace = result.workspace;
       if (result.items && result.sessionId) {

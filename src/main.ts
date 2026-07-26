@@ -181,6 +181,11 @@ export default class HermesianPlugin extends Plugin {
         releaseClient: (tabId) => this.clients.release(tabId),
       },
       createTabId: () => crypto.randomUUID(),
+      reportBackgroundError: (_operation, _error) => {
+        if (this.settings.debugLogging) {
+          console.debug("[hermesian]", { event: "controller.background.failure" });
+        }
+      },
       workspace: {
         getWorkspace: () => this.getConversationWorkspace(),
         setWorkspace: (workspace, options) =>
