@@ -248,6 +248,88 @@ export function removeConversationTab(
   );
 }
 
+// ── Close intent ───────────────────────────────────────────────
+
+export interface CloseConversationIntent {
+  closingTabId: string;
+  intendedSuccessorTabId: string;
+  replacementTabId?: string;
+}
+
+export function createCloseIntent(
+  workspace: PersistedConversationWorkspace,
+  tabId: string,
+  createTabId: () => string,
+): CloseConversationIntent {
+  if (workspace.tabs.length === 1) {
+    const replacementTabId = createTabId();
+    return {
+      closingTabId: tabId,
+      intendedSuccessorTabId: replacementTabId,
+      replacementTabId,
+    };
+  }
+
+  const index = workspace.tabs.findIndex((tab) => tab.id === tabId);
+  if (index < 0) {
+    throw new Error(`Conversation tab ${tabId} not found in workspace`);
+  }
+  const neighbor = workspace.tabs[index + 1] ?? workspace.tabs[index - 1];
+  return {
+    closingTabId: tabId,
+    intendedSuccessorTabId: neighbor.id,
+  };
+}
+
+export function applyCloseIntent(
+  latestWorkspace: PersistedConversationWorkspace,
+  intent: CloseConversationIntent,
+): PersistedConversationWorkspace {
+  const closingTabId = intent.closingTabId;
+  if (!latestWorkspace.tabs.some((tab) => tab.id === closingTabId)) {
+    throw new Error(`Conversation tab ${closingTabId} was already removed`);
+  }
+
+  const closingActive = latestWorkspace.activeTabId === closingTabId;
+  const userSelectedAnotherTab =
+    closingActive &&
+    latestWorkspace.activeTabId !== closingTabId &&
+    latestWorkspace.activeTabId !== intent.intendedSuccessorTabId;
+
+  let workspace: PersistedConversationWorkspace;
+  if (intent.replacementTabId) {
+    // Last tab: create replacement and remove old in one atomic step
+    workspace = addPendingConversationTab(latestWorkspace, intent.replacementTabId);
+    // Now remove the old tab (replacement preserves position)
+    const removed = removeConversationTab(workspace, closingTabId);
+    if (!removed) {
+      throw new Error("Failed to create replacement conversation tab");
+    }
+    workspace = removed;
+  } else {
+    const removed = removeConversationTab(latestWorkspace, closingTabId);
+    if (!removed) {
+      throw new Error("Failed to remove conversation tab");
+    }
+    workspace = removed;
+  }
+
+  // If user selected another tab while close was pending, preserve it
+  if (userSelectedAnotherTab) {
+    const userSelection = latestWorkspace.tabs.find(
+      (tab) => tab.id !== closingTabId && tab.id === latestWorkspace.activeTabId,
+    );
+    if (
+      userSelection &&
+      workspace.tabs.some((tab) => tab.id === userSelection.id)
+    ) {
+      workspace = activateConversationTab(workspace, userSelection.id);
+    }
+  }
+
+  return workspace;
+}
+
 export function updateConversationTab(
   workspace: PersistedConversationWorkspace,
   tabId: string,
