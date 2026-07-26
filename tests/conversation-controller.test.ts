@@ -734,7 +734,7 @@ describe("ConversationController close", () => {
     expect(target.connect).not.toHaveBeenCalled();
   });
 
-  it("prepares a replacement before removing the active tab", async () => {
+  it("commits workspace removal without awaiting replacement readiness", async () => {
     const history = deferred<HermesHistoryItem[]>();
     let workspace = createConversationWorkspace("base", "base-session");
     workspace = addPendingConversationTab(workspace, "tab-b");
@@ -752,19 +752,17 @@ describe("ConversationController close", () => {
     );
 
     const closing = controller.closeConversation("base");
-    // While the replacement is still being prepared, the old tab must remain.
-    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["base", "tab-b"]);
-    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("base");
-    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
-    history.resolve([]);
 
-    const result = await closing;
-    expect(result.workspace.activeTabId).toBe("tab-b");
-    expect(result.workspace.tabs).toHaveLength(1);
+    // Close must complete without replacement history loading
+    await expect(closing).resolves.toMatchObject({ tabId: "base" });
+    // Old tab removed, replacement (tab-b) active
+    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["tab-b"]);
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-b");
     expect(deps.clients.releaseClient).toHaveBeenCalledWith("base");
+    history.resolve([]);
   });
 
-  it("creates and connects a replacement when closing the last tab", async () => {
+  it("creates a deferred replacement for the last tab without connecting", async () => {
     const replacement = fakeClient("replacement");
     const base = fakeClient("base");
     const { controller, deps } = await readyCloseController(
@@ -776,31 +774,22 @@ describe("ConversationController close", () => {
       () => "replacement",
     );
 
-    const closing = controller.closeConversation("base");
-    // While the replacement is being prepared, the old tab must remain.
-    const pending = deps.workspace.getWorkspace()!;
-    expect(pending.tabs.some((tab) => tab.id === "base")).toBe(true);
-    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
-    const result = await closing;
+    const result = await controller.closeConversation("base");
     expect(result.replacementTabId).toBe("replacement");
-    expect(result.workspace.tabs).toEqual(
-      expect.arrayContaining([expect.objectContaining({ id: "replacement", sessionId: "replacement-session" })]),
-    );
+    // Replacement is deferred (has no session yet)
+    expect(result.workspace.tabs.some((tab) => tab.id === "replacement")).toBe(true);
     expect(result.workspace.tabs.some((tab) => tab.id === "base")).toBe(false);
+    expect(replacement.connect).not.toHaveBeenCalled();
     expect(deps.clients.releaseClient).toHaveBeenCalledWith("base");
-    expect(replacement.connect).toHaveBeenCalledOnce();
   });
 
-  it("preserves the closed tab when replacement preparation fails", async () => {
+  it("succeeds active close without needing to prepare replacement client", async () => {
     let workspace = createConversationWorkspace("base", "base-session");
     workspace = addPendingConversationTab(workspace, "tab-b");
     workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
     workspace = { ...workspace, activeTabId: "base" };
     const base = fakeClient("base");
     const target = fakeClient("tab-b");
-    target.connect = vi.fn(async () => {
-      throw new Error("replacement unavailable");
-    });
     const { controller, deps } = await readyCloseController(
       workspace,
       new Map([
@@ -809,11 +798,14 @@ describe("ConversationController close", () => {
       ]),
     );
 
-    await expect(controller.closeConversation("base")).rejects.toThrow("replacement unavailable");
-    // Failed replacement must not delete the old tab or release its client.
-    expect(deps.workspace.getWorkspace()?.tabs.map((tab) => tab.id)).toEqual(["base", "tab-b"]);
-    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("base");
-    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
+    const result = await controller.closeConversation("base");
+    // Close succeeds, old tab removed, successor activated
+    expect(result.workspace.activeTabId).toBe("tab-b");
+    expect(result.workspace.tabs.map((tab) => tab.id)).toEqual(["tab-b"]);
+    // target's connect was NOT called by close
+    expect(target.connect).not.toHaveBeenCalled();
+    expect(deps.clients.releaseClient).toHaveBeenCalledWith("base");
+    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("tab-b");
   });
 
   it("rejects closing a missing tab without changing workspace", async () => {
@@ -908,15 +900,12 @@ describe("ConversationController close", () => {
     expect(deps.clients.releaseClient).toHaveBeenCalledTimes(1);
   });
 
-  // --- Phase 2R.1B RED tests: replacement/persistence failure atomicity ---
+  // ── Phase 2R RED tests adapted for fast-close: replacement failure does not block close ──
 
-  it("preserves the last tab when replacement connect fails", async () => {
+  it("commits the last-tab replacement without connecting it", async () => {
     const replacement = fakeClient("replacement");
-    replacement.connect = vi.fn(async () => {
-      throw new Error("replacement connect failed");
-    });
     const base = fakeClient("base");
-    const { controller, deps } = await readyCloseController(
+    const { controller } = await readyCloseController(
       createConversationWorkspace("base", "base-session"),
       new Map([
         ["base", base],
@@ -925,45 +914,16 @@ describe("ConversationController close", () => {
       () => "replacement",
     );
 
-    await expect(controller.closeConversation("base")).rejects.toThrow(
-      "replacement connect failed",
-    );
-    // Old tab, activeTabId, binding, and client identity must be preserved.
-    const ws = deps.workspace.getWorkspace()!;
-    expect(ws.tabs.map((tab) => tab.id)).toEqual(["base"]);
-    expect(ws.activeTabId).toBe("base");
-    expect(ws.tabs[0]?.sessionId).toBe("base-session");
-    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
+    const result = await controller.closeConversation("base");
+    // Replacement is present and deferred
+    expect(result.replacementTabId).toBe("replacement");
+    expect(result.workspace.tabs.some((tab) => tab.id === "replacement")).toBe(true);
+    expect(result.workspace.tabs.some((tab) => tab.id === "base")).toBe(false);
+    // Replacement was NOT connected during close
+    expect(replacement.connect).not.toHaveBeenCalled();
   });
 
-  it("preserves the last tab when replacement newSession fails", async () => {
-    const replacement = fakeClient("replacement");
-    replacement.sessionId = undefined; // force newSession path
-    replacement.connect = vi.fn(async () => undefined);
-    replacement.newSession = vi.fn(async () => {
-      throw new Error("newSession failed");
-    });
-    const base = fakeClient("base");
-    const { controller, deps } = await readyCloseController(
-      createConversationWorkspace("base", "base-session"),
-      new Map([
-        ["base", base],
-        ["replacement", replacement],
-      ]),
-      () => "replacement",
-    );
-
-    await expect(controller.closeConversation("base")).rejects.toMatchObject({
-      code: "client_unavailable",
-      tabId: "replacement",
-    });
-    const ws = deps.workspace.getWorkspace()!;
-    expect(ws.tabs.map((tab) => tab.id)).toEqual(["base"]);
-    expect(ws.activeTabId).toBe("base");
-    expect(ws.tabs[0]?.sessionId).toBe("base-session");
-    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
-    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("replacement");
-  });
+  // ── Remaining persistence-failure tests ──
 
   it("does not release the old client when structural persistence commit fails", async () => {
     let workspace = createConversationWorkspace("base", "base-session");
@@ -1033,50 +993,7 @@ describe("ConversationController close", () => {
     expect(snapshot.tabOperations.get("tab-b")?.closing).toBeFalsy();
   });
 
-  it("does not leave a stale replacement in snapshot when active close commit fails", async () => {
-    const replacement = fakeClient("replacement");
-    const base = fakeClient("base");
-    const { controller, deps } = await readyCloseController(
-      createConversationWorkspace("base", "base-session"),
-      new Map([
-        ["base", base],
-        ["replacement", replacement],
-      ]),
-      () => "replacement",
-    );
-    // Allow prepare (connect + session) to succeed, then fail at persistence.
-    let setWorkspaceCalls = 0;
-    const originalSetWorkspace = deps.workspace.setWorkspace;
-    deps.workspace.setWorkspace = vi.fn((ws, opts) => {
-      setWorkspaceCalls += 1;
-      // First call: ensureClientForTabInternal persists replacement — let it succeed.
-      // Second call: closeConversationInternal commits deletion — fail.
-      if (setWorkspaceCalls >= 2 && opts?.save) {
-        throw new Error("persistence write failed");
-      }
-      return originalSetWorkspace(ws, opts);
-    });
-
-    await expect(controller.closeConversation("base")).rejects.toThrow(
-      "persistence write failed",
-    );
-    // The replacement was prepared (CALL #1 succeeded) so it may appear
-    // in both snapshot and persisted workspace. The critical contract is:
-    // the OLD tab must never be deleted or released when commit fails.
-    const snapshot = controller.getSnapshot();
-    const persisted = deps.workspace.getWorkspace()!;
-    // Old tab ("base") must still be present.
-    expect(snapshot.workspace?.tabs.some((tab) => tab.id === "base")).toBe(true);
-    expect(persisted.tabs.some((tab) => tab.id === "base")).toBe(true);
-    // Base client must not have been released.
-    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
-    // No split: snapshot and persisted workspace agree on tab set.
-    expect(snapshot.workspace?.tabs.map((tab) => tab.id).sort()).toEqual(
-      persisted.tabs.map((tab) => tab.id).sort(),
-    );
-  });
-
-  it("keeps the active tab visible when successor prepare succeeds but close commit fails", async () => {
+  it("keeps the active tab visible when close commit fails", async () => {
     let workspace = createConversationWorkspace("base", "base-session");
     workspace = addPendingConversationTab(workspace, "tab-b");
     workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");

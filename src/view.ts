@@ -852,19 +852,6 @@ export class HermesianSidebarView extends ItemView {
 
       const activeTabId = result.workspace.activeTabId;
       this.showConversationMessages(activeTabId);
-      if (result.items && result.sessionId) {
-        await this.renderHistorySession(
-          { cwd: "", sessionId: result.sessionId },
-          result.items,
-          false,
-          activeTabId,
-        );
-      } else if (result.started) {
-        this.showConversationMessages(activeTabId);
-        this.resetConversationView(activeTabId);
-        this.loadedMessageTabIds.add(activeTabId);
-        this.appendSystemMessage("New Hermes conversation started.", false, activeTabId);
-      }
       if (result.replacementTabId) {
         this.showConversationMessages(result.replacementTabId);
         this.appendSystemMessage(
