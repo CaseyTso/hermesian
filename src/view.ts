@@ -978,7 +978,7 @@ export class HermesianSidebarView extends ItemView {
         return;
       }
       new HermesHistorySuggestModal(this.app, sessions, (session) => {
-        void this.chooseHistorySession(activeTab.id, session);
+        void this.chooseHistorySession(session);
       }).open();
     } catch (error) {
       new Notice(`Hermesian history failed: ${this.messageFor(error)}`);
@@ -988,37 +988,39 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private async chooseHistorySession(
-    tabId: string,
     session: HermesHistoryEntry,
   ): Promise<void> {
     const workspace = this.conversationWorkspace;
-    const targetTab = workspace?.tabs.find((tab) => tab.id === tabId);
     if (
       !this.controller ||
-      !workspace ||
-      !targetTab ||
-      this.isTabBusy(tabId) ||
-      this.isTabLoading(tabId)
+      !workspace
     ) {
       return;
     }
     this.captureActiveConversationRuntime();
     this.updateControls(false);
     try {
-      const result = await this.controller.bindHistorySession(tabId, session.sessionId);
+      const result = await this.controller.openHistorySession(session.sessionId);
       this.conversationWorkspace = result.workspace;
-      if (result.ownerTabId) {
-        this.showConversationMessages(result.ownerTabId);
+
+      if (result.reused) {
+        this.showConversationMessages(result.tabId);
         this.restoreActiveConversationRuntime();
         this.renderConversationTabs();
-        const owner = result.workspace.tabs.find((tab) => tab.id === result.ownerTabId);
+        const owner = result.workspace.tabs.find((tab) => tab.id === result.tabId);
         new Notice(
-          `That Hermes session is already open in conversation ${owner?.label ?? result.ownerTabId}.`,
+          `That Hermes session is already open in conversation ${owner?.label ?? result.tabId}.`,
         );
         return;
       }
-      await this.renderHistorySession(session, result.items, true, tabId);
-      this.editScopes.set(tabId, undefined);
+
+      this.loadedMessageTabIds.add(result.tabId);
+      if (result.items) {
+        await this.renderHistorySession(session, result.items, true, result.tabId);
+      }
+      this.editScopes.set(result.tabId, undefined);
+      this.showConversationMessages(result.tabId);
+      this.restoreActiveConversationRuntime();
       this.renderConversationTabs();
     } catch (error) {
       if (error instanceof ConversationControllerError && error.code === "session_reserved") {

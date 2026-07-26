@@ -124,6 +124,14 @@ export interface HistoryBindResult {
   workspace: PersistedConversationWorkspace;
 }
 
+export interface HistoryOpenResult {
+  items?: HermesHistoryItem[];
+  reused: boolean;
+  sessionId: string;
+  tabId: string;
+  workspace: PersistedConversationWorkspace;
+}
+
 export interface RestartConversationResult {
   sessionId: string;
   tabId: string;
@@ -960,6 +968,150 @@ export class ConversationController<TClient extends ConversationClient> {
         this.historyReservations.delete(sessionId);
       }
       this.operations.complete(token);
+    }
+  }
+
+  openHistorySession(sessionId: string): Promise<HistoryOpenResult> {
+    const blocked = this.blockedDuringStartup<HistoryOpenResult>("openHistorySession");
+    return blocked ?? this.openHistorySessionInternal(sessionId);
+  }
+
+  private async openHistorySessionInternal(
+    requestedSessionId: string,
+  ): Promise<HistoryOpenResult> {
+    const sessionId = requestedSessionId.trim();
+    if (!sessionId) {
+      throw this.controllerError("session_load_failed", "History session ID is empty");
+    }
+
+    const workspace = copyWorkspace(
+      this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+    );
+    if (!workspace) {
+      throw this.controllerError("workspace_conflict", "Conversation workspace is unavailable");
+    }
+
+    // Existing owner: reuse
+    const existingOwner = workspace.tabs.find(
+      (tab) => tab.sessionId === sessionId,
+    );
+    if (existingOwner) {
+      const switchResult = await this.switchConversationInternal(existingOwner.id);
+      return {
+        items: switchResult.items,
+        reused: true,
+        sessionId,
+        tabId: existingOwner.id,
+        workspace: switchResult.workspace,
+      };
+    }
+
+    // Reservation guard
+    const reservationOwner = this.historyReservations.get(sessionId);
+    if (reservationOwner) {
+      throw this.controllerError(
+        "session_reserved",
+        "History session is already opening in another conversation",
+      );
+    }
+    this.historyReservations.set(sessionId, "pending");
+
+    const previousWorkspace = copyWorkspace(workspace)!;
+    const newTabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
+    const pendingWorkspace = addPendingConversationTab(previousWorkspace, newTabId);
+    const token = this.operations.begin(newTabId);
+    const generation = this.operations.getTransitionGeneration();
+    let succeeded = false;
+
+    this.publishWorkspace(pendingWorkspace);
+    this.updateTabOperation(newTabId, {
+      connection: "loading",
+      hasSession: false,
+      sessionOperation: "load",
+    });
+
+    const client = this.dependencies.clients.acquireClient(newTabId);
+
+    try {
+      await this.dependencies.workspace.setWorkspace(pendingWorkspace, { save: true });
+      this.assertCurrentOperation(newTabId, client, token, generation);
+
+      await client.connect();
+      this.assertCurrentOperation(newTabId, client, token, generation);
+
+      const items = await client.loadSessionHistory(sessionId);
+      this.assertCurrentOperation(newTabId, client, token, generation);
+
+      const actualSessionId = client.sessionId ?? sessionId;
+      const latestWorkspace = copyWorkspace(
+        this.dependencies.workspace.getWorkspace() ?? pendingWorkspace,
+      );
+      if (!latestWorkspace?.tabs.some((tab) => tab.id === newTabId)) {
+        throw this.controllerError("workspace_conflict", "New history tab was removed", newTabId);
+      }
+
+      const committedWorkspace = replaceConversationSession(
+        latestWorkspace,
+        newTabId,
+        actualSessionId,
+      );
+      this.assertCurrentOperation(newTabId, client, token, generation);
+      await this.dependencies.workspace.setWorkspace(committedWorkspace, {
+        flush: true,
+        save: true,
+      });
+      this.assertCurrentOperation(newTabId, client, token, generation);
+      this.publishWorkspace(committedWorkspace);
+      this.updateTabOperation(newTabId, {
+        connection: "ready",
+        hasSession: true,
+        sessionOperation: "idle",
+      });
+      succeeded = true;
+      return {
+        items,
+        reused: false,
+        sessionId: actualSessionId,
+        tabId: newTabId,
+        workspace: copyWorkspace(committedWorkspace)!,
+      };
+    } catch (error) {
+      // Rollback: restore previous workspace if still current
+      if (this.isCurrentTransition(generation) && this.operations.isCurrent(token)) {
+        this.updateTabOperation(newTabId, { connection: "failed" });
+      }
+      try {
+        const currentWorkspace = copyWorkspace(
+          this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+        );
+        // Only rollback if the pending tab is still present and no other transition won
+        const pendingStillExists = currentWorkspace?.tabs.some((tab) => tab.id === newTabId);
+        if (
+          pendingStillExists &&
+          currentWorkspace &&
+          this.isCurrentTransition(generation)
+        ) {
+          await this.dependencies.workspace.setWorkspace(previousWorkspace, {
+            flush: true,
+            save: true,
+          });
+          this.publishWorkspace(previousWorkspace);
+        }
+        // Also clean up the sessions/maps that contain the failed tab
+        this.sessionStates.delete(newTabId);
+      } catch {
+        // Best-effort rollback
+      }
+      throw error;
+    } finally {
+      if (this.historyReservations.get(sessionId) === "pending") {
+        this.historyReservations.delete(sessionId);
+      }
+      this.operations.complete(token);
+      if (!succeeded && this.isCurrentTransition(generation)) {
+        this.updateTabOperation(newTabId, { connection: "failed" });
+        void this.dependencies.clients.releaseClient(newTabId);
+      }
     }
   }
 

@@ -1491,6 +1491,84 @@ describe("ConversationController history and restart", () => {
   });
 });
 
+describe("ConversationController openHistorySession", () => {
+  async function readySessionController(
+    workspace: ReturnType<typeof createConversationWorkspace>,
+    clients: Map<string, FakeClient>,
+  ): Promise<{
+    controller: ConversationController<FakeClient>;
+    deps: ConversationControllerDependencies<FakeClient>;
+  }> {
+    let n = 0;
+    const deps = dependencies(workspace, clients.get("base")!, clients, () => `tab-new-${++n}`);
+    const controller = new ConversationController(deps);
+    await controller.initialize();
+    return { controller, deps };
+  }
+
+  it("creates a new tab for an unopened history session", async () => {
+    const workspace = createConversationWorkspace("tab-a", "session-a");
+    const clients = new Map([["tab-a", fakeClient("tab-a")]]);
+    const { controller, deps } = await readySessionController(workspace, clients);
+
+    // Create a client factory for new tabs
+    let createdTabId = "";
+    const newClient = fakeClient("new-client");
+    newClient.sessionId = "new-history-session";
+    deps.clients.acquireClient = vi.fn((tabId: string) => {
+      createdTabId = tabId;
+      return newClient;
+    });
+    deps.clients.isCurrentClient = vi.fn(() => true);
+
+    const result = await controller.openHistorySession("new-history-session");
+
+    expect(result.reused).toBe(false);
+    expect(result.tabId).toBe(createdTabId);
+    expect(result.sessionId).toBe("new-history-session");
+    // Original tab preserved
+    expect(result.workspace.tabs.find((t) => t.id === "tab-a")!.sessionId).toBe("session-a");
+  });
+
+  it("reuses an existing owner when the session is already open", async () => {
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = { ...workspace, activeTabId: "tab-a" };
+    const clients = new Map([["tab-a", fakeClient("tab-a")], ["tab-b", fakeClient("tab-b")]]);
+    const { controller } = await readySessionController(workspace, clients);
+
+    const result = await controller.openHistorySession("session-b");
+
+    expect(result.reused).toBe(true);
+    expect(result.tabId).toBe("tab-b");
+    // No new tab created
+    expect(result.workspace.tabs).toHaveLength(2);
+  });
+
+  it("rolls back on failure and preserves the original workspace", async () => {
+    const workspace = createConversationWorkspace("tab-a", "session-a");
+    const clients = new Map([["tab-a", fakeClient("tab-a")]]);
+    const { controller, deps } = await readySessionController(workspace, clients);
+
+    // Simulate a client that fails on connect
+    const failingClient = fakeClient("failing");
+    failingClient.connect = vi.fn(() => Promise.reject(new Error("connect failed")));
+    const acquireSpy = vi.fn(() => failingClient);
+    deps.clients.acquireClient = acquireSpy;
+    deps.clients.isCurrentClient = vi.fn(() => true);
+
+    await expect(controller.openHistorySession("doomed-session")).rejects.toThrow(
+      "connect failed",
+    );
+
+    // Workspace must be restored to original
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.workspace?.tabs).toHaveLength(1);
+    expect(snapshot.workspace?.activeTabId).toBe("tab-a");
+  });
+});
+
 describe("ConversationController client and permission state", () => {
   function sessionState(switchingModel = false) {
     return {
