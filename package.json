@@ -5,9 +5,9 @@
   "type": "module",
   "description": "Hermes Agent sidebar and selection-aware editing for Obsidian",
   "scripts": {
-    "dev": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs watch",
     "build": "node esbuild.config.mjs production",
-    "build:debug": "node esbuild.config.mjs",
+    "build:debug": "node esbuild.config.mjs debug",
     "typecheck": "tsc --noEmit --pretty false",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -15,6 +15,7 @@
     "smoke:acp": "node scripts/acp-smoke.mjs",
     "smoke:acp:parallel": "node scripts/acp-parallel-smoke.mjs",
     "deploy": "npm run build && node scripts/deploy.mjs",
+    "deploy:debug": "npm run build:debug && node scripts/deploy.mjs",
     "verify": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
