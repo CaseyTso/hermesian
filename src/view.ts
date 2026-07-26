@@ -47,6 +47,7 @@ import {
   formatContextUsage,
 } from "./session-state";
 import {
+  buildActiveNotePrompt,
   buildDocumentPrompt,
   buildSelectionPrompt,
   validateSelectionEdit,
@@ -1548,6 +1549,8 @@ export class HermesianSidebarView extends ItemView {
     }
 
     const selection = isSlashCommand ? undefined : this.pendingSelection;
+    const activeFilePath = this.plugin.getCurrentMarkdownFilePath();
+    this.setCurrentFile(activeFilePath);
     const documentContext =
       isSlashCommand || selection || !this.includeCurrentDocumentContext
         ? undefined
@@ -1559,7 +1562,9 @@ export class HermesianSidebarView extends ItemView {
       ? buildSelectionPrompt(selection, request)
       : documentContext
         ? buildDocumentPrompt(documentContext, request)
-        : request;
+        : isSlashCommand
+          ? request
+          : buildActiveNotePrompt(activeFilePath, request);
     const runtime = this.turnRuntime(activeTab.id);
     this.editScopes.set(activeTab.id, selection ?? documentContext);
     this.appendUserMessage(request, selection, documentContext, activeTab.id, pendingImages);

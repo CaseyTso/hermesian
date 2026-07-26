@@ -427,12 +427,16 @@ export default class HermesianPlugin extends Plugin {
     return adapter.getBasePath();
   }
 
-  private currentMarkdownFilePath(): string | undefined {
+  getCurrentMarkdownFilePath(): string | undefined {
     return (
       this.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path ??
       this.lastMarkdownView?.file?.path ??
       undefined
     );
+  }
+
+  private currentMarkdownFilePath(): string | undefined {
+    return this.getCurrentMarkdownFilePath();
   }
 
   private rememberMarkdownView(view: MarkdownView): void {
