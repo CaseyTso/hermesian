@@ -58,6 +58,7 @@ export default class HermesianPlugin extends Plugin {
               Promise.resolve({ outcome: { outcome: "cancelled" } }))
             : Promise.resolve({ outcome: { outcome: "cancelled" } }),
         pluginVersion: this.manifest.version,
+        debugLogging: this.settings.debugLogging,
         settings: () => this.settings,
         vaultPath: this.getVaultPath(),
       });
@@ -459,6 +460,10 @@ export default class HermesianPlugin extends Plugin {
         typeof saved.autoApproveVaultEdits === "boolean"
           ? saved.autoApproveVaultEdits
           : DEFAULT_SETTINGS.autoApproveVaultEdits,
+      debugLogging:
+        typeof saved.debugLogging === "boolean"
+          ? saved.debugLogging
+          : DEFAULT_SETTINGS.debugLogging,
       hermesExecutable:
         typeof saved.hermesExecutable === "string"
           ? saved.hermesExecutable

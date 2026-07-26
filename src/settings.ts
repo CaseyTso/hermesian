@@ -6,6 +6,7 @@ import type { ReasoningEffort } from "./types";
 export interface HermesianSettings {
   acceptHooks: boolean;
   autoApproveVaultEdits: boolean;
+  debugLogging: boolean;
   hermesExecutable: string;
   profile: string;
   reasoningEffort: ReasoningEffort;
@@ -14,6 +15,7 @@ export interface HermesianSettings {
 export const DEFAULT_SETTINGS: HermesianSettings = {
   acceptHooks: true,
   autoApproveVaultEdits: true,
+  debugLogging: false,
   hermesExecutable: "hermes",
   profile: "default",
   reasoningEffort: "default",
@@ -103,6 +105,20 @@ export class HermesianSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.autoApproveVaultEdits)
           .onChange(async (value) => {
             this.plugin.settings.autoApproveVaultEdits = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Debug logging")
+      .setDesc(
+        "Write privacy-safe lifecycle events (connection, operations, errors) to the developer console. Does not log prompt text, file paths, or session IDs.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.debugLogging)
+          .onChange(async (value) => {
+            this.plugin.settings.debugLogging = value;
             await this.plugin.saveSettings();
           }),
       );

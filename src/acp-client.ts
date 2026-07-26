@@ -5,6 +5,7 @@ import { delimiter, isAbsolute, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 
 import { AcpProcess } from "./acp-process";
+import { createDebugLogger, type DebugLogger } from "./debug-logger";
 
 import { loadHermesModelCatalog } from "./hermes-model-catalog";
 import {
@@ -41,6 +42,7 @@ interface NewSessionResponseCompat extends acp.NewSessionResponse {
 }
 
 export interface HermesAcpClientOptions {
+  debugLogging?: boolean;
   onEvent: (event: HermesUiEvent) => void;
   onPermission: (
     request: PermissionRequest,
@@ -170,6 +172,7 @@ export function automaticVaultEditApproval(
 export class HermesAcpClient {
   private activeSession: acp.ActiveSession | undefined;
   #acpProcess?: AcpProcess;
+  readonly #logger: DebugLogger;
   private busy = false;
   private catalogGeneration = 0;
   private connectPromise: Promise<void> | undefined;
@@ -196,7 +199,9 @@ export class HermesAcpClient {
   private readonly sessionStateListeners = new Set<SessionStateListener>();
   private readonly toolTitles = new Map<string, string>();
 
-  constructor(private readonly options: HermesAcpClientOptions) {}
+  constructor(private readonly options: HermesAcpClientOptions) {
+    this.#logger = createDebugLogger(options.debugLogging === true);
+  }
 
   get isBusy(): boolean {
     return this.busy;
@@ -269,6 +274,7 @@ export class HermesAcpClient {
   }
 
   private async connectInternal(generation: number): Promise<void> {
+    this.#logger.debug("client.connect.start", { generation });
     this.intentionalShutdown = false;
     this.emit({ type: "status", status: "connecting", detail: "Starting Hermes ACP…" });
 
