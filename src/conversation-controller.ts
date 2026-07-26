@@ -13,7 +13,6 @@ import {
   createCloseIntent,
   removeConversationTab,
   replaceConversationSession,
-  type CloseConversationIntent,
   type PersistedConversationTab,
   type PersistedConversationWorkspace,
 } from "./conversation-tabs";
