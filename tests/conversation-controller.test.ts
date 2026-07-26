@@ -1290,6 +1290,129 @@ describe("ConversationController close", () => {
     expect(deps.workspace.getWorkspace()?.tabs.some((tab) => tab.id === "base")).toBe(true);
     expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
   });
+
+  // ── Close-UX RED tests: close must commit before replacement readiness ──
+
+  it("commits active close before replacement history finishes", async () => {
+    const history = deferred<HermesHistoryItem[]>();
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = { ...workspace, activeTabId: "tab-a" };
+
+    const tabA = fakeClient("tab-a");
+    const tabB = fakeClient("tab-b");
+    // Replacement history stays pending until we explicitly resolve
+    tabB.loadSessionHistory = vi.fn(() => history.promise);
+    const { controller } = await readyCloseController(
+      workspace,
+      new Map([["tab-a", tabA], ["tab-b", tabB]]),
+    );
+
+    // B is unloaded (not yet hydrated) since it was inactive
+    controller.setPromptRunning("tab-a", false);
+
+    const close = controller.closeConversation("tab-a");
+
+    // Even while replacement history is still pending,
+    // the close must have committed the workspace removal
+    await vi.waitFor(() => {
+      const ws = controller.getSnapshot().workspace!;
+      expect(ws.tabs.map((t) => t.id)).toEqual(["tab-b"]);
+      expect(ws.activeTabId).toBe("tab-b");
+    }, { timeout: 2000 });
+
+    // Now resolve history — close should already be settled
+    history.resolve([{ kind: "user", text: "b-history" }]);
+    await expect(close).resolves.toMatchObject({ tabId: "tab-a" });
+  });
+
+  it("does not await replacement connect before committing close", async () => {
+    const connectDeferred = deferred<void>();
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = { ...workspace, activeTabId: "tab-a" };
+
+    const tabA = fakeClient("tab-a");
+    const tabB = fakeClient("tab-b");
+    tabB.connect = vi.fn(() => connectDeferred.promise);
+    const { controller } = await readyCloseController(
+      workspace,
+      new Map([["tab-a", tabA], ["tab-b", tabB]]),
+    );
+
+    const close = controller.closeConversation("tab-a");
+
+    // Workspace must commit without waiting for B's connect
+    await vi.waitFor(() => {
+      const ws = controller.getSnapshot().workspace!;
+      expect(ws.tabs.map((t) => t.id)).toEqual(["tab-b"]);
+    }, { timeout: 2000 });
+
+    connectDeferred.resolve();
+    await expect(close).resolves.toMatchObject({ tabId: "tab-a" });
+  });
+
+  it("does not await old client disconnect after close commit", async () => {
+    const disconnectDeferred = deferred<void>();
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = { ...workspace, activeTabId: "tab-a" };
+
+    const tabA = fakeClient("tab-a");
+    tabA.disconnect = vi.fn(() => disconnectDeferred.promise);
+    const tabB = fakeClient("tab-b");
+    const { controller } = await readyCloseController(
+      workspace,
+      new Map([["tab-a", tabA], ["tab-b", tabB]]),
+    );
+
+    // Replace the default releaseClient (which is a no-op mock) with one
+    // that actually calls disconnect
+    const originalRelease = controller["dependencies"].clients.releaseClient;
+    controller["dependencies"].clients.releaseClient = vi.fn(async (releaseId: string) => {
+      const client = controller["dependencies"].clients.getClient(releaseId);
+      if (client) {
+        await client.disconnect();
+      }
+      return originalRelease(releaseId);
+    });
+
+    const close = controller.closeConversation("tab-a");
+
+    // Close must resolve even while old client disconnect is pending
+    await expect(close).resolves.toMatchObject({ tabId: "tab-a" });
+    // tab-a must be gone from workspace
+    expect(controller.getSnapshot().workspace?.tabs.map((t) => t.id)).toEqual(["tab-b"]);
+
+    disconnectDeferred.resolve();
+  });
+
+  it("last-tab close commits replacement before replacement connects", async () => {
+    const connectDeferred = deferred<void>();
+    const replacement = fakeClient("replacement");
+    replacement.connect = vi.fn(() => connectDeferred.promise);
+    const tabA = fakeClient("tab-a");
+
+    const { controller } = await readyCloseController(
+      createConversationWorkspace("tab-a", "session-a"),
+      new Map([["tab-a", tabA], ["replacement", replacement]]),
+      () => "replacement",
+    );
+
+    const close = controller.closeConversation("tab-a");
+
+    // Replacement must appear in workspace before its connect resolves
+    await vi.waitFor(() => {
+      const ws = controller.getSnapshot().workspace!;
+      expect(ws.tabs.some((t) => t.id === "replacement")).toBe(true);
+    }, { timeout: 2000 });
+
+    connectDeferred.resolve();
+    await expect(close).resolves.toMatchObject({ tabId: "tab-a" });
+  });
 });
 
 describe("ConversationController history and restart", () => {
