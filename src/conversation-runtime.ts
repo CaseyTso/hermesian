@@ -1,4 +1,5 @@
 export type ConversationConnectionState =
+  | "unloaded"
   | "deferred"
   | "loading"
   | "ready"

@@ -180,7 +180,7 @@ function runtimeForWorkspace(
       tab.id,
       Object.freeze({
         closing: false,
-        connection: tab.sessionId ? "ready" : "deferred",
+        connection: tab.sessionId ? "unloaded" : "deferred",
         hasSession: Boolean(tab.sessionId),
         permissionPending: false,
         prompt: "idle",
@@ -189,6 +189,19 @@ function runtimeForWorkspace(
     );
   }
   return operations;
+}
+
+function reconcileRuntimeForWorkspace(
+  workspace: PersistedConversationWorkspace | undefined,
+  current: ReadonlyMap<string, TabOperationState>,
+): ReadonlyMap<string, TabOperationState> {
+  const seeded = new Map(runtimeForWorkspace(workspace));
+  for (const [tabId, state] of current) {
+    if (seeded.has(tabId)) {
+      seeded.set(tabId, Object.freeze({ ...seeded.get(tabId)!, ...state }));
+    }
+  }
+  return seeded;
 }
 
 function createPendingWorkspace(tabId: string): PersistedConversationWorkspace {
@@ -325,7 +338,7 @@ export class ConversationController<TClient extends ConversationClient> {
         ...this.snapshot,
         globalOperation: "idle",
         initializing: false,
-        tabOperations: runtimeForWorkspace(latestWorkspace),
+        tabOperations: reconcileRuntimeForWorkspace(latestWorkspace, this.snapshot.tabOperations),
         transitionGeneration: this.operations.getTransitionGeneration(),
         workspace: latestWorkspace,
       });
@@ -470,17 +483,11 @@ export class ConversationController<TClient extends ConversationClient> {
   }
 
   private publishWorkspace(workspace: PersistedConversationWorkspace): void {
-    const tabOperations = new Map(runtimeForWorkspace(workspace));
+    const tabOperations = reconcileRuntimeForWorkspace(workspace, this.snapshot.tabOperations);
     const tabIds = new Set(workspace.tabs.map((tab) => tab.id));
     const sessionStates = new Map(
       Array.from(this.sessionStates.entries()).filter(([tabId]) => tabIds.has(tabId)),
     );
-    for (const [tabId, current] of this.snapshot.tabOperations) {
-      const seeded = tabOperations.get(tabId);
-      if (seeded) {
-        tabOperations.set(tabId, Object.freeze({ ...seeded, ...current }));
-      }
-    }
     this.publish({
       ...this.snapshot,
       sessionStates,
