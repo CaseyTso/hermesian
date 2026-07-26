@@ -2178,10 +2178,15 @@ describe("ConversationController ensureConversationReady", () => {
     });
     const injected = fakeClient("fresh");
     injected.sessionId = undefined;
-    injected.connect = vi.fn(async () => { throw new Error("connect failed"); });
+    const failConnect = deferred<void>();
+    injected.connect = vi.fn(() => failConnect.promise.then(() => {
+      throw new Error("connect failed");
+    }));
     controller["dependencies"].clients.acquireClient = vi.fn(() => injected);
 
-    await expect(controller.ensureConversationReady("main")).rejects.toThrow("connect failed");
+    const hydration = controller.ensureConversationReady("main");
+    failConnect.resolve();
+    await expect(hydration).rejects.toThrow("connect failed");
     expect(controller.getSnapshot().tabOperations.get("main")?.connection).toBe("failed");
   });
 
@@ -2203,11 +2208,16 @@ describe("ConversationController ensureConversationReady", () => {
       ),
     });
 
+    const failConnect = deferred<void>();
     const failClient = fakeClient("fail");
     failClient.sessionId = undefined;
-    failClient.connect = vi.fn(async () => { throw new Error("connect failed"); });
+    failClient.connect = vi.fn(() => failConnect.promise.then(() => {
+      throw new Error("connect failed");
+    }));
     controller["dependencies"].clients.acquireClient = vi.fn(() => failClient);
-    await expect(controller.ensureConversationReady("main")).rejects.toThrow("connect failed");
+    const hydration = controller.ensureConversationReady("main");
+    failConnect.resolve();
+    await expect(hydration).rejects.toThrow("connect failed");
 
     const okClient = fakeClient("ok");
     okClient.sessionId = "ok-session";
