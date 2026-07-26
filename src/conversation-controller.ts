@@ -764,19 +764,13 @@ export class ConversationController<TClient extends ConversationClient> {
           this.dependencies.createTabId ?? (() => globalThis.crypto.randomUUID()),
         )
       : undefined;
-    const generation = closingActive
-      ? this.operations.beginTransition()
-      : this.operations.getTransitionGeneration();
     const token = this.operations.begin(tabId);
     this.updateTabOperation(tabId, { closing: true });
     let replacementTabId: string | undefined;
 
     try {
-      // Phase A: structural workspace commit (short, local only)
+      // Phase A: structural workspace commit (no visible generation coupling)
       const committedWorkspace = await this.enqueueWorkspaceCommit(async () => {
-        if (closingActive) {
-          this.assertCurrentTransition(generation);
-        }
         const latestWorkspace = copyWorkspace(
           this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
         );
@@ -788,7 +782,6 @@ export class ConversationController<TClient extends ConversationClient> {
           nextWorkspace = applyCloseIntent(latestWorkspace, intent);
           if (intent.replacementTabId) {
             replacementTabId = intent.replacementTabId;
-            // Create a deferred entry for the replacement in runtime
             this.updateTabOperationForNewTab(replacementTabId);
           }
         } else {
@@ -802,9 +795,6 @@ export class ConversationController<TClient extends ConversationClient> {
           flush: true,
           save: true,
         });
-        if (closingActive) {
-          this.assertCurrentTransition(generation);
-        }
         this.publishWorkspace(nextWorkspace);
         return nextWorkspace;
       });

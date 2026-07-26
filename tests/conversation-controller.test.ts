@@ -1173,39 +1173,42 @@ describe("ConversationController close", () => {
     expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-c");
   });
 
-  it("lets a newer switch win over an older active close preparation", async () => {
-    const successorHistory = deferred<HermesHistoryItem[]>();
-    const switchHistory = deferred<HermesHistoryItem[]>();
+  it("closure and switch coexist without mutual cancellation", async () => {
+    const closePersist = deferred<void>();
     let workspace = createConversationWorkspace("base", "base-session");
     workspace = addPendingConversationTab(workspace, "tab-b");
-    workspace = replaceConversationSession(workspace, "tab-b", "tab-b-session");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
     workspace = addPendingConversationTab(workspace, "tab-c");
-    workspace = replaceConversationSession(workspace, "tab-c", "tab-c-session");
+    workspace = replaceConversationSession(workspace, "tab-c", "session-c");
     workspace = { ...workspace, activeTabId: "base" };
-    const base = fakeClient("base");
-    const tabB = fakeClient("tab-b");
-    tabB.loadSessionHistory = vi.fn(() => successorHistory.promise);
-    const tabC = fakeClient("tab-c");
-    tabC.loadSessionHistory = vi.fn(() => switchHistory.promise);
     const { controller, deps } = await readyCloseController(
       workspace,
-      new Map([
-        ["base", base],
-        ["tab-b", tabB],
-        ["tab-c", tabC],
-      ]),
+      new Map([["base", fakeClient("base")], ["tab-b", fakeClient("tab-b")], ["tab-c", fakeClient("tab-c")]]),
     );
+    const originalSetWorkspace = deps.workspace.setWorkspace;
+    deps.workspace.setWorkspace = vi.fn((ws: PersistedConversationWorkspace, opts?: { flush?: boolean; save?: boolean }) => {
+      if (opts?.save && !ws.tabs.some((t) => t.id === "base")) {
+        return closePersist.promise.then(() => originalSetWorkspace(ws, opts));
+      }
+      return originalSetWorkspace(ws, opts);
+    });
 
     const closeBase = controller.closeConversation("base");
+    await Promise.resolve();
     const switchToC = controller.switchConversation("tab-c");
-    switchHistory.resolve([]);
-    await expect(switchToC).resolves.toMatchObject({ tabId: "tab-c" });
-    successorHistory.resolve([]);
+    // Switch queues behind close persistence in serialized workspace commit
+    closePersist.resolve();
+    await Promise.resolve();
 
-    await expect(closeBase).rejects.toMatchObject({ code: "cancelled" });
+    const closeResult = await closeBase;
+    // Switch wins: tab-c is active after close removes base
+    await switchToC;
+
+    // Close removes base; switch wins active owner
+    expect(closeResult.workspace.tabs.some((t) => t.id === "base")).toBe(false);
     expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-c");
-    expect(deps.workspace.getWorkspace()?.tabs.some((tab) => tab.id === "base")).toBe(true);
-    expect(deps.clients.releaseClient).not.toHaveBeenCalledWith("base");
+    expect(deps.workspace.getWorkspace()?.tabs.map((t) => t.id).sort()).toEqual(["tab-b", "tab-c"]);
+    expect(deps.clients.releaseClient).toHaveBeenCalledWith("base");
   });
 
   // ── Close-UX RED tests: close must commit before replacement readiness ──
@@ -1410,6 +1413,72 @@ describe("ConversationController close", () => {
     const result = await controller.closeConversation("only");
     expect(result.replacementTabId).toBe("replacement");
     expect(result.workspace.activeTabId).toBe("replacement");
+  });
+
+  // ── Visibility linearization: close + concurrent navigation ──
+
+  it("commits close and lets a queued switch win", async () => {
+    const closePersist = deferred<void>();
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = addPendingConversationTab(workspace, "tab-c");
+    workspace = replaceConversationSession(workspace, "tab-c", "session-c");
+    workspace = { ...workspace, activeTabId: "tab-a" };
+    const clientA = fakeClient("tab-a");
+    const clientC = fakeClient("tab-c");
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([["tab-a", clientA], ["tab-b", fakeClient("tab-b")], ["tab-c", clientC]]),
+    );
+    const originalSetWorkspace = deps.workspace.setWorkspace;
+    deps.workspace.setWorkspace = vi.fn((ws: PersistedConversationWorkspace, opts?: { flush?: boolean; save?: boolean }) => {
+      if (opts?.save && !ws.tabs.some((t) => t.id === "tab-a")) {
+        return closePersist.promise.then(() => originalSetWorkspace(ws, opts));
+      }
+      return originalSetWorkspace(ws, opts);
+    });
+
+    const closeA = controller.closeConversation("tab-a");
+    await Promise.resolve();
+    const switchC = controller.switchConversation("tab-c");
+    await Promise.resolve();
+    closePersist.resolve();
+
+    const [closeResult, switchResult] = await Promise.all([closeA, switchC]);
+    // Close removes tab-a; successor (tab-b) is initial active
+    expect(closeResult.workspace.tabs.map((t) => t.id)).toEqual(["tab-b", "tab-c"]);
+    // Switch wins: tab-c is now active
+    expect(switchResult.workspace.activeTabId).toBe("tab-c");
+    // Final persisted state: tab-c active
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-c");
+    expect(deps.workspace.getWorkspace()?.tabs.map((t) => t.id).sort()).toEqual(["tab-b", "tab-c"]);
+  });
+
+  it("rejects close when persistence fails and queued switch succeeds on original workspace", async () => {
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = { ...workspace, activeTabId: "tab-a" };
+    const clients = new Map([["tab-a", fakeClient("tab-a")], ["tab-b", fakeClient("tab-b")]]);
+    const { controller, deps } = await readyCloseController(workspace, clients);
+    const originalSetWorkspace = deps.workspace.setWorkspace;
+    deps.workspace.setWorkspace = vi.fn((ws: PersistedConversationWorkspace, opts?: { flush?: boolean; save?: boolean }) => {
+      if (opts?.save && !ws.tabs.some((t) => t.id === "tab-a")) {
+        throw new Error("persistence write failed");
+      }
+      return originalSetWorkspace(ws, opts);
+    });
+
+    const closeA = controller.closeConversation("tab-a");
+    await Promise.resolve();
+    const switchB = controller.switchConversation("tab-b");
+
+    await expect(closeA).rejects.toThrow("persistence write failed");
+    const switchResult = await switchB;
+    expect(switchResult.workspace.activeTabId).toBe("tab-b");
+    // tab-a still present
+    expect(deps.workspace.getWorkspace()?.tabs.map((t) => t.id).sort()).toEqual(["tab-a", "tab-b"]);
   });
 });
 

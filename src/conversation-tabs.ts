@@ -290,17 +290,10 @@ export function applyCloseIntent(
     throw new Error(`Conversation tab ${closingTabId} was already removed`);
   }
 
-  const closingActive = latestWorkspace.activeTabId === closingTabId;
-  const userSelectedAnotherTab =
-    closingActive &&
-    latestWorkspace.activeTabId !== closingTabId &&
-    latestWorkspace.activeTabId !== intent.intendedSuccessorTabId;
-
+  // Build post-close workspace using the deterministic successor rule
   let workspace: PersistedConversationWorkspace;
   if (intent.replacementTabId) {
-    // Last tab: create replacement and remove old in one atomic step
     workspace = addPendingConversationTab(latestWorkspace, intent.replacementTabId);
-    // Now remove the old tab (replacement preserves position)
     const removed = removeConversationTab(workspace, closingTabId);
     if (!removed) {
       throw new Error("Failed to create replacement conversation tab");
@@ -314,16 +307,11 @@ export function applyCloseIntent(
     workspace = removed;
   }
 
-  // If user selected another tab while close was pending, preserve it
-  if (userSelectedAnotherTab) {
-    const userSelection = latestWorkspace.tabs.find(
-      (tab) => tab.id !== closingTabId && tab.id === latestWorkspace.activeTabId,
-    );
-    if (
-      userSelection &&
-      workspace.tabs.some((tab) => tab.id === userSelection.id)
-    ) {
-      workspace = activateConversationTab(workspace, userSelection.id);
+  // If user selected another owner while close was pending, preserve it
+  const latestActive = latestWorkspace.activeTabId;
+  if (latestActive !== closingTabId && workspace.activeTabId !== latestActive) {
+    if (workspace.tabs.some((tab) => tab.id === latestActive)) {
+      workspace = activateConversationTab(workspace, latestActive);
     }
   }
 
