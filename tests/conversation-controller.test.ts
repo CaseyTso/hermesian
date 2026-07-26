@@ -1330,6 +1330,87 @@ describe("ConversationController close", () => {
     connectDeferred.resolve();
     await expect(close).resolves.toMatchObject({ tabId: "tab-a" });
   });
+
+  it("does not leak pending promises after rapid consecutive closes", async () => {
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = addPendingConversationTab(workspace, "tab-c");
+    workspace = replaceConversationSession(workspace, "tab-c", "session-c");
+    workspace = { ...workspace, activeTabId: "tab-a" };
+    const clients = new Map([
+      ["tab-a", fakeClient("tab-a")],
+      ["tab-b", fakeClient("tab-b")],
+      ["tab-c", fakeClient("tab-c")],
+    ]);
+    const { controller } = await readyCloseController(workspace, clients);
+
+    const [resultA, resultB] = await Promise.all([
+      controller.closeConversation("tab-a"),
+      controller.closeConversation("tab-b"),
+    ]);
+
+    // Close-a commits first: removes tab-a, activates tab-b
+    expect(resultA.workspace.tabs.map((t) => t.id)).toEqual(["tab-b", "tab-c"]);
+    expect(resultA.workspace.activeTabId).toBe("tab-b");
+    // Close-b commits second: reads latest, removes tab-b, activates tab-c
+    expect(resultB.workspace.tabs.map((t) => t.id)).toEqual(["tab-c"]);
+    expect(resultB.workspace.activeTabId).toBe("tab-c");
+  });
+
+  it("rejects a second active close while the first is committing", async () => {
+    const persist = deferred<void>();
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = { ...workspace, activeTabId: "tab-a" };
+    const { controller, deps } = await readyCloseController(
+      workspace,
+      new Map([["tab-a", fakeClient("tab-a")], ["tab-b", fakeClient("tab-b")]]),
+    );
+    const originalSetWorkspace = deps.workspace.setWorkspace;
+    deps.workspace.setWorkspace = vi.fn((ws: PersistedConversationWorkspace, opts?: { flush?: boolean; save?: boolean }) => {
+      if (opts?.save && ws.activeTabId !== "tab-a") {
+        return persist.promise.then(() => originalSetWorkspace(ws, opts));
+      }
+      return originalSetWorkspace(ws, opts);
+    });
+
+    const closeA = controller.closeConversation("tab-a");
+    await Promise.resolve();
+    await expect(controller.closeConversation("tab-a")).rejects.toMatchObject({
+      code: "operation_stale",
+    });
+    persist.resolve();
+    await closeA;
+  });
+
+  it("does not resurrect a closed tab after close succeeds", async () => {
+    const replacement = fakeClient("replacement");
+    const base = fakeClient("base");
+    const { controller } = await readyCloseController(
+      createConversationWorkspace("base", "base-session"),
+      new Map([["base", base], ["replacement", replacement]]),
+      () => "replacement",
+    );
+
+    const result = await controller.closeConversation("base");
+    expect(result.workspace.tabs.some((t) => t.id === "base")).toBe(false);
+    expect(result.replacementTabId).toBe("replacement");
+  });
+
+  it("yields replacementTabId and active owner when closing the last tab", async () => {
+    const replacement = fakeClient("replacement");
+    const { controller } = await readyCloseController(
+      createConversationWorkspace("only", "only-session"),
+      new Map([["only", fakeClient("only")], ["replacement", replacement]]),
+      () => "replacement",
+    );
+
+    const result = await controller.closeConversation("only");
+    expect(result.replacementTabId).toBe("replacement");
+    expect(result.workspace.activeTabId).toBe("replacement");
+  });
 });
 
 describe("ConversationController history and restart", () => {
