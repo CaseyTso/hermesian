@@ -4,7 +4,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MessageRenderer } from "../../src/ui/message-renderer";
+import { MessageRenderer, TurnManager } from "../../src/ui/message-renderer";
 
 // Minimal Obsidian DOM mocks
 (HTMLElement.prototype as any).createDiv = function (options: any = {}) {
@@ -21,6 +21,9 @@ import { MessageRenderer } from "../../src/ui/message-renderer";
 };
 (HTMLElement.prototype as any).empty = function () {
   while (this.firstChild) this.removeChild(this.firstChild);
+};
+(HTMLElement.prototype as any).setText = function (text: string) {
+  this.textContent = text;
 };
 (HTMLElement.prototype as any).createSpan = function (options: any = {}) {
   return (this as any).createEl("span", options);
@@ -203,6 +206,163 @@ describe("MessageRenderer", () => {
 
       renderer.clearVisible();
       expect(messagesEl.childNodes.length).toBe(0);
+    });
+  });
+});
+
+// ── TurnManager ───────────────────────────────────────────────
+
+describe("TurnManager", () => {
+  function setupTurn() {
+    const parent = document.createElement("div");
+    const messagesEl = parent.createDiv({ cls: "hermesian-messages" });
+    const renderer = new MessageRenderer(messagesEl as HTMLElement);
+    renderer.show("tab-A");
+    const turnCallbacks = { onTurnComplete: vi.fn() };
+    const turns = new TurnManager(renderer, turnCallbacks);
+    return { parent, messagesEl, renderer, turns, turnCallbacks };
+  }
+
+  describe("ensure", () => {
+    it("returns the same runtime for repeated calls", () => {
+      const { turns } = setupTurn();
+      const a = turns.ensure("tab-A");
+      const b = turns.ensure("tab-A");
+      expect(a).toBe(b);
+    });
+
+    it("initializes with default values", () => {
+      const { turns } = setupTurn();
+      const rt = turns.ensure("tab-B");
+      expect(rt.assistantText).toBe("");
+      expect(rt.busy).toBe(false);
+      expect(rt.toolEls).toBeInstanceOf(Map);
+    });
+  });
+
+  describe("ensureActivity", () => {
+    it("creates turn DOM scaffold", () => {
+      const { turns } = setupTurn();
+      const activity = turns.ensureActivity("tab-A");
+      expect(activity.classList.contains("hermesian-turn-activity")).toBe(true);
+      const turnEl = activity.parentElement;
+      expect(turnEl).not.toBeNull();
+      expect(turnEl!.classList.contains("hermesian-turn")).toBe(true);
+    });
+
+    it("returns the same activity element for repeated calls", () => {
+      const { turns } = setupTurn();
+      const a = turns.ensureActivity("tab-A");
+      const b = turns.ensureActivity("tab-A");
+      expect(a).toBe(b);
+    });
+  });
+
+  describe("appendDelta", () => {
+    it("appends assistant text chunks", () => {
+      const { turns } = setupTurn();
+      turns.appendDelta("tab-A", "Hello");
+      turns.appendDelta("tab-A", " world");
+      expect(turns.ensure("tab-A").assistantText).toBe("Hello world");
+    });
+
+    it("creates assistant DOM elements", () => {
+      const { turns } = setupTurn();
+      turns.appendDelta("tab-A", "text");
+      const el = turns.ensure("tab-A").assistantContentEl;
+      expect(el).not.toBeUndefined();
+      expect(el!.classList.contains("hermesian-message-content")).toBe(true);
+    });
+  });
+
+  describe("appendThought", () => {
+    it("creates thought details element", () => {
+      const { turns } = setupTurn();
+      turns.appendThought("tab-A", "thinking...");
+      const el = turns.ensure("tab-A").thoughtContentEl;
+      expect(el).not.toBeUndefined();
+      expect(el!.tagName).toBe("PRE");
+    });
+  });
+
+  describe("complete", () => {
+    it("runs finalize callback and marks turn as done", async () => {
+      const { turns, turnCallbacks } = setupTurn();
+      const runtime = turns.ensure("tab-A");
+      runtime.busy = true;
+
+      let finalized = false;
+      await turns.complete("tab-A", async () => {
+        finalized = true;
+      });
+
+      expect(finalized).toBe(true);
+      expect(runtime.busy).toBe(false);
+      expect(runtime.activeTurnEl).toBeUndefined();
+      expect(turnCallbacks.onTurnComplete).toHaveBeenCalledWith("tab-A");
+    });
+
+    it("deduplicates concurrent completion calls", async () => {
+      const { turns } = setupTurn();
+      turns.ensure("tab-A").busy = true;
+      let count = 0;
+
+      const [a, b] = await Promise.all([
+        turns.complete("tab-A", async () => { count++; }),
+        turns.complete("tab-A", async () => { count++; }),
+      ]);
+
+      // Both calls return the same promise, finalize runs once
+      expect(count).toBe(1);
+      expect(a).toBe(b);
+    });
+  });
+
+  describe("resetStreaming", () => {
+    it("clears assistant and thought state", () => {
+      const { turns } = setupTurn();
+      turns.appendDelta("tab-A", "text");
+      turns.appendThought("tab-A", "think");
+      turns.resetStreaming("tab-A");
+      const rt = turns.ensure("tab-A");
+      expect(rt.assistantContentEl).toBeUndefined();
+      expect(rt.assistantText).toBe("");
+      expect(rt.thoughtContentEl).toBeUndefined();
+    });
+  });
+
+  describe("resetView", () => {
+    it("clears all messages and tool elements", () => {
+      const { turns } = setupTurn();
+      turns.ensureActivity("tab-A");
+      turns.appendDelta("tab-A", "text");
+      const rt = turns.ensure("tab-A");
+      rt.toolEls.set("t1", document.createElement("div"));
+
+      turns.resetView("tab-A");
+      expect(rt.activeTurnEl).toBeUndefined();
+      expect(rt.turnActivityEl).toBeUndefined();
+      expect(rt.toolEls.size).toBe(0);
+    });
+  });
+
+  describe("delete", () => {
+    it("removes the runtime", () => {
+      const { turns } = setupTurn();
+      turns.ensure("tab-A");
+      turns.delete("tab-A");
+      const rt = turns.ensure("tab-A");
+      // After delete, ensure should create a fresh runtime
+      expect(rt.busy).toBe(false);
+    });
+  });
+
+  describe("isBusy", () => {
+    it("reflects the busy flag", () => {
+      const { turns } = setupTurn();
+      expect(turns.isBusy("tab-A")).toBe(false);
+      turns.ensure("tab-A").busy = true;
+      expect(turns.isBusy("tab-A")).toBe(true);
     });
   });
 });

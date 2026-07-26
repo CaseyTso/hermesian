@@ -67,6 +67,8 @@ import {
 } from "./ui/sidebar-shell";
 import {
   MessageRenderer,
+  TurnManager,
+  type TurnCallbacks,
 } from "./ui/message-renderer";
 import {
   applyComposerState,
@@ -119,18 +121,6 @@ interface PendingPermission {
   card: HTMLElement;
   resolve: (response: RequestPermissionResponse) => void;
   tabId: string;
-}
-
-interface ConversationTurnRuntime {
-  activeEditScope?: SelectionContext | MarkdownDocumentContext;
-  activeTurnEl?: HTMLElement;
-  assistantContentEl?: HTMLElement;
-  assistantText: string;
-  busy: boolean;
-  completionPromise?: Promise<void>;
-  thoughtContentEl?: HTMLElement;
-  toolEls: Map<string, HTMLElement>;
-  turnActivityEl?: HTMLElement;
 }
 
 function rejectionFor(options: PermissionOption[]): RequestPermissionResponse {
@@ -186,8 +176,12 @@ export class HermesianSidebarView extends ItemView {
   private readonly permissions = new Map<string, PendingPermission>();
   private readonly loadedMessageTabIds = new Set<string>();
   private messageRenderer!: MessageRenderer;
+  private turnManager!: TurnManager;
+  private readonly editScopes = new Map<
+    string,
+    SelectionContext | MarkdownDocumentContext | undefined
+  >();
   private readonly pendingImages = new Map<string, PastedImageAttachment[]>();
-  private readonly turnRuntimes = new Map<string, ConversationTurnRuntime>();
   private reasoningButtonEl!: HTMLButtonElement;
   private reasoningLabelEl!: HTMLElement;
   private selectionBarEl!: HTMLElement;
@@ -302,12 +296,12 @@ export class HermesianSidebarView extends ItemView {
       case "error":
         this.appendSystemMessage(`Error: ${event.message}`, true, tabId);
         if (hermesEventEndsTurn(event)) {
-          this.turnRuntime(tabId).activeEditScope = undefined;
+          this.editScopes.set(tabId, undefined);
           void this.finishFailedTurn(tabId);
         }
         return;
       case "turn-stop":
-        this.turnRuntime(tabId).activeEditScope = undefined;
+        this.editScopes.set(tabId, undefined);
         void this.finishTurn(tabId, event.reason);
         return;
     }
@@ -331,7 +325,6 @@ export class HermesianSidebarView extends ItemView {
     request: PermissionRequest,
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
-    const runtime = this.turnRuntime(tabId);
     const permissionId = `${tabId}:${request.toolCall.toolCallId}`;
     this.controller?.beginPermission(tabId, permissionId);
     this.revealActiveTurnForPermission(tabId);
@@ -346,7 +339,7 @@ export class HermesianSidebarView extends ItemView {
         path: content.path,
       }));
     if (request.toolCall.kind === "edit" || diffs.length > 0) {
-      const validation = validateSelectionEdit(runtime.activeEditScope, diffs);
+      const validation = validateSelectionEdit(this.editScopes.get(tabId), diffs);
       if (validation.allowed === false) {
         this.appendSystemMessage(`Blocked edit: ${validation.reason}`, true, tabId);
         this.controller?.completePermission(permissionId);
@@ -439,6 +432,16 @@ export class HermesianSidebarView extends ItemView {
     this.conversationTabsEl = shell.conversationTabsEl;
     this.messagesEl = shell.messagesEl;
     this.messageRenderer = new MessageRenderer(this.messagesEl);
+
+    const turnCallbacks: TurnCallbacks = {
+      onTurnComplete: (_tabId: string) => {
+        this.renderConversationTabs();
+        if (this.conversationWorkspace?.activeTabId === _tabId) {
+          this.updateControls(false);
+        }
+      },
+    };
+    this.turnManager = new TurnManager(this.messageRenderer, turnCallbacks);
 
     // Wire icons (needs Obsidian's setIcon)
     setIcon(shell.root.querySelector(".hermesian-logo")!, HERMESIAN_ICON_ID);
@@ -610,23 +613,14 @@ export class HermesianSidebarView extends ItemView {
     );
   }
 
-  private turnRuntime(tabId: string): ConversationTurnRuntime {
-    let runtime = this.turnRuntimes.get(tabId);
-    if (!runtime) {
-      runtime = {
-        assistantText: "",
-        busy: false,
-        toolEls: new Map<string, HTMLElement>(),
-      };
-      this.turnRuntimes.set(tabId, runtime);
-    }
-    return runtime;
+  private turnRuntime(tabId: string) {
+    return this.turnManager.ensure(tabId);
   }
 
   private isTabBusy(tabId: string): boolean {
     return (
       this.controller?.getSnapshot().tabOperations.get(tabId)?.prompt === "running" ||
-      this.turnRuntimes.get(tabId)?.busy === true ||
+      this.turnManager.isBusy(tabId) ||
       this.plugin.peekClient(tabId)?.isBusy === true
     );
   }
@@ -853,7 +847,7 @@ export class HermesianSidebarView extends ItemView {
       this.tabSelections.delete(tabId);
       this.pendingImages.delete(tabId);
       this.forgetConversationMessages(tabId);
-      this.turnRuntimes.delete(tabId);
+      this.turnManager.delete(tabId);
 
       const activeTabId = result.workspace.activeTabId;
       this.showConversationMessages(activeTabId);
@@ -1023,7 +1017,7 @@ export class HermesianSidebarView extends ItemView {
         return;
       }
       await this.renderHistorySession(session, result.items, true, tabId);
-      this.turnRuntime(tabId).activeEditScope = undefined;
+      this.editScopes.set(tabId, undefined);
       this.renderConversationTabs();
     } catch (error) {
       if (error instanceof ConversationControllerError && error.code === "session_reserved") {
@@ -1567,7 +1561,7 @@ export class HermesianSidebarView extends ItemView {
         ? buildDocumentPrompt(documentContext, request)
         : request;
     const runtime = this.turnRuntime(activeTab.id);
-    runtime.activeEditScope = selection ?? documentContext;
+    this.editScopes.set(activeTab.id, selection ?? documentContext);
     this.appendUserMessage(request, selection, documentContext, activeTab.id, pendingImages);
     this.composerEl.value = "";
     this.hideSlashMenu();
@@ -1604,7 +1598,7 @@ export class HermesianSidebarView extends ItemView {
           this.renderImageAttachmentBar();
         }
       }
-      runtime.activeEditScope = undefined;
+      this.editScopes.set(activeTab.id, undefined);
       await this.finishFailedTurn(activeTab.id);
     } finally {
       if (runtime.completionPromise) {
@@ -1638,7 +1632,7 @@ export class HermesianSidebarView extends ItemView {
       const result = await this.controller.restartConversation(tabId);
       this.conversationWorkspace = result.workspace;
       this.resetConversationView(tabId);
-      this.turnRuntime(tabId).activeEditScope = undefined;
+      this.editScopes.set(tabId, undefined);
       this.appendSystemMessage("New Hermes session started.", false, tabId);
       if (this.conversationWorkspace.activeTabId === tabId) {
         this.showConversationMessages(tabId);
@@ -1696,32 +1690,12 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private appendAssistantDelta(tabId: string, text: string): void {
-    const runtime = this.turnRuntime(tabId);
-    this.ensureTurnActivity(tabId);
-    if (!runtime.assistantContentEl) {
-      const message = runtime.activeTurnEl!.createDiv({
-        cls: "hermesian-message is-assistant",
-      });
-      runtime.assistantContentEl = message.createDiv({
-        cls: "hermesian-message-content is-streaming",
-      });
-    }
-    runtime.assistantText += text;
-    runtime.assistantContentEl.setText(runtime.assistantText);
+    this.turnManager.appendDelta(tabId, text);
     this.scrollToBottom(tabId);
   }
 
   private appendThoughtDelta(tabId: string, text: string): void {
-    const runtime = this.turnRuntime(tabId);
-    if (!runtime.thoughtContentEl) {
-      const details = this.ensureTurnActivity(tabId).createEl("details", {
-        cls: "hermesian-thought",
-      });
-      details.open = true;
-      details.createEl("summary", { text: "Thinking" });
-      runtime.thoughtContentEl = details.createEl("pre");
-    }
-    runtime.thoughtContentEl.textContent = `${runtime.thoughtContentEl.textContent ?? ""}${text}`;
+    this.turnManager.appendThought(tabId, text);
     this.scrollToBottom(tabId);
   }
 
@@ -1735,7 +1709,7 @@ export class HermesianSidebarView extends ItemView {
     if (!target || !text) {
       return;
     }
-    await this.renderMarkdown(target, text, runtime.activeEditScope?.filePath);
+    await this.renderMarkdown(target, text, this.editScopes.get(tabId)?.filePath);
     this.scrollToBottom(tabId);
   }
 
@@ -1808,81 +1782,28 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private ensureTurnActivity(tabId: string): HTMLElement {
-    const runtime = this.turnRuntime(tabId);
-    if (!runtime.activeTurnEl) {
-      runtime.activeTurnEl = this.messageContainer(tabId).createDiv({
-        cls: "hermesian-turn",
-      });
-    }
-    if (!runtime.turnActivityEl) {
-      runtime.turnActivityEl = runtime.activeTurnEl.createDiv({
-        cls: "hermesian-turn-activity",
-      });
-    }
-    return runtime.turnActivityEl;
+    return this.turnManager.ensureActivity(tabId);
   }
 
   private async finishTurn(tabId: string, reason: string): Promise<void> {
-    return this.completeTurn(tabId, async () => {
+    return this.turnManager.complete(tabId, async () => {
       await this.finalizeAssistantMessage(tabId);
       this.appendStopReason(tabId, reason);
     });
   }
 
   private async finishFailedTurn(tabId: string): Promise<void> {
-    return this.completeTurn(tabId, () => this.finalizeAssistantMessage(tabId));
-  }
-
-  private completeTurn(tabId: string, finalize: () => Promise<void>): Promise<void> {
-    const runtime = this.turnRuntime(tabId);
-    if (runtime.completionPromise) {
-      return runtime.completionPromise;
-    }
-    const completion = this.completeTurnInternal(tabId, finalize);
-    runtime.completionPromise = completion;
-    void completion.finally(() => {
-      if (runtime.completionPromise === completion) {
-        runtime.completionPromise = undefined;
-      }
-    });
-    return completion;
-  }
-
-  private async completeTurnInternal(
-    tabId: string,
-    finalize: () => Promise<void>,
-  ): Promise<void> {
-    const runtime = this.turnRuntime(tabId);
-    try {
-      await finalize();
-    } catch (error) {
-      new Notice(`Hermesian could not finalize the response: ${this.messageFor(error)}`);
-    } finally {
-      runtime.busy = false;
-      runtime.activeTurnEl = undefined;
-      runtime.turnActivityEl = undefined;
-      runtime.thoughtContentEl = undefined;
-      this.renderConversationTabs();
-      if (this.conversationWorkspace?.activeTabId === tabId) {
-        this.updateControls(false);
-      }
-    }
+    return this.turnManager.complete(tabId, () =>
+      this.finalizeAssistantMessage(tabId),
+    );
   }
 
   private resetStreamingMessage(tabId: string): void {
-    const runtime = this.turnRuntime(tabId);
-    runtime.assistantContentEl = undefined;
-    runtime.assistantText = "";
-    runtime.thoughtContentEl = undefined;
+    this.turnManager.resetStreaming(tabId);
   }
 
   private resetConversationView(tabId: string): void {
-    this.messageContainer(tabId).empty();
-    const runtime = this.turnRuntime(tabId);
-    runtime.toolEls.clear();
-    this.resetStreamingMessage(tabId);
-    runtime.activeTurnEl = undefined;
-    runtime.turnActivityEl = undefined;
+    this.turnManager.resetView(tabId);
     this.updateComposerPlaceholder();
   }
 
@@ -1971,7 +1892,7 @@ export class HermesianSidebarView extends ItemView {
     error = false,
     tabId = this.conversationWorkspace?.activeTabId,
   ): void {
-    const runtime = tabId ? this.turnRuntimes.get(tabId) : undefined;
+    const runtime = tabId ? this.turnManager.ensure(tabId) : undefined;
     const parent = tabId
       ? runtime?.activeTurnEl
         ? this.ensureTurnActivity(tabId)
