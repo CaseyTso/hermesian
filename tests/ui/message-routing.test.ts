@@ -366,3 +366,38 @@ describe("TurnManager", () => {
     });
   });
 });
+
+// ── Owner-scoping for Markdown/History rendering ───────────────
+
+describe("owner-scoped rendering", () => {
+  function setupOwned() {
+    const parent = document.createElement("div");
+    const messagesEl = parent.createDiv({ cls: "hermesian-messages" });
+    const renderer = new MessageRenderer(messagesEl as HTMLElement);
+    renderer.show("tab-A");
+    const turns = new TurnManager(renderer);
+    return { renderer, turns };
+  }
+
+  it("streaming deltas enter only the owner tab's container", () => {
+    const { turns, renderer } = setupOwned();
+    turns.appendDelta("tab-A", "Hello from A");
+    expect(renderer.containerFor("tab-A").textContent).toContain("Hello from A");
+
+    renderer.show("tab-B");
+    turns.appendDelta("tab-A", "More from A");
+    expect(renderer.containerFor("tab-A").textContent).toContain("More from A");
+    expect(renderer.containerFor("tab-B").textContent).not.toContain("Hello from A");
+  });
+
+  it("tab switch preserves turn DOM elements in cache", () => {
+    const { turns, renderer } = setupOwned();
+    turns.ensureActivity("tab-A");
+    turns.appendDelta("tab-A", "A-content");
+    renderer.show("tab-B");
+    turns.ensureActivity("tab-B");
+    turns.appendDelta("tab-B", "B-content");
+    renderer.show("tab-A");
+    expect(renderer.containerFor("tab-A").querySelector(".hermesian-turn")).not.toBeNull();
+  });
+});
