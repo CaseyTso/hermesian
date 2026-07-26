@@ -34,6 +34,9 @@ jobs:
       - name: Run tests
         run: npm run test
 
+      - name: Coverage
+        run: npm run test:coverage
+
       - name: Typecheck
         run: npm run typecheck
 
