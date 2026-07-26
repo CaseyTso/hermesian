@@ -23,7 +23,6 @@ import {
 } from "./conversation-controller";
 import {
   isActiveConversationSession,
-  shouldAutoScrollConversation,
   updateConversationTab,
   type PersistedConversationTab,
   type PersistedConversationWorkspace,
@@ -66,6 +65,9 @@ import {
   createSidebarShell,
   type SidebarShellCallbacks,
 } from "./ui/sidebar-shell";
+import {
+  MessageRenderer,
+} from "./ui/message-renderer";
 import {
   applyComposerState,
   createComposerView,
@@ -183,7 +185,7 @@ export class HermesianSidebarView extends ItemView {
   private pendingSelection: SelectionContext | undefined;
   private readonly permissions = new Map<string, PendingPermission>();
   private readonly loadedMessageTabIds = new Set<string>();
-  private readonly messageCaches = new Map<string, HTMLElement>();
+  private messageRenderer!: MessageRenderer;
   private readonly pendingImages = new Map<string, PastedImageAttachment[]>();
   private readonly turnRuntimes = new Map<string, ConversationTurnRuntime>();
   private reasoningButtonEl!: HTMLButtonElement;
@@ -196,7 +198,6 @@ export class HermesianSidebarView extends ItemView {
   private slashMenuIndex = 0;
   private slashMenuItems: SlashMenuItem[] = [];
   private statusEl!: HTMLElement;
-  private visibleMessagesTabId: string | undefined;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -437,6 +438,7 @@ export class HermesianSidebarView extends ItemView {
     this.historyButtonEl = shell.historyButtonEl;
     this.conversationTabsEl = shell.conversationTabsEl;
     this.messagesEl = shell.messagesEl;
+    this.messageRenderer = new MessageRenderer(this.messagesEl);
 
     // Wire icons (needs Obsidian's setIcon)
     setIcon(shell.root.querySelector(".hermesian-logo")!, HERMESIAN_ICON_ID);
@@ -685,35 +687,13 @@ export class HermesianSidebarView extends ItemView {
     return result;
   }
 
-  private ensureMessageCache(tabId: string): HTMLElement {
-    let cache = this.messageCaches.get(tabId);
-    if (!cache) {
-      cache = this.containerEl.ownerDocument.createElement("div");
-      this.messageCaches.set(tabId, cache);
-    }
-    return cache;
-  }
-
   private showConversationMessages(tabId: string): void {
-    if (!this.visibleMessagesTabId) {
-      this.visibleMessagesTabId = tabId;
-      return;
-    }
-    if (this.visibleMessagesTabId === tabId) {
-      return;
-    }
-
-    const visibleCache = this.ensureMessageCache(this.visibleMessagesTabId);
-    visibleCache.replaceChildren(...Array.from(this.messagesEl.childNodes));
-    const targetCache = this.ensureMessageCache(tabId);
-    this.messagesEl.replaceChildren(...Array.from(targetCache.childNodes));
-    this.visibleMessagesTabId = tabId;
-    this.scrollToBottom();
+    this.messageRenderer.show(tabId);
   }
 
   private forgetConversationMessages(tabId: string): void {
     this.loadedMessageTabIds.delete(tabId);
-    this.messageCaches.delete(tabId);
+    this.messageRenderer.forget(tabId);
   }
 
   private async revealActiveTurnForPermission(tabId: string): Promise<void> {
@@ -1824,9 +1804,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private messageContainer(tabId: string): HTMLElement {
-    return this.visibleMessagesTabId === tabId
-      ? this.messagesEl
-      : this.ensureMessageCache(tabId);
+    return this.messageRenderer.containerFor(tabId);
   }
 
   private ensureTurnActivity(tabId: string): HTMLElement {
@@ -2054,12 +2032,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private scrollToBottom(sourceTabId?: string): void {
-    window.requestAnimationFrame(() => {
-      if (!shouldAutoScrollConversation(this.visibleMessagesTabId, sourceTabId)) {
-        return;
-      }
-      this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
-    });
+    this.messageRenderer.scrollToBottom(sourceTabId);
   }
 
   private messageFor(error: unknown): string {
