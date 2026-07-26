@@ -35,6 +35,7 @@ import {
   type HermesianSettings,
 } from "./settings";
 import { TabClientRegistry } from "./tab-client-registry";
+import { assignAndPersistWithRollback } from "./workspace-persistence";
 import {
   HERMESIAN_VIEW_TYPE,
   HermesianSidebarView,
@@ -360,26 +361,57 @@ export default class HermesianPlugin extends Plugin {
 
   setConversationWorkspace(workspace: PersistedConversationWorkspace): void {
     this.conversationWorkspace = workspace;
+    this.scheduleConversationWorkspaceSave();
+  }
+
+  private scheduleConversationWorkspaceSave(): void {
     if (this.conversationWorkspaceSaveTimer !== undefined) {
       window.clearTimeout(this.conversationWorkspaceSaveTimer);
     }
     this.conversationWorkspaceSaveTimer = window.setTimeout(() => {
       this.conversationWorkspaceSaveTimer = undefined;
-      void this.savePluginData();
+      void this.savePluginData().catch(() => {
+        // best-effort background save; persistence failure is already
+        // surfaced synchronously by flushConversationWorkspace
+      });
     }, 250);
+  }
+
+  private hasPendingWorkspaceSave(): boolean {
+    return this.conversationWorkspaceSaveTimer !== undefined;
+  }
+
+  private clearPendingWorkspaceSave(): void {
+    if (this.conversationWorkspaceSaveTimer !== undefined) {
+      window.clearTimeout(this.conversationWorkspaceSaveTimer);
+      this.conversationWorkspaceSaveTimer = undefined;
+    }
   }
 
   async flushConversationWorkspace(
     workspace?: PersistedConversationWorkspace,
   ): Promise<void> {
-    if (workspace) {
-      this.conversationWorkspace = workspace;
+    const effective = workspace ?? this.conversationWorkspace;
+    const hadPendingSave = this.hasPendingWorkspaceSave();
+    if (!effective) {
+      return;
     }
-    if (this.conversationWorkspaceSaveTimer !== undefined) {
-      window.clearTimeout(this.conversationWorkspaceSaveTimer);
-      this.conversationWorkspaceSaveTimer = undefined;
+    this.clearPendingWorkspaceSave();
+    try {
+      await assignAndPersistWithRollback(
+        {
+          get: () => this.conversationWorkspace,
+          set: (value) => { this.conversationWorkspace = value; },
+          persist: () => this.savePluginData(),
+        },
+        effective,
+      );
+    } catch (error) {
+      if (hadPendingSave) {
+        this.scheduleConversationWorkspaceSave();
+      }
+      throw error;
     }
-    await this.savePluginData();
   }
 
   async saveSettingsAndReconnect(): Promise<void> {
