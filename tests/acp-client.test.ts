@@ -224,7 +224,8 @@ describe("HermesAcpClient late-response ownership", () => {
       acceptHooks: true,
       autoApproveVaultEdits: true,
       debugLogging: false,
-      hermesExecutable: "hermes",
+      // Catalog discovery must not depend on a locally installed Hermes CLI.
+      hermesExecutable: "/definitely/missing/hermes",
       profile: "default",
       reasoningEffort: "default" as const,
     };

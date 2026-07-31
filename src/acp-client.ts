@@ -995,7 +995,9 @@ export class HermesAcpClient {
     };
     this.emitSessionState();
 
-    void loadHermesModelCatalog(executable, profile).then(
+    // Catalog discovery is best-effort. Defer the call itself so synchronous
+    // launcher-resolution failures are handled by the rejection branch too.
+    void Promise.resolve().then(() => loadHermesModelCatalog(executable, profile)).then(
       (catalog) => {
         if (generation !== this.catalogGeneration) {
           return;
@@ -1026,7 +1028,7 @@ export class HermesAcpClient {
         }
       },
     );
-    void loadHermesSkillCatalog(executable, profile).then(
+    void Promise.resolve().then(() => loadHermesSkillCatalog(executable, profile)).then(
       (skills) => {
         if (generation === this.catalogGeneration) {
           this.updateSessionState({ skillCatalogLoading: false, skills });
