@@ -35,6 +35,7 @@ import {
   type HermesianSettings,
 } from "./settings";
 import { TabClientRegistry } from "./tab-client-registry";
+import { ModelSaveCoordinator } from "./model-save-coordinator";
 import { normalizeHiddenSwitchIds } from "./ui/model-picker-popover";
 import { assignAndPersistWithRollback } from "./workspace-persistence";
 import {
@@ -45,6 +46,27 @@ import type { MarkdownDocumentContext, ReasoningEffort } from "./types";
 
 export default class HermesianPlugin extends Plugin {
   settings: HermesianSettings = { ...DEFAULT_SETTINGS };
+
+  /**
+   * Serialized, generation-guarded persistence for hidden model switch ids.
+   * The newest user request is authoritative; stale saves that fail after a
+   * newer request arrived neither roll memory back nor report failure, and a
+   * stale success is followed by a re-persist of the newest candidate.
+   */
+  private readonly hiddenModelSaveCoordinator = new ModelSaveCoordinator({
+    initial: DEFAULT_SETTINGS.hiddenModelSwitchIds,
+    applyMemory: (value) => {
+      this.settings.hiddenModelSwitchIds = value;
+    },
+    persist: () => this.savePluginSettings(),
+    onError: (error) => {
+      new Notice(
+        `Hermesian could not save hidden models: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    },
+  });
 
   private readonly clients = new TabClientRegistry<HermesAcpClient>(
     (tabId, isCurrent) => {
@@ -323,27 +345,14 @@ export default class HermesianPlugin extends Plugin {
   /**
    * Unified persistence entry point for hidden model switch ids.
    *
-   * Normalizes the input, writes through the real plugin data path
-   * (`savePluginSettings` -> `saveData`), and rolls the in-memory list back
-   * when the write fails so the UI never shows a state the disk did not
-   * accept. It never touches the conversation workspace or Hermes
-   * connections.
+   * Delegates to a serialized, generation-guarded coordinator: only the
+   * newest request is authoritative, stale failures never roll back a newer
+   * success, and the write goes through the real plugin data path
+   * (`savePluginSettings` -> `saveData`). Never touches the conversation
+   * workspace or Hermes connections.
    */
   async saveHiddenModelSwitchIds(switchIds: string[]): Promise<void> {
-    const normalized = normalizeHiddenSwitchIds(switchIds);
-    const previous = this.settings.hiddenModelSwitchIds;
-    this.settings.hiddenModelSwitchIds = normalized;
-    try {
-      await this.savePluginSettings();
-    } catch (error) {
-      this.settings.hiddenModelSwitchIds = previous;
-      new Notice(
-        `Hermesian could not save hidden models: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      throw error;
-    }
+    return this.hiddenModelSaveCoordinator.save(switchIds);
   }
 
   getConnectionSettings(): Pick<
@@ -551,6 +560,7 @@ export default class HermesianPlugin extends Plugin {
     if (!isReasoningEffort(String(this.settings.reasoningEffort))) {
       this.settings.reasoningEffort = DEFAULT_SETTINGS.reasoningEffort;
     }
+    this.hiddenModelSaveCoordinator.reset(this.settings.hiddenModelSwitchIds);
   }
 
   private async savePluginData(): Promise<void> {
