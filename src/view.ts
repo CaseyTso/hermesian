@@ -1159,10 +1159,7 @@ export class HermesianSidebarView extends ItemView {
       onClose: () => {
         this.modelPicker = null;
       },
-      onSaveHidden: (switchIds) => {
-        this.plugin.settings.hiddenModelSwitchIds = switchIds;
-        void this.plugin.saveSettings();
-      },
+      onSaveHidden: (switchIds) => this.plugin.saveHiddenModelSwitchIds(switchIds),
     });
     this.modelPicker.open();
   }

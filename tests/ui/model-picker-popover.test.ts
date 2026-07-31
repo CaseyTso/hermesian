@@ -306,7 +306,47 @@ describe("HermesModelPickerPopover", () => {
       vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue(rect({ top: 100, bottom: 130 }));
       const { container } = openPopover();
       await sleep(30);
-      expect(container.style.maxHeight).toBe("120px");
+      // 100 - 8 (gap) - 8 (edge padding) = 84; never a 120px floor that would
+      // push the panel top above the viewport edge
+      expect(container.style.maxHeight).toBe("84px");
+    });
+
+    it("never places the panel top above the viewport when the anchor is near the top", async () => {
+      vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue(rect({ top: 40, bottom: 70 }));
+      const { container } = openPopover();
+      await sleep(30);
+      const maxHeight = Number.parseFloat(container.style.maxHeight);
+      const bottom = Number.parseFloat(container.style.bottom);
+      const top = 768 - bottom - maxHeight;
+      expect(maxHeight).toBe(24); // 40 - 8 - 8
+      expect(top).toBeGreaterThanOrEqual(0);
+      expect(container.style.maxHeight).not.toBe("120px");
+    });
+
+    it("clamps both side edges inside a 300px viewport", async () => {
+      vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue(rect({ left: 150, right: 350 }));
+      const { container } = openPopover({
+        getViewport: () => ({ height: 768, width: 300 }),
+      });
+      await sleep(30);
+      const left = Number.parseFloat(container.style.left);
+      const width = Number.parseFloat(container.style.width);
+      expect(left).toBeGreaterThanOrEqual(8);
+      expect(left + width).toBeLessThanOrEqual(300 - 8);
+      expect(left).toBe(52); // min(150, 300 - 240 - 8)
+    });
+
+    it("re-validates the top invariant after resize", async () => {
+      vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue(rect({ top: 100, bottom: 130 }));
+      const { container } = openPopover();
+      await sleep(30);
+      expect(container.style.maxHeight).toBe("84px");
+      vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue(rect({ top: 40, bottom: 70 }));
+      window.dispatchEvent(new Event("resize"));
+      const maxHeight = Number.parseFloat(container.style.maxHeight);
+      const bottom = Number.parseFloat(container.style.bottom);
+      expect(maxHeight).toBe(24);
+      expect(768 - bottom - maxHeight).toBeGreaterThanOrEqual(0);
     });
 
     it("repositions on window resize", async () => {
@@ -473,7 +513,54 @@ describe("HermesModelPickerPopover", () => {
       const miniBox = checkboxes.find((box) => box.value === "openai:gpt-4o-mini")!;
       miniBox.checked = true;
       miniBox.dispatchEvent(new Event("change", { bubbles: true }));
+      await sleep(0);
       expect(onSaveHidden).toHaveBeenCalledWith([]);
+    });
+
+    it("rolls the checkbox back when persistence fails", async () => {
+      const onSaveHidden = vi.fn().mockRejectedValue(new Error("disk full"));
+      const { container } = openPopover({ onSaveHidden });
+      await sleep(30);
+      (container.querySelector(".hermesian-model-popover-manage-button") as HTMLElement).click();
+      const checkboxes = [...container.querySelectorAll("input[type=checkbox]")] as HTMLInputElement[];
+      const gpt4oBox = checkboxes.find((box) => box.value === "openai:gpt-4o")!;
+      expect(gpt4oBox.checked).toBe(true);
+      gpt4oBox.checked = false;
+      gpt4oBox.dispatchEvent(new Event("change", { bubbles: true }));
+      await sleep(0);
+      expect(onSaveHidden).toHaveBeenCalledTimes(1);
+      // checkbox restored to the persisted (visible) state
+      expect(gpt4oBox.checked).toBe(true);
+      // internal list unchanged: back to select mode still shows gpt-4o normally
+      (container.querySelector(".hermesian-model-popover-back-button") as HTMLElement).click();
+      const rows = container.querySelectorAll(".hermesian-model-option");
+      expect([...rows].map((row) => row.textContent).join(" ")).toContain("GPT-4o");
+    });
+
+    it("disables all manage checkboxes while a save is pending and re-enables after", async () => {
+      let resolveSave!: (value: void) => void;
+      const onSaveHidden = vi
+        .fn()
+        .mockImplementation(() => new Promise<void>((resolve) => { resolveSave = resolve; }));
+      const { container } = openPopover({ onSaveHidden });
+      await sleep(30);
+      (container.querySelector(".hermesian-model-popover-manage-button") as HTMLElement).click();
+      const checkboxes = [...container.querySelectorAll("input[type=checkbox]")] as HTMLInputElement[];
+      const gpt4oBox = checkboxes.find((box) => box.value === "openai:gpt-4o")!;
+      const miniBox = checkboxes.find((box) => box.value === "openai:gpt-4o-mini")!;
+      gpt4oBox.checked = false;
+      gpt4oBox.dispatchEvent(new Event("change", { bubbles: true }));
+      expect(onSaveHidden).toHaveBeenCalledTimes(1);
+      expect(checkboxes.every((box) => box.disabled)).toBe(true);
+      // stale toggle while the save is still pending is ignored and rolled back
+      miniBox.checked = false;
+      miniBox.dispatchEvent(new Event("change", { bubbles: true }));
+      await sleep(0);
+      expect(onSaveHidden).toHaveBeenCalledTimes(1);
+      expect(miniBox.checked).toBe(true);
+      resolveSave();
+      await sleep(0);
+      expect(checkboxes.every((box) => !box.disabled)).toBe(true);
     });
   });
 });

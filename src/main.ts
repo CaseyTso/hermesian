@@ -320,6 +320,32 @@ export default class HermesianPlugin extends Plugin {
     await this.savePluginData();
   }
 
+  /**
+   * Unified persistence entry point for hidden model switch ids.
+   *
+   * Normalizes the input, writes through the real plugin data path
+   * (`savePluginSettings` -> `saveData`), and rolls the in-memory list back
+   * when the write fails so the UI never shows a state the disk did not
+   * accept. It never touches the conversation workspace or Hermes
+   * connections.
+   */
+  async saveHiddenModelSwitchIds(switchIds: string[]): Promise<void> {
+    const normalized = normalizeHiddenSwitchIds(switchIds);
+    const previous = this.settings.hiddenModelSwitchIds;
+    this.settings.hiddenModelSwitchIds = normalized;
+    try {
+      await this.savePluginSettings();
+    } catch (error) {
+      this.settings.hiddenModelSwitchIds = previous;
+      new Notice(
+        `Hermesian could not save hidden models: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      throw error;
+    }
+  }
+
   getConnectionSettings(): Pick<
     HermesianSettings,
     "acceptHooks" | "hermesExecutable" | "profile"

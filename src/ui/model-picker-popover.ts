@@ -95,7 +95,7 @@ export interface HermesModelPickerOptions {
   models: HermesModelOption[];
   onChoose: (model: HermesModelOption) => void;
   onClose?: () => void;
-  onSaveHidden: (switchIds: string[]) => void;
+  onSaveHidden: (switchIds: string[]) => void | Promise<void>;
   getViewport?: () => { height: number; width: number };
   /** Renders an icon into an element; Obsidian's setIcon is passed by the host. */
   iconRenderer?: (element: HTMLElement, icon: string) => void;
@@ -103,7 +103,6 @@ export interface HermesModelPickerOptions {
 
 const POPOVER_WIDTH_MIN = 240;
 const POPOVER_WIDTH_MAX = 420;
-const POPOVER_HEIGHT_MIN = 120;
 const POPOVER_HEIGHT_MAX = 480;
 const GAP_ABOVE_ANCHOR = 8;
 const EDGE_PADDING = 8;
@@ -135,6 +134,7 @@ export class HermesModelPickerPopover {
   private mode: "select" | "manage" = "select";
   private query = "";
   private activeIndex = -1;
+  private savingHidden = false;
   private renderedOptions: Array<{ el: HTMLElement; model: HermesModelOption }> = [];
   private isOpenFlag = false;
   private reducedMotionClassAdded = false;
@@ -336,6 +336,14 @@ export class HermesModelPickerPopover {
     }
   }
 
+  private setManageCheckboxesDisabled(disabled: boolean): void {
+    for (const checkbox of this.manageListEl.querySelectorAll<HTMLInputElement>(
+      "input[type=checkbox]",
+    )) {
+      checkbox.disabled = disabled;
+    }
+  }
+
   private choose(model: HermesModelOption): void {
     this.options.onChoose(model);
     this.detach();
@@ -449,15 +457,33 @@ export class HermesModelPickerPopover {
         checkbox.value = model.switchId;
         checkbox.checked = !this.hiddenSwitchIds.includes(model.switchId);
         checkbox.setAttribute("aria-label", `Show ${model.name}`);
-        checkbox.addEventListener("change", () => {
+        checkbox.addEventListener("change", async () => {
+          if (this.savingHidden) {
+            // A save is in flight; ignore the event and keep the checkbox in
+            // its persisted state so a stale toggle cannot be overwritten.
+            checkbox.checked = !checkbox.checked;
+            return;
+          }
           const hidden = new Set(this.hiddenSwitchIds);
           if (checkbox.checked) {
             hidden.delete(model.switchId);
           } else {
             hidden.add(model.switchId);
           }
-          this.hiddenSwitchIds = [...hidden];
-          this.options.onSaveHidden(this.hiddenSwitchIds);
+          const next = [...hidden];
+          this.savingHidden = true;
+          this.setManageCheckboxesDisabled(true);
+          try {
+            await this.options.onSaveHidden(next);
+            this.hiddenSwitchIds = next;
+          } catch {
+            // Persistence failed: the host shows a Notice and rolls its own
+            // list back; restore the checkbox to the persisted state.
+            checkbox.checked = !checkbox.checked;
+          } finally {
+            this.savingHidden = false;
+            this.setManageCheckboxesDisabled(false);
+          }
         });
         const copyEl = document.createElement("div");
         copyEl.className = "hermesian-model-manage-copy";
@@ -492,9 +518,13 @@ export class HermesModelPickerPopover {
       Math.min(rect.left, viewport.width - width - EDGE_PADDING),
     );
     const spaceAbove = rect.top - GAP_ABOVE_ANCHOR;
+    // Never exceed the space between the anchor and the viewport top, so the
+    // panel top stays inside the viewport even when the button sits near the
+    // top edge. There is intentionally no minimum height floor: a tiny anchor
+    // top must shrink the panel rather than push it out of bounds.
     const maxHeight = Math.min(
       POPOVER_HEIGHT_MAX,
-      Math.max(POPOVER_HEIGHT_MIN, spaceAbove),
+      Math.max(0, spaceAbove - EDGE_PADDING),
     );
     this.containerEl.style.width = `${width}px`;
     this.containerEl.style.left = `${left}px`;

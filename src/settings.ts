@@ -153,15 +153,20 @@ export class HermesianSettingTab extends PluginSettingTab {
           checkbox.checked = !this.plugin.settings.hiddenModelSwitchIds.includes(
             model.switchId,
           );
-          checkbox.addEventListener("change", () => {
+          checkbox.addEventListener("change", async () => {
             const hidden = new Set(this.plugin.settings.hiddenModelSwitchIds);
             if (checkbox.checked) {
               hidden.delete(model.switchId);
             } else {
               hidden.add(model.switchId);
             }
-            this.plugin.settings.hiddenModelSwitchIds = [...hidden];
-            void this.plugin.saveSettings();
+            try {
+              await this.plugin.saveHiddenModelSwitchIds([...hidden]);
+            } catch {
+              // The plugin entry point shows a Notice and rolls its in-memory
+              // list back; restore the checkbox to match the persisted state.
+              checkbox.checked = !checkbox.checked;
+            }
           });
           const copy = row.createDiv({ cls: "hermesian-hidden-model-copy" });
           copy.createDiv({ cls: "hermesian-hidden-model-name", text: model.name });
