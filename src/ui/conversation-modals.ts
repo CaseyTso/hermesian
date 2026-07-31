@@ -1,14 +1,6 @@
 import { type App, SuggestModal, setIcon } from "obsidian";
 
-import type {
-  HermesHistoryEntry,
-  HermesModelOption,
-  ReasoningEffort,
-} from "../types";
-import {
-  REASONING_EFFORTS,
-  reasoningEffortLabel,
-} from "../session-history";
+import type { HermesHistoryEntry, HermesModelOption } from "../types";
 
 export class HermesModelSuggestModal extends SuggestModal<HermesModelOption> {
   constructor(
@@ -90,38 +82,5 @@ export class HermesHistorySuggestModal extends SuggestModal<HermesHistoryEntry> 
 
   onChooseSuggestion(session: HermesHistoryEntry): void {
     this.choose(session);
-  }
-}
-
-export class HermesReasoningSuggestModal extends SuggestModal<ReasoningEffort> {
-  constructor(
-    app: App,
-    private readonly current: ReasoningEffort,
-    private readonly choose: (effort: ReasoningEffort) => void,
-  ) {
-    super(app);
-    this.setPlaceholder("Select thinking depth…");
-  }
-
-  getSuggestions(query: string): ReasoningEffort[] {
-    const normalized = query.trim().toLowerCase();
-    return normalized
-      ? REASONING_EFFORTS.filter((effort) =>
-          reasoningEffortLabel(effort).toLowerCase().includes(normalized),
-        )
-      : REASONING_EFFORTS;
-  }
-
-  renderSuggestion(effort: ReasoningEffort, element: HTMLElement): void {
-    const row = element.createDiv({ cls: "hermesian-reasoning-option" });
-    row.createSpan({ text: reasoningEffortLabel(effort) });
-    if (effort === this.current) {
-      const check = row.createSpan({ cls: "hermesian-reasoning-check" });
-      setIcon(check, "check");
-    }
-  }
-
-  onChooseSuggestion(effort: ReasoningEffort): void {
-    this.choose(effort);
   }
 }

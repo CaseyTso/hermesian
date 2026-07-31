@@ -53,11 +53,9 @@ import {
   validateSelectionEdit,
 } from "./selection-context";
 import { reasoningEffortLabel } from "./session-history";
-import {
-  HermesHistorySuggestModal,
-  HermesReasoningSuggestModal,
-} from "./ui/conversation-modals";
+import { HermesHistorySuggestModal } from "./ui/conversation-modals";
 import { HermesModelPickerPopover } from "./ui/model-picker-popover";
+import { HermesReasoningPickerPopover } from "./ui/reasoning-picker-popover";
 import {
   renderConversationTabsView,
   type ConversationTabsCallbacks,
@@ -193,6 +191,7 @@ export class HermesianSidebarView extends ItemView {
   private readonly pendingImages = new Map<string, PastedImageAttachment[]>();
   private reasoningButtonEl!: HTMLButtonElement;
   private reasoningLabelEl!: HTMLElement;
+  private reasoningPicker: HermesReasoningPickerPopover | null = null;
   private selectionBarEl!: HTMLElement;
   private sendButtonEl!: HTMLButtonElement;
   private slashMenuEl!: HTMLElement;
@@ -252,6 +251,8 @@ export class HermesianSidebarView extends ItemView {
   async onClose(): Promise<void> {
     this.modelPicker?.detach();
     this.modelPicker = null;
+    this.reasoningPicker?.detach();
+    this.reasoningPicker = null;
     this.startup?.close();
     this.startup = undefined;
     this.captureActiveConversationRuntime();
@@ -1141,6 +1142,7 @@ export class HermesianSidebarView extends ItemView {
       this.modelPicker.detach();
       return;
     }
+    this.reasoningPicker?.detach();
     const targetTabId = activeTab.id;
     let settled = false;
     this.modelPicker = new HermesModelPickerPopover({
@@ -1329,20 +1331,31 @@ export class HermesianSidebarView extends ItemView {
     if (!activeTab) {
       return;
     }
+    if (this.reasoningPicker) {
+      // Repeat click on the thinking button toggles the popover closed.
+      this.reasoningPicker.detach();
+      return;
+    }
+    this.modelPicker?.detach();
     const targetTabId = activeTab.id;
     let settled = false;
 
-    new HermesReasoningSuggestModal(
-      this.app,
-      this.plugin.getReasoningEffort(),
-      (effort) => {
+    this.reasoningPicker = new HermesReasoningPickerPopover({
+      anchorEl: this.reasoningButtonEl,
+      current: this.plugin.getReasoningEffort(),
+      iconRenderer: (element, icon) => setIcon(element, icon),
+      onChoose: (effort) => {
         if (settled) {
           return;
         }
         settled = true;
         void this.chooseReasoningEffort(targetTabId, effort);
       },
-    ).open();
+      onClose: () => {
+        this.reasoningPicker = null;
+      },
+    });
+    this.reasoningPicker.open();
   }
 
   private async chooseReasoningEffort(

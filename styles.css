@@ -740,17 +740,6 @@
   font-size: var(--font-ui-smaller);
 }
 
-.hermesian-reasoning-option {
-  align-items: center;
-  display: flex;
-  justify-content: space-between;
-}
-
-.hermesian-reasoning-check {
-  color: var(--interactive-accent);
-  display: inline-flex;
-}
-
 .hermesian-current-file {
   align-items: center;
   background: var(--background-primary);
@@ -1411,6 +1400,130 @@
   accent-color: var(--interactive-accent);
   flex: 0 0 auto;
   margin: 0;
+}
+
+/* ── Thinking depth picker popover ────────────────────────────────────── */
+
+.hermesian-reasoning-popover {
+  align-items: stretch;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--hermesian-radius-lg);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16), 0 12px 40px rgba(0, 0, 0, 0.14);
+  display: flex;
+  flex-direction: column;
+  font-size: var(--font-ui-small);
+  opacity: 0;
+  overflow: hidden;
+  position: fixed;
+  transform: translateY(4px);
+  transition:
+    opacity 160ms ease-out,
+    transform 160ms ease-out;
+  z-index: 1000;
+}
+
+.hermesian-reasoning-popover--open {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.hermesian-reduced-motion .hermesian-reasoning-popover {
+  transition: none;
+}
+
+.hermesian-reasoning-popover-header {
+  align-items: center;
+  border-bottom: 1px solid var(--background-modifier-border);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 8px;
+}
+
+.hermesian-reasoning-popover-title {
+  color: var(--text-muted);
+  flex: 1 1 auto;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  min-width: 0;
+  text-transform: uppercase;
+}
+
+.hermesian-reasoning-popover .clickable-icon:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--hermesian-accent);
+  outline: none;
+}
+
+.hermesian-reasoning-popover-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.hermesian-reasoning-popover-list {
+  padding: 4px 0 8px;
+}
+
+.hermesian-reasoning-option {
+  align-items: center;
+  border-radius: var(--hermesian-radius-sm);
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  margin: 0 6px;
+  padding: 6px 10px;
+}
+
+.hermesian-reasoning-option:hover,
+.hermesian-reasoning-option.is-active {
+  background: var(--hermesian-accent-soft);
+}
+
+.hermesian-reasoning-option.is-active {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hermesian-accent) 30%, transparent);
+}
+
+.hermesian-reasoning-option-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.hermesian-reasoning-option-name {
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermesian-reasoning-option-description {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermesian-reasoning-option-current {
+  background: var(--hermesian-accent-soft);
+  border-radius: 999px;
+  color: var(--hermesian-accent);
+  flex: 0 0 auto;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  padding: 1px 8px;
+}
+
+.hermesian-reasoning-option-check {
+  color: var(--interactive-accent);
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.hermesian-reasoning-option-check svg {
+  height: 14px;
+  width: 14px;
 }
 
 /* ── Settings: hidden models ─────────────────────────────────────────── */
