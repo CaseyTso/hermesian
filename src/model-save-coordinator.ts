@@ -15,22 +15,24 @@ export interface ModelSaveCoordinatorOptions {
 }
 
 /**
- * Serializes candidate persistence with generation-based ownership.
+ * Serializes candidate persistence with per-candidate ownership.
  *
- * Only the newest requested candidate is authoritative:
- * - candidates that have not started saving are coalesced away;
- * - a stale save that fails after a newer request arrived neither rolls back
- *   memory nor reports failure (the newer candidate persists next);
- * - a stale save that succeeds is followed by a re-persist of the newest
- *   candidate, so the disk always ends at the latest request.
- * The queue swallows per-run errors so a failed save never wedges later ones.
+ * Every `save()` captures its own immutable `{ value, generation }` task and
+ * executes it in queue order; there is no shared pending slot, so error
+ * attribution is unambiguous:
+ * - a successful candidate immediately becomes `committed`;
+ * - a failure of the *current newest* candidate rolls memory back to the last
+ *   successful candidate, reports through `onError` and rejects the caller;
+ * - a failure of a stale candidate (a newer request already exists) stays
+ *   silent and fulfills, because the newer task will persist next.
+ * The queue swallows per-task errors only to keep the chain alive; each
+ * caller still receives its own task's outcome.
  */
 export class ModelSaveCoordinator {
   private readonly applyMemory: (value: string[]) => void;
   private readonly persist: (value: string[]) => Promise<void>;
   private readonly onError: ((error: unknown) => void) | undefined;
   private chain: Promise<void> = Promise.resolve();
-  private pending: string[] | null = null;
   private committed: string[];
   private generation = 0;
 
@@ -47,15 +49,15 @@ export class ModelSaveCoordinator {
    */
   reset(initial: string[]): void {
     this.committed = normalizeHiddenSwitchIds(initial);
-    this.pending = null;
     this.generation += 1;
   }
 
   save(candidate: string[]): Promise<void> {
-    const value = normalizeHiddenSwitchIds(candidate);
-    const gen = ++this.generation;
-    this.pending = value;
-    const run = this.chain.then(() => this.flush(gen));
+    const task = {
+      value: normalizeHiddenSwitchIds(candidate),
+      generation: ++this.generation,
+    };
+    const run = this.chain.then(() => this.flush(task));
     this.chain = run.then(
       () => undefined,
       () => undefined,
@@ -63,27 +65,21 @@ export class ModelSaveCoordinator {
     return run;
   }
 
-  private async flush(gen: number): Promise<void> {
-    const value = this.pending;
-    this.pending = null;
-    if (value === null) {
-      // A newer task already consumed the pending candidate.
-      return;
-    }
+  private async flush(task: { value: string[]; generation: number }): Promise<void> {
     try {
-      this.applyMemory(value);
-      await this.persist(value);
-      this.committed = value;
+      this.applyMemory(task.value);
+      await this.persist(task.value);
+      this.committed = task.value;
     } catch (error) {
-      if (gen === this.generation) {
-        // This candidate is still the newest request: roll back to the last
+      if (task.generation === this.generation) {
+        // This task is still the newest request: roll back to the last
         // successfully persisted value and surface the failure.
         this.applyMemory(this.committed);
         this.onError?.(error);
         throw error;
       }
       // A stale candidate failed after a newer request was queued: stay
-      // silent — the newer candidate will persist next.
+      // silent — the newer task will persist next.
     }
   }
 }

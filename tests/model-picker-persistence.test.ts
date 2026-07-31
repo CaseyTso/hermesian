@@ -179,4 +179,35 @@ describe("hidden model persistence (real execution)", () => {
       "b",
     ]);
   });
+
+  it("three synchronous requests: the newest failure rejects, rolls back to the last success and survives restart", async () => {
+    const plugin = createPlugin();
+    await loadPlugin(plugin);
+    await plugin.saveHiddenModelSwitchIds(["base"]);
+    const calls: string[][] = [];
+    state.saveImpl = async (data) => {
+      const ids = (data as { hiddenModelSwitchIds: string[] }).hiddenModelSwitchIds;
+      calls.push(ids);
+      if (ids.join(",") === "a" || ids.join(",") === "a,b") {
+        state.data = data; // A and B really update the store
+      } else {
+        throw new Error("c fails"); // C fails
+      }
+    };
+    const a = plugin.saveHiddenModelSwitchIds(["a"]);
+    const b = plugin.saveHiddenModelSwitchIds(["a", "b"]);
+    const c = plugin.saveHiddenModelSwitchIds(["a", "b", "c"]);
+    await a;
+    await b;
+    await expect(c).rejects.toThrow("c fails");
+    expect(calls).toEqual([["a"], ["a", "b"], ["a", "b", "c"]]);
+    expect(
+      state.notices.filter((notice) => notice.includes("could not save hidden models")),
+    ).toHaveLength(1);
+    expect(plugin.settings.hiddenModelSwitchIds).toEqual(["a", "b"]);
+    // simulated restart: the disk state (B) is what a fresh instance loads
+    const second = createPlugin();
+    await loadPlugin(second);
+    expect(second.settings.hiddenModelSwitchIds).toEqual(["a", "b"]);
+  });
 });

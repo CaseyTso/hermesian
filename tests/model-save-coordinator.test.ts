@@ -134,4 +134,77 @@ describe("ModelSaveCoordinator", () => {
     await expect(h.saver.save(["pending"])).rejects.toThrow("disk full");
     expect(h.memory()).toEqual(["new"]);
   });
+
+  it("synchronous A/B/C all fail: only the newest rejects, exactly one onError, memory back to committed", async () => {
+    const h = makeHarness(["base"]);
+    h.persist.mockRejectedValue(new Error("disk"));
+    const a = h.saver.save(["a"]);
+    const b = h.saver.save(["a", "b"]);
+    const c = h.saver.save(["a", "b", "c"]);
+    await expect(a).resolves.toBeUndefined();
+    await expect(b).resolves.toBeUndefined();
+    await expect(c).rejects.toThrow("disk");
+    expect(h.persist).toHaveBeenCalledTimes(3);
+    expect(h.persist.mock.calls.map((call) => call[0])).toEqual([
+      ["a"],
+      ["a", "b"],
+      ["a", "b", "c"],
+    ]);
+    expect(h.memory()).toEqual(["base"]);
+    expect(h.errors).toHaveLength(1);
+  });
+
+  it("A and B succeed then C fails: C rejects, memory rolls back to B, write order A/B/C", async () => {
+    const h = makeHarness();
+    h.persist.mockResolvedValueOnce(undefined); // A
+    h.persist.mockResolvedValueOnce(undefined); // B
+    h.persist.mockRejectedValueOnce(new Error("boom")); // C
+    const a = h.saver.save(["a"]);
+    const b = h.saver.save(["a", "b"]);
+    const c = h.saver.save(["a", "b", "c"]);
+    await a;
+    await b;
+    await expect(c).rejects.toThrow("boom");
+    expect(h.persist.mock.calls.map((call) => call[0])).toEqual([
+      ["a"],
+      ["a", "b"],
+      ["a", "b", "c"],
+    ]);
+    expect(h.memory()).toEqual(["a", "b"]);
+  });
+
+  it("A and B fail then C succeeds: stale failures are silent and C wins", async () => {
+    const h = makeHarness(["base"]);
+    h.persist.mockRejectedValueOnce(new Error("a fails")); // A
+    h.persist.mockRejectedValueOnce(new Error("b fails")); // B
+    h.persist.mockResolvedValueOnce(undefined); // C
+    const a = h.saver.save(["a"]);
+    const b = h.saver.save(["a", "b"]);
+    const c = h.saver.save(["a", "b", "c"]);
+    await expect(a).resolves.toBeUndefined();
+    await expect(b).resolves.toBeUndefined();
+    await c;
+    expect(h.memory()).toEqual(["a", "b", "c"]);
+    expect(h.errors).toHaveLength(0);
+  });
+
+  it("the queue keeps working after a latest failure", async () => {
+    const h = makeHarness(["base"]);
+    h.persist.mockRejectedValueOnce(new Error("boom"));
+    await expect(h.saver.save(["x"])).rejects.toThrow("boom");
+    h.persist.mockResolvedValueOnce(undefined);
+    await h.saver.save(["d"]);
+    expect(h.memory()).toEqual(["d"]);
+  });
+
+  it("mutating the caller's array after save does not affect the write", async () => {
+    const h = makeHarness();
+    h.persist.mockResolvedValue(undefined);
+    const arr = ["a"];
+    const pending = h.saver.save(arr);
+    arr.push("mutated");
+    arr[0] = "changed";
+    await pending;
+    expect(h.persist.mock.calls[0][0]).toEqual(["a"]);
+  });
 });
