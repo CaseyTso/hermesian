@@ -430,9 +430,8 @@ export class ConversationController<TClient extends ConversationClient> {
     });
 
     try {
-      await client.connect();
-      this.assertCurrentOperation(tabId, client, token, generation);
-
+      // Resume path: load only — never create a throwaway session first.
+      // Fresh tabs without sessionId still use client.connect() elsewhere.
       let items: HermesHistoryItem[] | undefined;
       let started = false;
       let sessionId: string | undefined;
@@ -460,6 +459,8 @@ export class ConversationController<TClient extends ConversationClient> {
           changedWorkspace = true;
         }
       } else {
+        await client.connect();
+        this.assertCurrentOperation(tabId, client, token, generation);
         sessionId = client.sessionId;
         if (!sessionId) {
           throw this.controllerError("client_unavailable", "Hermes did not return a session ID", tabId);
@@ -522,20 +523,12 @@ export class ConversationController<TClient extends ConversationClient> {
         throw this.controllerError("workspace_conflict", "Owner tab was removed during hydration", tabId);
       }
       const client = this.dependencies.clients.acquireClient(tabId);
-      await client.connect();
-      const postConnectWorkspace = copyWorkspace(
-        this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
-      );
-      const postTab = postConnectWorkspace?.tabs.find((t) => t.id === tabId);
-      if (!postConnectWorkspace || !postTab) {
-        throw this.controllerError("workspace_conflict", "Owner tab was removed after connect", tabId);
-      }
       let items: HermesHistoryItem[] | undefined;
       let started = false;
       let sessionId: string | undefined;
       let replaced = false;
       let changedWorkspace = false;
-      let mergedWorkspace = postConnectWorkspace;
+      let mergedWorkspace = latestWorkspace;
       if (tab.sessionId) {
         try {
           items = await client.loadSessionHistory(tab.sessionId);
@@ -550,6 +543,15 @@ export class ConversationController<TClient extends ConversationClient> {
           replaced = true;
         }
       } else {
+        await client.connect();
+        const postConnectWorkspace = copyWorkspace(
+          this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+        );
+        const postTab = postConnectWorkspace?.tabs.find((t) => t.id === tabId);
+        if (!postConnectWorkspace || !postTab) {
+          throw this.controllerError("workspace_conflict", "Owner tab was removed after connect", tabId);
+        }
+        mergedWorkspace = postConnectWorkspace;
         sessionId = client.sessionId;
         if (!sessionId) {
           throw this.controllerError("client_unavailable", "Hermes did not return a session ID", tabId);
@@ -610,6 +612,26 @@ export class ConversationController<TClient extends ConversationClient> {
     this.assertCurrentTransition(generation);
     if (
       !this.operations.isCurrent(token) ||
+      !this.dependencies.clients.isCurrentClient(tabId, client)
+    ) {
+      throw this.controllerError("operation_stale", "Conversation operation is stale", tabId);
+    }
+  }
+
+  /**
+   * Per-tab ownership check for background work that must outlive global
+   * navigation transitions (e.g. addConversation while the user switches tabs).
+   */
+  private assertOwnedOperation(
+    tabId: string,
+    client: TClient,
+    token: ReturnType<ConversationOperationCoordinator["begin"]>,
+  ): void {
+    if (this.disposed) {
+      throw this.controllerError("cancelled", "Controller is shut down", tabId);
+    }
+    if (
+      !this.operations.isOwned(token) ||
       !this.dependencies.clients.isCurrentClient(tabId, client)
     ) {
       throw this.controllerError("operation_stale", "Conversation operation is stale", tabId);
@@ -678,7 +700,6 @@ export class ConversationController<TClient extends ConversationClient> {
   }
 
   private async addConversationInternal(): Promise<AddConversationResult> {
-    const generation = this.operations.getTransitionGeneration();
     const currentWorkspace = copyWorkspace(
       this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
     );
@@ -700,9 +721,9 @@ export class ConversationController<TClient extends ConversationClient> {
 
     try {
       await this.dependencies.workspace.setWorkspace(pendingWorkspace, { save: true });
-      this.assertCurrentOperation(tabId, client, token, generation);
+      this.assertOwnedOperation(tabId, client, token);
       await client.connect();
-      this.assertCurrentOperation(tabId, client, token, generation);
+      this.assertOwnedOperation(tabId, client, token);
       const sessionId = client.sessionId;
       if (!sessionId) {
         throw this.controllerError("client_unavailable", "Hermes did not return a new session ID", tabId);
@@ -720,12 +741,12 @@ export class ConversationController<TClient extends ConversationClient> {
         tabId,
         sessionId,
       );
-      this.assertCurrentOperation(tabId, client, token, generation);
+      this.assertOwnedOperation(tabId, client, token);
       await this.dependencies.workspace.setWorkspace(committedWorkspace, {
         flush: true,
         save: true,
       });
-      this.assertCurrentOperation(tabId, client, token, generation);
+      this.assertOwnedOperation(tabId, client, token);
       this.publishWorkspace(committedWorkspace);
       this.updateTabOperation(tabId, {
         connection: "ready",
@@ -735,14 +756,17 @@ export class ConversationController<TClient extends ConversationClient> {
       succeeded = true;
       return { sessionId, tabId, workspace: copyWorkspace(committedWorkspace)! };
     } catch (error) {
-      if (this.isCurrentTransition(generation) && this.operations.isCurrent(token)) {
+      if (this.operations.isOwned(token) || this.snapshot.tabOperations.has(tabId)) {
         this.updateTabOperation(tabId, { connection: "failed" });
       }
       throw error;
     } finally {
       this.operations.complete(token);
-      if (!succeeded && this.isCurrentTransition(generation)) {
-        this.updateTabOperation(tabId, { connection: "failed" });
+      if (!succeeded && this.snapshot.tabOperations.has(tabId)) {
+        const connection = this.snapshot.tabOperations.get(tabId)?.connection;
+        if (connection === "loading") {
+          this.updateTabOperation(tabId, { connection: "failed" });
+        }
       }
     }
   }
@@ -781,45 +805,13 @@ export class ConversationController<TClient extends ConversationClient> {
     }
 
     const tabOp = this.snapshot.tabOperations.get(tabId);
+    // Loading tabs keep their in-flight owner work. Switching only changes the
+    // active selection — never re-enter ensureClient / connect.
+    if (tabOp?.connection === "loading") {
+      return this.activateExistingTab(tabId, target.sessionId ?? undefined);
+    }
     if (tabOp?.connection === "ready" && tabOp.hasSession && target.sessionId) {
-      const generation = this.operations.beginTransition();
-      this.publish({ ...this.snapshot, transitionGeneration: generation });
-      this.assertCurrentTransition(generation);
-      const activeWorkspace = await this.enqueueWorkspaceCommit(async () => {
-        this.assertCurrentTransition(generation);
-        const latestWorkspace = copyWorkspace(
-          this.dependencies.workspace.getWorkspace() ?? workspace,
-        );
-        const latestTarget = latestWorkspace?.tabs.find((tab) => tab.id === tabId);
-        if (!latestWorkspace || !latestTarget) {
-          throw this.controllerError(
-            "workspace_conflict",
-            "Conversation tab was removed during switch",
-            tabId,
-          );
-        }
-        if (latestTarget.sessionId !== target.sessionId) {
-          throw this.controllerError(
-            "workspace_conflict",
-            "Conversation tab binding changed during switch",
-            tabId,
-          );
-        }
-        const nextWorkspace = activateConversationTab(latestWorkspace, tabId);
-        await this.dependencies.workspace.setWorkspace(nextWorkspace, {
-          flush: true,
-          save: true,
-        });
-        this.assertCurrentTransition(generation);
-        this.publishWorkspace(nextWorkspace);
-        return nextWorkspace;
-      });
-      return {
-        sessionId: target.sessionId,
-        started: false,
-        tabId,
-        workspace: copyWorkspace(activeWorkspace)!,
-      };
+      return this.activateExistingTab(tabId, target.sessionId);
     }
 
     const generation = this.operations.beginTransition();
@@ -855,6 +847,51 @@ export class ConversationController<TClient extends ConversationClient> {
       items: prepared.items,
       sessionId: prepared.sessionId,
       started: prepared.started,
+      tabId,
+      workspace: copyWorkspace(activeWorkspace)!,
+    };
+  }
+
+  private async activateExistingTab(
+    tabId: string,
+    sessionId: string | undefined,
+  ): Promise<SwitchConversationResult> {
+    const expectedSessionId = sessionId ?? null;
+    const generation = this.operations.beginTransition();
+    this.publish({ ...this.snapshot, transitionGeneration: generation });
+    this.assertCurrentTransition(generation);
+    const activeWorkspace = await this.enqueueWorkspaceCommit(async () => {
+      this.assertCurrentTransition(generation);
+      const latestWorkspace = copyWorkspace(
+        this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+      );
+      const latestTarget = latestWorkspace?.tabs.find((tab) => tab.id === tabId);
+      if (!latestWorkspace || !latestTarget) {
+        throw this.controllerError(
+          "workspace_conflict",
+          "Conversation tab was removed during switch",
+          tabId,
+        );
+      }
+      if ((latestTarget.sessionId ?? null) !== expectedSessionId) {
+        throw this.controllerError(
+          "workspace_conflict",
+          "Conversation tab binding changed during switch",
+          tabId,
+        );
+      }
+      const nextWorkspace = activateConversationTab(latestWorkspace, tabId);
+      await this.dependencies.workspace.setWorkspace(nextWorkspace, {
+        flush: true,
+        save: true,
+      });
+      this.assertCurrentTransition(generation);
+      this.publishWorkspace(nextWorkspace);
+      return nextWorkspace;
+    });
+    return {
+      sessionId: sessionId,
+      started: false,
       tabId,
       workspace: copyWorkspace(activeWorkspace)!,
     };
@@ -1155,9 +1192,6 @@ export class ConversationController<TClient extends ConversationClient> {
 
     try {
       await this.dependencies.workspace.setWorkspace(pendingWorkspace, { save: true });
-      this.assertCurrentOperation(newTabId, client, token, generation);
-
-      await client.connect();
       this.assertCurrentOperation(newTabId, client, token, generation);
 
       const items = await client.loadSessionHistory(sessionId);

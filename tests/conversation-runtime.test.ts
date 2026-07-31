@@ -290,6 +290,17 @@ describe("conversation runtime operation ownership", () => {
     expect(coordinator.isCurrent(tabB)).toBe(true);
   });
 
+  it("keeps tab ownership after a global transition generation bump", () => {
+    const coordinator = new ConversationOperationCoordinator();
+    const token = coordinator.begin("tab-loading");
+    coordinator.beginTransition();
+
+    expect(coordinator.isCurrent(token)).toBe(false);
+    expect(coordinator.isOwned(token)).toBe(true);
+    coordinator.complete(token);
+    expect(coordinator.isOwned(token)).toBe(false);
+  });
+
   it("invalidates a pending transition generation", () => {
     const coordinator = new ConversationOperationCoordinator();
     const firstGeneration = coordinator.beginTransition();

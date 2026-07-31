@@ -196,6 +196,21 @@ describe("ConversationController boundary", () => {
     expect(pluginSource.includes("canApplyConnectionSettings")).toBe(true);
   });
 
+  it("registers the model picker click handler only once", () => {
+    const viewSource = readFileSync(
+      new URL("../src/view.ts", import.meta.url),
+      "utf8",
+    );
+    const clickBindings = viewSource.match(
+      /modelButtonEl\.addEventListener\(\s*["']click["']/g,
+    );
+    expect(clickBindings).toHaveLength(1);
+    expect(viewSource).toMatch(/private openModelPicker\([\s\S]*?settled/);
+    expect(viewSource).not.toMatch(
+      /private async switchConversation\([\s\S]*?this\.isTabLoading\(tabId\)/,
+    );
+  });
+
   it("accepts fake clients whose protocol operations can be deferred", async () => {
     const connect = deferred<void>();
     const client = fakeClient("tab-a");
@@ -242,12 +257,102 @@ describe("ConversationController initialization", () => {
 
     const result = await controller.initialize();
 
-    expect(client.connect).toHaveBeenCalledOnce();
+    // Resume path: load only — never create a throwaway session via connect().
+    expect(client.connect).not.toHaveBeenCalled();
     expect(client.loadSessionHistory).toHaveBeenCalledWith("saved-session");
+    expect(client.newSession).not.toHaveBeenCalled();
     expect(result.items).toEqual(history);
     expect(result.sessionId).toBe("saved-session");
     expect(result.tabId).toBe("tab-a");
     expect(controller.getSnapshot().initializing).toBe(false);
+  });
+
+  it("does not call connect before load when restoring a persisted session", async () => {
+    const order: string[] = [];
+    const client = fakeClient("tab-a");
+    client.connect = vi.fn(async () => {
+      order.push("connect");
+    });
+    client.loadSessionHistory = vi.fn(async (sessionId: string) => {
+      order.push("load");
+      client.sessionId = sessionId;
+      return [{ kind: "user" as const, text: "hi" }];
+    });
+    client.newSession = vi.fn(async () => {
+      order.push("new");
+    });
+    const controller = new ConversationController(
+      dependencies(createConversationWorkspace("tab-a", "persisted-session"), client),
+    );
+
+    await controller.initialize();
+    expect(order).toEqual(["load"]);
+  });
+
+  it("uses connect exactly once for a fresh tab without sessionId", async () => {
+    const client = fakeClient("tab-new");
+    client.sessionId = undefined;
+    client.connect = vi.fn(async () => {
+      client.sessionId = "fresh-session";
+    });
+    client.loadSessionHistory = vi.fn(async () => []);
+    client.newSession = vi.fn(async () => undefined);
+    const deps = dependencies(undefined, client);
+    const controller = new ConversationController(deps);
+
+    const result = await controller.initialize();
+    expect(client.connect).toHaveBeenCalledOnce();
+    expect(client.loadSessionHistory).not.toHaveBeenCalled();
+    expect(client.newSession).not.toHaveBeenCalled();
+    expect(result.sessionId).toBe("fresh-session");
+    expect(result.started).toBe(true);
+  });
+
+  it("falls back to exactly one newSession when persisted load fails", async () => {
+    const order: string[] = [];
+    const client = fakeClient("tab-a");
+    client.connect = vi.fn(async () => {
+      order.push("connect");
+    });
+    client.loadSessionHistory = vi.fn(async () => {
+      order.push("load");
+      throw new Error("gone");
+    });
+    client.newSession = vi.fn(async () => {
+      order.push("new");
+      client.sessionId = "replacement-only";
+    });
+    const controller = new ConversationController(
+      dependencies(createConversationWorkspace("tab-a", "missing-session"), client),
+    );
+    const result = await controller.initialize();
+    expect(order).toEqual(["load", "new"]);
+    expect(client.connect).not.toHaveBeenCalled();
+    expect(client.newSession).toHaveBeenCalledOnce();
+    expect(result.sessionId).toBe("replacement-only");
+    expect(result.replaced).toBe(true);
+  });
+
+  it("reverse: restoring connect-before-load would reintroduce a throwaway session", async () => {
+    // Guard against regressions that call connect() on persisted tabs.
+    // If someone reintroduces connect()+load, this order assertion must go red.
+    const order: string[] = [];
+    const client = fakeClient("tab-a");
+    client.connect = vi.fn(async () => {
+      order.push("connect");
+      client.sessionId = "throwaway";
+    });
+    client.loadSessionHistory = vi.fn(async (sessionId: string) => {
+      order.push("load");
+      client.sessionId = sessionId;
+      return [];
+    });
+    const controller = new ConversationController(
+      dependencies(createConversationWorkspace("tab-a", "saved"), client),
+    );
+    await controller.initialize();
+    expect(order).not.toContain("connect");
+    expect(order[0]).toBe("load");
   });
 
   it("replaces a saved session only when the ACP load fails", async () => {
@@ -349,14 +454,15 @@ describe("ConversationController initialization", () => {
 
     await controller.initialize();
 
-    // Only active tab A connected/loaded during startup
-    expect(first.connect).toHaveBeenCalledOnce();
+    // Only active tab A loaded during startup (no throwaway connect/new).
+    expect(first.connect).not.toHaveBeenCalled();
     expect(first.loadSessionHistory).toHaveBeenCalledWith("session-a");
     expect(second.connect).not.toHaveBeenCalled();
+    expect(second.loadSessionHistory).not.toHaveBeenCalled();
 
-    // Switch to B — must hydrate lazily
+    // Switch to B — must hydrate lazily via load only.
     const result = await controller.switchConversation("tab-b");
-    expect(second.connect).toHaveBeenCalledOnce();
+    expect(second.connect).not.toHaveBeenCalled();
     expect(second.loadSessionHistory).toHaveBeenCalledWith("session-b");
     expect(result.items).toEqual(historyB);
     expect(controller.getSnapshot().tabOperations.get("tab-b")?.connection).toBe("ready");
@@ -474,14 +580,19 @@ describe("ConversationController add", () => {
       () => "new-tab",
     );
 
+    const started = performance.now();
     const adding = controller.addConversation();
     const snapshot = controller.getSnapshot();
+    const visibleMs = performance.now() - started;
+    expect(visibleMs).toBeLessThan(100);
     expect(snapshot.workspace?.tabs.at(-1)).toMatchObject({
       id: "new-tab",
       sessionId: null,
     });
     expect(snapshot.workspace?.activeTabId).toBe("new-tab");
     expect(snapshot.tabOperations.get("new-tab")?.connection).toBe("loading");
+    expect(snapshot.controls.aggregate.tabNavigation).toBe(true);
+    expect(snapshot.controls.active.composer).toBe(true);
     await Promise.resolve();
     expect(added.connect).toHaveBeenCalledOnce();
 
@@ -489,6 +600,32 @@ describe("ConversationController add", () => {
     const result = await adding;
     expect(result).toMatchObject({ sessionId: "new-tab-session", tabId: "new-tab" });
     expect(controller.getSnapshot().tabOperations.get("new-tab")?.connection).toBe("ready");
+  });
+
+  it("publishes a pending tab within 100ms even when connect never resolves", async () => {
+    const connect = deferred<void>();
+    const added = fakeClient("slow-tab");
+    added.connect = vi.fn(() => connect.promise);
+    const { controller } = await readyController(
+      new Map([["slow-tab", added]]),
+      () => "slow-tab",
+    );
+
+    const started = performance.now();
+    void controller.addConversation();
+    // Spin microtasks briefly without awaiting connect.
+    await Promise.resolve();
+    await Promise.resolve();
+    const elapsed = performance.now() - started;
+    const snap = controller.getSnapshot();
+    expect(elapsed).toBeLessThan(100);
+    expect(snap.workspace?.activeTabId).toBe("slow-tab");
+    expect(snap.workspace?.tabs.some((tab) => tab.id === "slow-tab" && tab.sessionId === null)).toBe(
+      true,
+    );
+    expect(snap.tabOperations.get("slow-tab")?.connection).toBe("loading");
+    expect(added.connect).toHaveBeenCalledOnce();
+    // Leave the deferred unresolved on purpose — tab must already be usable in UI terms.
   });
 
   it("keeps concurrent adds isolated and commits by stable tab ID", async () => {
@@ -546,6 +683,90 @@ describe("ConversationController add", () => {
     const result = await adding;
     expect(result.tabId).toBe("new-tab");
     expect(result.workspace.activeTabId).toBe("base");
+  });
+
+  it("keeps an in-flight add alive when switching away and back to the loading tab", async () => {
+    const connect = deferred<void>();
+    const added = fakeClient("new-tab");
+    added.connect = vi.fn(() => connect.promise);
+    const { controller, deps } = await readyController(
+      new Map([["new-tab", added]]),
+      () => "new-tab",
+    );
+
+    const adding = controller.addConversation();
+    expect(controller.getSnapshot().tabOperations.get("new-tab")?.connection).toBe("loading");
+    await Promise.resolve();
+    expect(added.connect).toHaveBeenCalledOnce();
+
+    // Switch to already-ready base while new-tab is still connecting.
+    const switchAway = await controller.switchConversation("base");
+    expect(switchAway.workspace.activeTabId).toBe("base");
+    expect(controller.getSnapshot().tabOperations.get("new-tab")?.connection).toBe("loading");
+
+    // Click the still-loading tab — must become active without a second connect.
+    const switchBack = await controller.switchConversation("new-tab");
+    expect(switchBack.workspace.activeTabId).toBe("new-tab");
+    expect(added.connect).toHaveBeenCalledOnce();
+    expect(controller.getSnapshot().tabOperations.get("new-tab")?.connection).toBe("loading");
+
+    connect.resolve();
+    const result = await adding;
+    expect(result).toMatchObject({ sessionId: "new-tab-session", tabId: "new-tab" });
+    expect(controller.getSnapshot().tabOperations.get("new-tab")).toMatchObject({
+      connection: "ready",
+      hasSession: true,
+    });
+    expect(deps.workspace.getWorkspace()?.tabs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "new-tab", sessionId: "new-tab-session" }),
+      ]),
+    );
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("new-tab");
+  });
+
+  it("marks a failed add as failed so the loading spinner can clear", async () => {
+    const connect = deferred<void>();
+    const added = fakeClient("new-tab");
+    added.connect = vi.fn(() => connect.promise);
+    const { controller } = await readyController(
+      new Map([["new-tab", added]]),
+      () => "new-tab",
+    );
+
+    const adding = controller.addConversation();
+    await Promise.resolve();
+    await controller.switchConversation("base");
+    connect.reject(new Error("connect exploded"));
+
+    await expect(adding).rejects.toThrow("connect exploded");
+    expect(controller.getSnapshot().tabOperations.get("new-tab")?.connection).toBe("failed");
+  });
+
+  it("does not reclaim a removed loading tab after connect finishes", async () => {
+    const connect = deferred<void>();
+    const added = fakeClient("new-tab");
+    added.connect = vi.fn(() => connect.promise);
+    const { controller, deps } = await readyController(
+      new Map([["new-tab", added]]),
+      () => "new-tab",
+    );
+
+    const adding = controller.addConversation();
+    await Promise.resolve();
+    await controller.switchConversation("base");
+
+    const pending = deps.workspace.getWorkspace()!;
+    deps.workspace.setWorkspace({
+      ...pending,
+      activeTabId: "base",
+      tabs: pending.tabs.filter((tab) => tab.id !== "new-tab"),
+    });
+    // Keep runtime map entry so failure path can still mark failed if ownership survives.
+    connect.resolve();
+
+    await expect(adding).rejects.toMatchObject({ code: "workspace_conflict" });
+    expect(deps.workspace.getWorkspace()?.tabs.some((tab) => tab.id === "new-tab")).toBe(false);
   });
 
   it("keeps a failed pending tab visible and marks its connection failed", async () => {
@@ -633,7 +854,7 @@ describe("ConversationController switch", () => {
     const result = await controller.switchConversation("base");
 
     expect(result).toMatchObject({ tabId: "base", sessionId: "base-session" });
-    expect(clients.get("base")!.connect).toHaveBeenCalledOnce();
+    expect(clients.get("base")!.connect).not.toHaveBeenCalled();
     expect(clients.get("base")!.loadSessionHistory).toHaveBeenCalledOnce();
   });
 
@@ -653,7 +874,10 @@ describe("ConversationController switch", () => {
         }),
       ),
     };
-    clients.get("tab-b")!.connect = vi.fn(async () => {
+    clients.get("tab-b")!.loadSessionHistory = vi.fn(async () => {
+      throw new Error("connection unavailable");
+    });
+    clients.get("tab-b")!.newSession = vi.fn(async () => {
       throw new Error("connection unavailable");
     });
 
@@ -1658,6 +1882,7 @@ describe("ConversationController history and restart", () => {
     const clientB = fakeClient("tab-b");
     clientB.sessionId = "tab-b-session";
     const connectSpy = vi.spyOn(clientB, "connect");
+    const loadSpy = vi.spyOn(clientB, "loadSessionHistory");
     const { controller } = await readySessionController(
       workspace,
       new Map([
@@ -1666,18 +1891,20 @@ describe("ConversationController history and restart", () => {
       ]),
     );
 
-    // First switch — must lazily hydrate
+    // First switch — must lazily hydrate via load only.
     const result = await controller.switchConversation("tab-b");
     expect(result.tabId).toBe("tab-b");
     expect(result.started).toBe(false);
     expect(result.workspace.activeTabId).toBe("tab-b");
-    expect(connectSpy).toHaveBeenCalledOnce();
+    expect(connectSpy).not.toHaveBeenCalled();
+    expect(loadSpy).toHaveBeenCalledOnce();
 
-    // Switch back to base, then back to tab-b — no repeat connect
+    // Switch back to base, then back to tab-b — no repeat load
     await controller.switchConversation("base");
-    connectSpy.mockClear();
+    loadSpy.mockClear();
     await controller.switchConversation("tab-b");
     expect(connectSpy).not.toHaveBeenCalled();
+    expect(loadSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -1741,15 +1968,15 @@ describe("ConversationController openHistorySession", () => {
     const clients = new Map([["tab-a", fakeClient("tab-a")]]);
     const { controller, deps } = await readySessionController(workspace, clients);
 
-    // Simulate a client that fails on connect
+    // Simulate a client that fails on load (resume path no longer calls connect first).
     const failingClient = fakeClient("failing");
-    failingClient.connect = vi.fn(() => Promise.reject(new Error("connect failed")));
+    failingClient.loadSessionHistory = vi.fn(() => Promise.reject(new Error("load failed")));
     const acquireSpy = vi.fn(() => failingClient);
     deps.clients.acquireClient = acquireSpy;
     deps.clients.isCurrentClient = vi.fn(() => true);
 
     await expect(controller.openHistorySession("doomed-session")).rejects.toThrow(
-      "connect failed",
+      "load failed",
     );
 
     // Workspace must be restored to original
@@ -2100,7 +2327,19 @@ describe("ConversationController ensureConversationReady", () => {
 
   it("creates a new session for a deferred owner", async () => {
     const { controller, deps } = await readyHydrationController("ready");
-    // Force main to deferred state
+    // Force main to deferred state without a session id.
+    deps.workspace.setWorkspace({
+      activeTabId: "main",
+      nextLabel: 2,
+      tabs: [{
+        draft: "",
+        id: "main",
+        includeCurrentDocumentContext: true,
+        label: 1,
+        sessionId: null,
+      }],
+      version: 2 as const,
+    });
     controller["publish"]({
       ...controller.getSnapshot(),
       tabOperations: new Map(controller.getSnapshot().tabOperations).set(
@@ -2114,6 +2353,7 @@ describe("ConversationController ensureConversationReady", () => {
           sessionOperation: "idle" as const,
         }),
       ),
+      workspace: deps.workspace.getWorkspace(),
     });
     const injected = fakeClient("fresh");
     injected.sessionId = undefined;
@@ -2123,6 +2363,7 @@ describe("ConversationController ensureConversationReady", () => {
     const result = await controller.ensureConversationReady("main");
     expect(result.tabId).toBe("main");
     expect(result.sessionId).toBe("created-session");
+    expect(injected.connect).toHaveBeenCalledOnce();
     // Workspace should reflect the new session binding
     const ws = deps.workspace.getWorkspace()!;
     const tab = ws.tabs.find((t) => t.id === "main");
@@ -2155,7 +2396,7 @@ describe("ConversationController ensureConversationReady", () => {
     history.resolve([{ content: "hi", timestamp: "2024-01-01T00:00:00Z" } as unknown as HermesHistoryItem]);
     const result = await p;
     expect(result.items).toHaveLength(1);
-    expect(target.connect).toHaveBeenCalled();
+    expect(target.connect).not.toHaveBeenCalled();
     expect(target.loadSessionHistory).toHaveBeenCalledWith("main-session");
   });
 

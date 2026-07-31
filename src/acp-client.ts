@@ -178,6 +178,7 @@ export class HermesAcpClient {
   private connectPromise: Promise<void> | undefined;
   private connection: acp.ClientConnection | undefined;
   private context: acp.ClientContext | undefined;
+  private transportPromise: Promise<void> | undefined;
   private historyCapture:
     | { sessionId: string; updates: acp.SessionUpdate[] }
     | undefined;
@@ -215,12 +216,12 @@ export class HermesAcpClient {
     return this.imagePromptSupported;
   }
 
+  get isTransportReady(): boolean {
+    return Boolean(this.connection && !this.connection.signal.aborted && this.context);
+  }
+
   get isConnected(): boolean {
-    return Boolean(
-      this.connection &&
-        !this.connection.signal.aborted &&
-        (this.activeSession || this.resumedSessionId),
-    );
+    return Boolean(this.isTransportReady && (this.activeSession || this.resumedSessionId));
   }
 
   get sessionId(): string | undefined {
@@ -247,6 +248,81 @@ export class HermesAcpClient {
     };
   }
 
+  /**
+   * After an await, ensure this client still owns the same lifecycle before
+   * committing session/state/UI side effects. Disconnect bumps generation and
+   * clears connection/context; abnormal transport abort flips signal.aborted.
+   * Either path makes late responses cancelled/stale.
+   */
+  private assertLifecycleOwned(
+    generation: number,
+    connection: acp.ClientConnection | undefined,
+    context: acp.ClientContext | undefined,
+  ): void {
+    if (
+      generation !== this.lifecycleGeneration ||
+      this.intentionalShutdown ||
+      !connection ||
+      !context ||
+      this.connection !== connection ||
+      this.context !== context ||
+      connection.signal.aborted
+    ) {
+      throw new Error("Hermes ACP operation was cancelled (stale lifecycle)");
+    }
+  }
+
+  /**
+   * Unified abnormal/normal transport close commit. Only the *current*
+   * connection for the current generation may clear session/state and emit
+   * disconnected — stale closes from prior reconnects are no-ops.
+   */
+  private handleConnectionClosed(
+    connection: acp.ClientConnection,
+    generation: number,
+    detail?: string,
+  ): void {
+    if (
+      generation !== this.lifecycleGeneration ||
+      this.connection !== connection ||
+      this.intentionalShutdown
+    ) {
+      return;
+    }
+    this.catalogGeneration += 1;
+    this.activeSession?.dispose();
+    this.activeSession = undefined;
+    this.resumedSessionId = undefined;
+    this.historyCapture = undefined;
+    this.sessionOperation = undefined;
+    this.busy = false;
+    this.imagePromptSupported = false;
+    // Drop transport ownership so late awaits fail assertLifecycleOwned even
+    // if signal.aborted was not observed on the captured connection object.
+    if (this.connection === connection) {
+      this.connection = undefined;
+      this.context = undefined;
+    }
+    this.resetSessionState();
+    this.emit({
+      type: "status",
+      status: "disconnected",
+      detail: detail || "Hermes ACP connection closed",
+    });
+  }
+
+  private captureLifecycle(): {
+    connection: acp.ClientConnection | undefined;
+    context: acp.ClientContext | undefined;
+    generation: number;
+  } {
+    return {
+      connection: this.connection,
+      context: this.context,
+      generation: this.lifecycleGeneration,
+    };
+  }
+
   onSessionState(listener: SessionStateListener): () => void {
     this.sessionStateListeners.add(listener);
     listener(this.copySessionState());
@@ -255,6 +331,43 @@ export class HermesAcpClient {
     };
   }
 
+  /**
+   * Ensure the ACP child + initialize handshake are ready.
+   * Does NOT create a session — callers must startFreshSession or loadSessionHistory.
+   */
+  async ensureTransport(): Promise<void> {
+    if (this.isTransportReady) {
+      return;
+    }
+    if (this.transportPromise) {
+      return this.transportPromise;
+    }
+    if (this.connectPromise) {
+      // A full connect may be establishing transport; wait, then re-check.
+      try {
+        await this.connectPromise;
+      } catch {
+        // Fall through and try transport alone.
+      }
+      if (this.isTransportReady) {
+        return;
+      }
+    }
+
+    const generation = this.lifecycleGeneration;
+    const transportPromise = this.ensureTransportInternal(generation).finally(() => {
+      if (this.transportPromise === transportPromise) {
+        this.transportPromise = undefined;
+      }
+    });
+    this.transportPromise = transportPromise;
+    return transportPromise;
+  }
+
+  /**
+   * Fresh path: transport + session/new.
+   * Resume path should call loadSessionHistory instead (transport + session/load only).
+   */
   async connect(): Promise<void> {
     if (this.isConnected) {
       return;
@@ -263,8 +376,13 @@ export class HermesAcpClient {
       return this.connectPromise;
     }
 
-    const generation = this.lifecycleGeneration;
-    const connectPromise = this.connectInternal(generation).finally(() => {
+    const connectPromise = (async () => {
+      await this.ensureTransport();
+      if (this.isConnected) {
+        return;
+      }
+      await this.startFreshSession();
+    })().finally(() => {
       if (this.connectPromise === connectPromise) {
         this.connectPromise = undefined;
       }
@@ -273,7 +391,7 @@ export class HermesAcpClient {
     return connectPromise;
   }
 
-  private async connectInternal(generation: number): Promise<void> {
+  private async ensureTransportInternal(generation: number): Promise<void> {
     this.#logger.debug("client.connect.start", { generation });
     this.intentionalShutdown = false;
     this.emit({ type: "status", status: "connecting", detail: "Starting Hermes ACP…" });
@@ -345,21 +463,11 @@ export class HermesAcpClient {
     this.context = connection.agent;
 
     void connection.closed.then(() => {
-      if (
-        generation === this.lifecycleGeneration &&
-        this.connection === connection &&
-        !this.intentionalShutdown
-      ) {
-        this.catalogGeneration += 1;
-        this.activeSession = undefined;
-        this.resumedSessionId = undefined;
-        this.resetSessionState();
-        this.emit({
-          type: "status",
-          status: "disconnected",
-          detail: childProcess.stderrTail().trim() || "Hermes ACP connection closed",
-        });
-      }
+      this.handleConnectionClosed(
+        connection,
+        generation,
+        childProcess.stderrTail().trim() || "Hermes ACP connection closed",
+      );
     });
 
     try {
@@ -382,7 +490,44 @@ export class HermesAcpClient {
       if (generation !== this.lifecycleGeneration || this.connection !== connection) {
         throw new Error("Hermes ACP connection attempt was cancelled");
       }
+      this.#logger.debug("client.connect.ready", { generation });
+    } catch (error) {
+      if (generation === this.lifecycleGeneration) {
+        await this.disconnect();
+        this.emit({ type: "status", status: "error", detail: errorMessage(error) });
+      } else {
+        connection.close();
+        childProcess.terminate({ graceMs: 500 }).catch(() => {});
+      }
+      throw error;
+    }
+  }
 
+  private async startFreshSession(): Promise<void> {
+    if (!this.context || !this.isTransportReady) {
+      throw new Error("Hermes ACP context is unavailable");
+    }
+    const generation = this.lifecycleGeneration;
+    const connection = this.connection;
+    const childProcess = this.#acpProcess;
+    const settings = this.options.settings();
+    const executable = resolveHermesExecutable(settings.hermesExecutable);
+
+    const startupFailure = childProcess
+      ? childProcess.waitForExit().then((exit) => {
+          if (!this.intentionalShutdown && generation === this.lifecycleGeneration) {
+            const details = childProcess.stderrTail().trim();
+            throw new Error(
+              `Hermes ACP exited during session/new (code=${String(exit.code)}, signal=${String(exit.signal)})${
+                details ? `: ${details}` : ""
+              }`,
+            );
+          }
+          return new Promise<never>(() => {});
+        })
+      : new Promise<never>(() => {});
+
+    try {
       const sessionStart = this.context.buildSession(this.options.vaultPath).start();
       const activeSession = await Promise.race([
         withTimeout(sessionStart, STARTUP_TIMEOUT_MS, "Hermes ACP session/new"),
@@ -408,9 +553,6 @@ export class HermesAcpClient {
       if (generation === this.lifecycleGeneration) {
         await this.disconnect();
         this.emit({ type: "status", status: "error", detail: errorMessage(error) });
-      } else {
-        connection.close();
-        childProcess.terminate({ graceMs: 500 }).catch(() => {});
       }
       throw error;
     }
@@ -422,16 +564,30 @@ export class HermesAcpClient {
       "Cannot create a new session while Hermes is responding",
     );
     try {
-      await this.connect();
+      await this.ensureTransport();
       this.activeSession?.dispose();
+      this.activeSession = undefined;
+      this.resumedSessionId = undefined;
       if (!this.context) {
         throw new Error("Hermes ACP context is unavailable");
       }
-      this.activeSession = await withTimeout(
+      const lifecycle = this.captureLifecycle();
+      const activeSession = await withTimeout(
         this.context.buildSession(this.options.vaultPath).start(),
         STARTUP_TIMEOUT_MS,
         "Hermes ACP session/new",
       );
+      try {
+        this.assertLifecycleOwned(
+          lifecycle.generation,
+          lifecycle.connection,
+          lifecycle.context,
+        );
+      } catch (error) {
+        activeSession.dispose();
+        throw error;
+      }
+      this.activeSession = activeSession;
       this.resumedSessionId = undefined;
       const settings = this.options.settings();
       this.initializeSessionState(
@@ -451,7 +607,7 @@ export class HermesAcpClient {
   }
 
   async listSessions(): Promise<HermesHistoryEntry[]> {
-    await this.connect();
+    await this.ensureTransport();
     const context = this.context;
     if (!context) {
       throw new Error("Hermes ACP context is unavailable");
@@ -496,10 +652,12 @@ export class HermesAcpClient {
       "Cannot load conversation history while Hermes is responding",
     );
     try {
-      await this.connect();
+      // Resume path: transport + session/load only. Never session/new first.
+      await this.ensureTransport();
       if (!this.context) {
         throw new Error("Hermes ACP context is unavailable");
       }
+      const lifecycle = this.captureLifecycle();
       const capture = { sessionId, updates: [] as acp.SessionUpdate[] };
       this.historyCapture = capture;
       try {
@@ -511,6 +669,11 @@ export class HermesAcpClient {
           }),
           FINITE_OPERATION_TIMEOUT_MS,
           "Hermes ACP session/load",
+        );
+        this.assertLifecycleOwned(
+          lifecycle.generation,
+          lifecycle.connection,
+          lifecycle.context,
         );
         this.activeSession?.dispose();
         this.activeSession = undefined;
@@ -555,9 +718,16 @@ export class HermesAcpClient {
       "model",
       "Cannot switch models while Hermes is responding",
     );
+    const lifecycleBeforeBusy = this.captureLifecycle();
     this.updateSessionState({ switchingModel: true });
     try {
       await this.connect();
+      const lifecycle = this.captureLifecycle();
+      this.assertLifecycleOwned(
+        lifecycle.generation,
+        lifecycle.connection,
+        lifecycle.context,
+      );
       const sessionId = this.sessionId;
       if (!this.context || !sessionId) {
         throw new Error("Hermes ACP session is unavailable");
@@ -576,6 +746,11 @@ export class HermesAcpClient {
         FINITE_OPERATION_TIMEOUT_MS,
         "Hermes ACP session/set_model",
       );
+      this.assertLifecycleOwned(
+        lifecycle.generation,
+        lifecycle.connection,
+        lifecycle.context,
+      );
       if (response === null) {
         throw new Error("Hermes rejected the model switch");
       }
@@ -584,7 +759,14 @@ export class HermesAcpClient {
         currentModel: model,
       });
     } finally {
-      this.updateSessionState({ switchingModel: false });
+      // Only touch session state when this lifecycle still owns the client.
+      // After disconnect, resetSessionState already cleared switchingModel.
+      if (
+        lifecycleBeforeBusy.generation === this.lifecycleGeneration &&
+        !this.intentionalShutdown
+      ) {
+        this.updateSessionState({ switchingModel: false });
+      }
       releaseOperation();
     }
   }
@@ -659,6 +841,7 @@ export class HermesAcpClient {
   async disconnect(): Promise<void> {
     this.lifecycleGeneration += 1;
     this.connectPromise = undefined;
+    this.transportPromise = undefined;
     this.intentionalShutdown = true;
     this.busy = false;
     this.imagePromptSupported = false;

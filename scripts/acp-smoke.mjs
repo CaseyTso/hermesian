@@ -228,15 +228,34 @@ try {
   ) {
     throw new Error("Hermes did not advertise a valid ACP model state");
   }
+
+  // Optional: switch to a specific model id (e.g. custom:botcf-grok:grok-4.5).
+  // Default path still uses currentModelId so existing smoke stays unchanged.
+  const requestedModelId = (process.env.HERMESIAN_ACP_MODEL_ID || "").trim();
+  const targetModelId = requestedModelId || modelState.currentModelId;
+  if (requestedModelId) {
+    const known = modelState.availableModels.some(
+      (model) => model.modelId === requestedModelId,
+    );
+    if (!known) {
+      throw new Error(
+        `Requested model ${JSON.stringify(requestedModelId)} is not in ACP availableModels: ${modelState.availableModels
+          .map((model) => model.modelId)
+          .join(", ")}`,
+      );
+    }
+  }
   const setModelResponse = await timeout(
     context.request("session/set_model", {
-      modelId: modelState.currentModelId,
+      modelId: targetModelId,
       sessionId: session.sessionId,
     }),
     "session/set_model",
   );
   if (setModelResponse === null) {
-    throw new Error("Hermes rejected session/set_model for the current model");
+    throw new Error(
+      `Hermes rejected session/set_model for ${JSON.stringify(targetModelId)}`,
+    );
   }
 
   const response = await runPrompt(
@@ -346,6 +365,7 @@ try {
         models: {
           available: modelState.availableModels.length,
           current: modelState.currentModelId,
+          requested: targetModelId,
           setModel: true,
         },
         protocolVersion: initialized.protocolVersion,

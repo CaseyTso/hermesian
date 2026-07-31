@@ -2,21 +2,52 @@ import { describe, expect, it } from "vitest";
 
 import {
   contextUsageLevel,
+  contextUsagePercent,
   formatContextUsage,
   mergeModelCatalogs,
   modelSwitchId,
   normalizeAcpModelState,
 } from "../src/session-state";
 
-describe("modelSwitchId", () => {
+describe("modelSwitchId (provider catalog / raw model ids)", () => {
   it("does not duplicate an existing provider prefix", () => {
     expect(modelSwitchId("openai-codex", "openai-codex:gpt-5.5")).toBe(
       "openai-codex:gpt-5.5",
     );
   });
+
+  it("prefixes bare model ids with the provider", () => {
+    expect(modelSwitchId("openai-codex", "gpt-5.5")).toBe("openai-codex:gpt-5.5");
+  });
+
+  it("returns the model id unchanged when provider is empty", () => {
+    expect(modelSwitchId("", "custom:botcf-grok:grok-4.5")).toBe(
+      "custom:botcf-grok:grok-4.5",
+    );
+    expect(modelSwitchId("", "qwen3.5:397b")).toBe("qwen3.5:397b");
+  });
+
+  it("prefixes colon-bearing raw catalog ids with their owning provider", () => {
+    // Ollama Cloud tags and OpenRouter free variants are raw model ids, not ACP choices.
+    expect(modelSwitchId("ollama-cloud", "qwen3.5:397b")).toBe(
+      "ollama-cloud:qwen3.5:397b",
+    );
+    expect(modelSwitchId("openrouter", "nvidia/nemotron-3-super-120b-a12b:free")).toBe(
+      "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
+    );
+    expect(modelSwitchId("openrouter", "anthropic/claude-sonnet-4")).toBe(
+      "openrouter:anthropic/claude-sonnet-4",
+    );
+  });
+
+  it("builds custom provider switch ids from bare catalog model ids", () => {
+    expect(modelSwitchId("custom:botcf-grok", "grok-4.5")).toBe(
+      "custom:botcf-grok:grok-4.5",
+    );
+  });
 });
 
-describe("normalizeAcpModelState", () => {
+describe("normalizeAcpModelState (ACP choice ids)", () => {
   it("normalizes valid models and ignores malformed entries", () => {
     const result = normalizeAcpModelState(
       {
@@ -44,9 +75,78 @@ describe("normalizeAcpModelState", () => {
     expect(result.current?.modelId).toBe("gpt-5.5");
   });
 
+  it("passes ACP choice ids through verbatim for set_model", () => {
+    const result = normalizeAcpModelState(
+      {
+        currentModelId: "custom:botcf-grok:grok-4.5",
+        availableModels: [
+          {
+            modelId: "custom:botcf-grok:grok-4.5",
+            name: "grok-4.5",
+            description: "BotCF Grok",
+          },
+          // Duplicate choice id — second entry must be skipped by switchId.
+          {
+            modelId: "custom:botcf-grok:grok-4.5",
+            name: "grok-4.5 duplicate",
+          },
+          {
+            modelId: "ollama-cloud:qwen3.5:397b",
+            name: "qwen3.5:397b",
+          },
+          {
+            modelId: "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
+            name: "nemotron free",
+          },
+          { modelId: "minimax-m3", name: "minimax-m3" },
+          { modelId: "custom:local:qwen", name: "qwen" },
+          { modelId: "custom:orphan", name: "orphan" },
+        ],
+      },
+      // Current session provider must not re-wrap foreign choice ids.
+      "openai-codex",
+      "OpenAI Codex",
+    );
+
+    expect(result.models.map((model) => model.switchId)).toEqual([
+      "custom:botcf-grok:grok-4.5",
+      "ollama-cloud:qwen3.5:397b",
+      "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
+      "openai-codex:minimax-m3",
+      "custom:local:qwen",
+      "custom:orphan",
+    ]);
+    expect(result.current).toMatchObject({
+      modelId: "custom:botcf-grok:grok-4.5",
+      providerId: "custom:botcf-grok",
+      providerName: "custom:botcf-grok",
+      switchId: "custom:botcf-grok:grok-4.5",
+    });
+    expect(result.models[1]).toMatchObject({
+      modelId: "ollama-cloud:qwen3.5:397b",
+      providerId: "ollama-cloud",
+      switchId: "ollama-cloud:qwen3.5:397b",
+    });
+    expect(result.models[2]).toMatchObject({
+      modelId: "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
+      providerId: "openrouter",
+      switchId: "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
+    });
+    expect(result.models[3]).toMatchObject({
+      modelId: "minimax-m3",
+      providerId: "openai-codex",
+      providerName: "OpenAI Codex",
+      switchId: "openai-codex:minimax-m3",
+    });
+  });
+
   it("returns an empty result for a malformed payload", () => {
     expect(normalizeAcpModelState({ availableModels: "bad" }, "current", "Current"))
       .toEqual({ models: [], current: undefined });
+    expect(normalizeAcpModelState(null, "current", "Current")).toEqual({
+      models: [],
+      current: undefined,
+    });
   });
 });
 
@@ -99,18 +199,82 @@ describe("mergeModelCatalogs", () => {
       "openai-codex:gpt-5.5",
     ]);
   });
-});
 
-describe("formatContextUsage", () => {
-  it("formats Hermes estimated usage and percentage", () => {
-    expect(formatContextUsage({ used: 18_432, size: 262_144 })).toBe(
-      "≈18.4k / 262k · 7%",
+  it("merges colon-bearing catalog models with ACP choices without rewriting BotCF", () => {
+    const acp = normalizeAcpModelState(
+      {
+        currentModelId: "custom:botcf-grok:grok-4.5",
+        availableModels: [
+          { modelId: "custom:botcf-grok:grok-4.5", name: "grok-4.5" },
+          { modelId: "openai-codex:gpt-5.5", name: "gpt-5.5" },
+        ],
+      },
+      "openai-codex",
+      "OpenAI Codex",
     );
-  });
+    const catalogModels = [
+      {
+        description: "Ollama tag",
+        modelId: "qwen3.5:397b",
+        name: "qwen3.5:397b",
+        providerId: "ollama-cloud",
+        providerName: "Ollama Cloud",
+        switchId: modelSwitchId("ollama-cloud", "qwen3.5:397b"),
+      },
+      {
+        description: "",
+        modelId: "nvidia/nemotron-3-super-120b-a12b:free",
+        name: "nemotron free",
+        providerId: "openrouter",
+        providerName: "OpenRouter",
+        switchId: modelSwitchId(
+          "openrouter",
+          "nvidia/nemotron-3-super-120b-a12b:free",
+        ),
+      },
+      {
+        description: "",
+        modelId: "custom:botcf-grok:grok-4.5",
+        name: "grok-4.5",
+        providerId: "custom:botcf-grok",
+        providerName: "custom:botcf-grok",
+        // Directory should not invent a second encoding for an already-qualified id
+        // that happens to be listed under a provider row; ACP choice wins on merge.
+        switchId: "custom:botcf-grok:grok-4.5",
+      },
+    ];
 
-  it("does not invent usage for invalid data", () => {
-    expect(formatContextUsage(undefined)).toBe("Context —");
-    expect(formatContextUsage({ used: 10, size: 0 })).toBe("Context —");
+    const merged = mergeModelCatalogs(acp.models, {
+      currentProviderId: "openai-codex",
+      providers: [
+        {
+          id: "ollama-cloud",
+          label: "Ollama Cloud",
+          models: [catalogModels[0]],
+        },
+        {
+          id: "openrouter",
+          label: "OpenRouter",
+          models: [catalogModels[1]],
+        },
+        {
+          id: "custom:botcf-grok",
+          label: "BotCF Grok",
+          models: [catalogModels[2]],
+        },
+      ],
+    });
+
+    expect(merged.map((model) => model.switchId)).toEqual([
+      "ollama-cloud:qwen3.5:397b",
+      "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
+      "custom:botcf-grok:grok-4.5",
+      "openai-codex:gpt-5.5",
+    ]);
+    expect(acp.current?.switchId).toBe("custom:botcf-grok:grok-4.5");
+    expect(
+      merged.find((model) => model.switchId === acp.current?.switchId)?.modelId,
+    ).toBe("custom:botcf-grok:grok-4.5");
   });
 });
 
@@ -119,5 +283,31 @@ describe("contextUsageLevel", () => {
     expect(contextUsageLevel({ used: 69, size: 100 })).toBe("normal");
     expect(contextUsageLevel({ used: 70, size: 100 })).toBe("warning");
     expect(contextUsageLevel({ used: 90, size: 100 })).toBe("danger");
+    expect(contextUsageLevel(undefined)).toBe("normal");
+  });
+});
+
+describe("contextUsagePercent", () => {
+  it("clamps valid usage and returns 0 for invalid data", () => {
+    expect(contextUsagePercent({ used: 25, size: 100 })).toBe(25);
+    expect(contextUsagePercent({ used: 150, size: 100 })).toBe(100);
+    expect(contextUsagePercent(undefined)).toBe(0);
+    expect(contextUsagePercent({ used: 10, size: 0 })).toBe(0);
+  });
+});
+
+describe("formatContextUsage", () => {
+  it("formats Hermes estimated usage and percentage", () => {
+    expect(formatContextUsage({ used: 18_432, size: 262_144 })).toBe(
+      "≈18.4k / 262k · 7%",
+    );
+    expect(formatContextUsage({ used: 500, size: 1000 })).toBe(
+      "≈500 / 1k · 50%",
+    );
+  });
+
+  it("does not invent usage for invalid data", () => {
+    expect(formatContextUsage(undefined)).toBe("Context —");
+    expect(formatContextUsage({ used: 10, size: 0 })).toBe("Context —");
   });
 });

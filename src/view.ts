@@ -95,6 +95,7 @@ import {
   type SelectionContext,
 } from "./types";
 import { HermesAcpClient, type PermissionRequest } from "./acp-client";
+import { ViewStartupCoordinator } from "./view-startup";
 
 export const HERMESIAN_VIEW_TYPE = "hermesian-sidebar";
 
@@ -193,6 +194,8 @@ export class HermesianSidebarView extends ItemView {
   private slashMenuIndex = 0;
   private slashMenuItems: SlashMenuItem[] = [];
   private statusEl!: HTMLElement;
+  private startup: ViewStartupCoordinator | undefined;
+  private startupStatusClickBound = false;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -217,21 +220,28 @@ export class HermesianSidebarView extends ItemView {
     this.renderShell();
     this.updateControls(true, false);
     this.plugin.attachView(this);
-    this.controller = new ConversationController(
-      this.plugin.getConversationControllerDependencies(),
-    );
-    this.controllerUnsubscribe = this.controller.subscribe((snapshot) => {
-      this.handleControllerSnapshot(snapshot);
+    this.bindStartupStatusRetry();
+    this.ensureConversationController();
+    this.startup = new ViewStartupCoordinator({
+      isLayoutReady: () => this.app.workspace.layoutReady,
+      whenLayoutReady: (callback) => {
+        this.app.workspace.onLayoutReady(callback);
+      },
+      startInitialization: () => this.startBackgroundInitialization(),
+      onFailure: (error) => {
+        this.handleStartupFailure(error);
+      },
+      onStatus: (status, detail) => {
+        this.applyStartupStatus(status, detail);
+      },
     });
-    try {
-      const result = await this.controller.initialize();
-      await this.initializeConversationWorkspace(result);
-    } catch (error) {
-      new Notice(`Hermesian connection failed: ${this.messageFor(error)}`);
-    }
+    // Must return immediately so Obsidian layout restore is never blocked on ACP.
+    this.startup.begin();
   }
 
   async onClose(): Promise<void> {
+    this.startup?.close();
+    this.startup = undefined;
     this.captureActiveConversationRuntime();
     await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
     for (const [permissionId, permission] of this.permissions) {
@@ -559,12 +569,6 @@ export class HermesianSidebarView extends ItemView {
       renderedSelection = "";
       void this.plugin.captureAndAttachSelection(source, selectedText);
     });
-
-    this.modelButtonEl.addEventListener("click", () => this.openModelPicker());
-    this.renderReasoningButton();
-    this.reasoningButtonEl.addEventListener("click", () => {
-      void this.openReasoningPicker();
-    });
   }
 
   private async initializeConversationWorkspace(
@@ -593,6 +597,116 @@ export class HermesianSidebarView extends ItemView {
 
     this.restoreActiveConversationRuntime();
     this.renderConversationTabs();
+  }
+
+  private ensureConversationController(): void {
+    if (this.controller) {
+      return;
+    }
+    this.controller = new ConversationController(
+      this.plugin.getConversationControllerDependencies(),
+    );
+    this.controllerUnsubscribe = this.controller.subscribe((snapshot) => {
+      this.handleControllerSnapshot(snapshot);
+    });
+  }
+
+  private async startBackgroundInitialization(): Promise<void> {
+    if (this.startup?.isClosed()) {
+      return;
+    }
+    this.ensureConversationController();
+    if (!this.controller) {
+      throw new Error("Conversation controller is unavailable");
+    }
+    const result = await this.controller.initialize();
+    if (this.startup?.isClosed()) {
+      return;
+    }
+    await this.initializeConversationWorkspace(result);
+  }
+
+  private handleStartupFailure(error: unknown): void {
+    if (this.startup?.isClosed()) {
+      return;
+    }
+    const message = this.messageFor(error);
+    new Notice(`Hermesian connection failed: ${message}`);
+    this.appendSystemMessage(
+      `Connection failed: ${message}. Click the status badge to retry.`,
+      true,
+    );
+    this.updateControls(false);
+  }
+
+  private applyStartupStatus(
+    status: "connecting" | "ready" | "error" | "disconnected",
+    detail?: string,
+  ): void {
+    if (!this.statusEl || this.startup?.isClosed()) {
+      return;
+    }
+    if (status === "connecting") {
+      this.statusEl.setText("Connecting…");
+      this.statusEl.dataset.status = "connecting";
+      this.statusEl.setAttribute("aria-label", detail ?? "Connecting to Hermes");
+      this.statusEl.classList.add("is-clickable");
+      this.statusEl.title = "Connecting to Hermes";
+      return;
+    }
+    if (status === "error") {
+      this.statusEl.setText("Retry connection");
+      this.statusEl.dataset.status = "error";
+      this.statusEl.setAttribute(
+        "aria-label",
+        detail ? `Connection error: ${detail}. Click to retry.` : "Connection error. Click to retry.",
+      );
+      this.statusEl.classList.add("is-clickable");
+      this.statusEl.title = "Click to retry Hermes connection";
+      return;
+    }
+    if (status === "ready") {
+      // Live ACP status events will refine this; keep a non-blocking default.
+      if (this.statusEl.dataset.status === "connecting") {
+        this.statusEl.setText("Connected");
+        this.statusEl.dataset.status = "connected";
+        this.statusEl.setAttribute("aria-label", "Connected");
+      }
+      this.statusEl.classList.remove("is-clickable");
+      this.statusEl.title = "";
+      return;
+    }
+    this.statusEl.setText("Disconnected");
+    this.statusEl.dataset.status = "disconnected";
+    this.statusEl.setAttribute("aria-label", detail ?? "Disconnected");
+  }
+
+  private bindStartupStatusRetry(): void {
+    if (this.startupStatusClickBound || !this.statusEl) {
+      return;
+    }
+    this.startupStatusClickBound = true;
+    this.statusEl.addEventListener("click", () => {
+      if (this.startup?.getPhase() !== "failed") {
+        return;
+      }
+      void this.prepareStartupRetry().then(() => {
+        if (!this.startup || this.startup.isClosed()) {
+          return;
+        }
+        this.applyStartupStatus("connecting");
+        this.startup.retry();
+      });
+    });
+  }
+
+  private async prepareStartupRetry(): Promise<void> {
+    // controller.initialize() caches the first promise; rebuild after failure.
+    this.controllerUnsubscribe?.();
+    this.controllerUnsubscribe = undefined;
+    await this.controller?.shutdown();
+    this.controller = undefined;
+    this.ensureConversationController();
   }
 
   private handleControllerSnapshot(
@@ -938,8 +1052,7 @@ export class HermesianSidebarView extends ItemView {
     if (
       !this.controller ||
       !this.controlAvailability().tabNavigation ||
-      this.isTabClosing(tabId) ||
-      this.isTabLoading(tabId)
+      this.isTabClosing(tabId)
     ) {
       return;
     }
@@ -954,8 +1067,8 @@ export class HermesianSidebarView extends ItemView {
           this.startConversationHydration(tabId);
           return;
         }
-        if (tabOp?.connection === "ready") {
-          return; // already active and ready
+        if (tabOp?.connection === "ready" || tabOp?.connection === "loading") {
+          return; // already active (ready or still initializing)
         }
       }
       const result = await this.controller.switchConversation(tabId);
@@ -999,12 +1112,18 @@ export class HermesianSidebarView extends ItemView {
     if (!activeTab || this.modelButtonEl.disabled || state.models.length === 0) {
       return;
     }
+    const targetTabId = activeTab.id;
+    let settled = false;
     new HermesModelSuggestModal(
       this.app,
       state.models,
       state.currentModel?.switchId,
       (model) => {
-        void this.chooseModel(activeTab.id, model);
+        if (settled) {
+          return;
+        }
+        settled = true;
+        void this.chooseModel(targetTabId, model);
       },
     ).open();
   }

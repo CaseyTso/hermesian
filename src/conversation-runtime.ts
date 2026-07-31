@@ -280,6 +280,15 @@ export class ConversationOperationCoordinator {
     );
   }
 
+  /**
+   * Tab-owned liveness: true while this token still owns the tab, even if a
+   * global navigation transition bumped `generation`. Used for background
+   * initialization (add / hydrate) that must survive switching away and back.
+   */
+  isOwned(token: ConversationOperationToken): boolean {
+    return this.currentOperations.get(token.tabId) === token;
+  }
+
   beginTransition(): number {
     return ++this.generation;
   }

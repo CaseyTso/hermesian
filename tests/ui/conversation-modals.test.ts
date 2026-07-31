@@ -78,6 +78,18 @@ describe("HermesModelSuggestModal", () => {
     expect(modal.getSuggestions("openai")[0].name).toBe("GPT-4o");
     expect(modal.getSuggestions("nonexistent")).toHaveLength(0);
   });
+
+  it("does not call choose when closed without selection", () => {
+    const choose = vi.fn();
+    const modal = new HermesModelSuggestModal(
+      { vault: { getName: () => "test" } } as any,
+      [fakeModelOption()],
+      undefined,
+      choose,
+    );
+    modal.close();
+    expect(choose).not.toHaveBeenCalled();
+  });
 });
 
 describe("HermesHistorySuggestModal", () => {
@@ -203,5 +215,55 @@ describe("owner-capture and settle-once contract", () => {
     modal.onChooseSuggestion("low");
     modal.onChooseSuggestion("high"); // second call should be ignored
     expect(calls).toEqual(["low"]);
+  });
+
+  it("model picker settle-once invokes setModel at most once per open", () => {
+    const setModel = vi.fn();
+    const capturedTabId = "tab-A";
+    let settled = false;
+    let openCount = 0;
+
+    const openModelPicker = (): void => {
+      openCount += 1;
+      const modal = new HermesModelSuggestModal(
+        { vault: { getName: () => "test" } } as any,
+        [fakeModelOption({ name: "A" }), fakeModelOption({ name: "B", modelId: "b", switchId: "openai:b" })],
+        undefined,
+        (model) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          setModel(capturedTabId, model);
+        },
+      );
+      modal.onChooseSuggestion(fakeModelOption({ name: "A" }));
+      modal.onChooseSuggestion(fakeModelOption({ name: "B", modelId: "b", switchId: "openai:b" }));
+    };
+
+    // One logical button click must open one modal and settle setModel once.
+    openModelPicker();
+    expect(openCount).toBe(1);
+    expect(setModel).toHaveBeenCalledTimes(1);
+    expect(setModel).toHaveBeenCalledWith("tab-A", expect.objectContaining({ name: "A" }));
+  });
+
+  it("model picker close without selection never calls setModel", () => {
+    const setModel = vi.fn();
+    let settled = false;
+    const modal = new HermesModelSuggestModal(
+      { vault: { getName: () => "test" } } as any,
+      [fakeModelOption()],
+      undefined,
+      (model) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        setModel(model);
+      },
+    );
+    modal.close();
+    expect(setModel).not.toHaveBeenCalled();
   });
 });

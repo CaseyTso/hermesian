@@ -186,6 +186,29 @@ describe("renderConversationTabsView", () => {
     expect(onActivate).toHaveBeenCalledWith("tab-1");
   });
 
+  it("still fires onActivate for loading tabs when navigation is enabled", () => {
+    const host = document.createElement("div");
+    const onActivate = vi.fn();
+    const state: ConversationTabsState = {
+      activeTabId: "tab-1",
+      isTabBusy: () => false,
+      isTabLoading: (id) => id === "tab-2",
+      tabNavigationDisabled: false,
+      tabs: [
+        makeTab({ id: "tab-1" }),
+        makeTab({ id: "tab-2", sessionId: null, label: 2 }),
+      ],
+    };
+
+    renderConversationTabsView(host, state, defaults({ onActivate }));
+
+    const buttons = host.querySelectorAll("button");
+    expect((buttons[1] as HTMLButtonElement).disabled).toBe(false);
+    expect(buttons[1].classList.contains("is-loading")).toBe(true);
+    buttons[1].click();
+    expect(onActivate).toHaveBeenCalledWith("tab-2");
+  });
+
   it("disables all tab buttons when tabNavigationDisabled is true", () => {
     const host = document.createElement("div");
     const state: ConversationTabsState = {

@@ -15,10 +15,55 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+/**
+ * Encode a *provider-directory* raw model id for `session/set_model`.
+ *
+ * Directory models are owned by a known provider row. Even when the raw id
+ * already contains colons (Ollama tags like `qwen3.5:397b`, OpenRouter free
+ * variants like `nvidia/...:free`), the owning provider must still be
+ * prefixed so Hermes routes away from the session's current provider.
+ *
+ * This is NOT for ACP choice ids — those are opaque and must be returned by
+ * {@link acpModelSwitchId} without re-wrapping.
+ */
 export function modelSwitchId(providerId: string, modelId: string): string {
-  return providerId && !modelId.startsWith(`${providerId}:`)
-    ? `${providerId}:${modelId}`
-    : modelId;
+  if (!providerId) {
+    return modelId;
+  }
+  if (modelId.startsWith(`${providerId}:`)) {
+    return modelId;
+  }
+  return `${providerId}:${modelId}`;
+}
+
+/**
+ * ACP `availableModels[].modelId` values are opaque choice ids already
+ * suitable for `session/set_model` (e.g. `custom:botcf-grok:grok-4.5`,
+ * `ollama-cloud:qwen3.5:397b`, bare `gpt-5.5` under the current provider).
+ * Pass them through unchanged — never re-prefix with the session provider.
+ */
+export function acpModelSwitchId(modelId: string): string {
+  return modelId;
+}
+
+function providerFromEncodedModelId(
+  modelId: string,
+  fallbackProviderId: string,
+): string {
+  if (modelId.startsWith("custom:")) {
+    const parts = modelId.split(":");
+    if (parts.length >= 3) {
+      return `custom:${parts[1]}`;
+    }
+    return parts.length === 2 ? "custom" : fallbackProviderId;
+  }
+  // Fully-qualified ACP choices look like `provider:rest...`. Bare model ids
+  // (no colon) stay under the session's current provider.
+  const colon = modelId.indexOf(":");
+  if (colon > 0) {
+    return modelId.slice(0, colon);
+  }
+  return fallbackProviderId;
 }
 
 export function normalizeAcpModelState(
@@ -45,17 +90,27 @@ export function normalizeAcpModelState(
     if (!modelId) {
       continue;
     }
-    const switchId = modelSwitchId(providerId, modelId);
+    // ACP choice path: opaque id goes to set_model as-is.
+    // Bare ids still need the current provider so set_model receives a
+    // routable identity (directory-style encode only for unprefixed bare ids).
+    const switchId = modelId.includes(":")
+      ? acpModelSwitchId(modelId)
+      : modelSwitchId(providerId, modelId);
     if (seen.has(switchId)) {
       continue;
     }
     seen.add(switchId);
+    const entryProviderId = providerFromEncodedModelId(modelId, providerId);
+    const entryProviderName =
+      entryProviderId === providerId
+        ? providerName
+        : entryProviderId || providerName;
     models.push({
       description: nonEmptyString(model.description) ?? "",
       modelId,
       name: nonEmptyString(model.name) ?? modelId,
-      providerId,
-      providerName,
+      providerId: entryProviderId || providerId,
+      providerName: entryProviderName,
       switchId,
     });
   }
@@ -64,7 +119,10 @@ export function normalizeAcpModelState(
   return {
     models,
     current: currentModelId
-      ? models.find((model) => model.modelId === currentModelId)
+      ? models.find(
+          (model) =>
+            model.modelId === currentModelId || model.switchId === currentModelId,
+        )
       : undefined,
   };
 }
