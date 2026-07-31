@@ -1,7 +1,11 @@
+import type { ComposerSlashToken } from "../slash-menu";
+import { visibleSlashTokenLabel } from "../slash-menu";
+
 export interface ComposerElements {
   addSelectionButtonEl: HTMLButtonElement;
   composerEl: HTMLTextAreaElement;
   composerHostEl: HTMLElement;
+  composerInputRowEl: HTMLElement;
   contextProgressEl: HTMLElement;
   contextUsageEl: HTMLElement;
   currentFileBarEl: HTMLButtonElement;
@@ -14,6 +18,9 @@ export interface ComposerElements {
   selectionBarEl: HTMLElement;
   sendButtonEl: HTMLButtonElement;
   slashMenuEl: HTMLElement;
+  slashTokenEl: HTMLElement;
+  slashTokenIconEl: HTMLElement;
+  slashTokenLabelEl: HTMLElement;
   stopButtonEl: HTMLButtonElement;
 }
 
@@ -39,6 +46,11 @@ export interface ComposerCallbacks {
   onStop(): void;
   /** Called on paste events for image handling. */
   onPaste(event: ClipboardEvent): void;
+  /**
+   * Optional: empty-task Backspace while a slash token is visible.
+   * Parent should clear the atomic token and restore plain input.
+   */
+  onSlashTokenClear?(): void;
 }
 
 export function createComposerView(
@@ -68,7 +80,27 @@ export function createComposerView(
   });
   imageAttachmentBarEl.hide();
 
-  const composerEl = composerHostEl.createEl("textarea", {
+  const composerInputRowEl = composerHostEl.createDiv({
+    cls: "hermesian-composer-input-row",
+  });
+
+  const slashTokenEl = composerInputRowEl.createSpan({
+    attr: {
+      "aria-hidden": "true",
+      role: "status",
+    },
+    cls: "hermesian-slash-token",
+  });
+  slashTokenEl.hide();
+  const slashTokenIconEl = slashTokenEl.createSpan({
+    cls: "hermesian-slash-token-icon",
+  });
+  slashTokenIconEl.empty();
+  const slashTokenLabelEl = slashTokenEl.createSpan({
+    cls: "hermesian-slash-token-label",
+  });
+
+  const composerEl = composerInputRowEl.createEl("textarea", {
     attr: {
       "aria-autocomplete": "list",
       "aria-controls": "hermesian-slash-menu",
@@ -163,6 +195,28 @@ export function createComposerView(
     callbacks.onPaste(event);
   });
 
+  composerEl.addEventListener("keydown", (event) => {
+    if (event.key !== "Backspace" || event.isComposing) {
+      return;
+    }
+    if (!callbacks.onSlashTokenClear) {
+      return;
+    }
+    if (slashTokenEl.style.display === "none") {
+      return;
+    }
+    const start = composerEl.selectionStart ?? 0;
+    const end = composerEl.selectionEnd ?? 0;
+    if (start !== 0 || end !== 0) {
+      return;
+    }
+    if (composerEl.value.length > 0) {
+      return;
+    }
+    event.preventDefault();
+    callbacks.onSlashTokenClear();
+  });
+
   composerEl.addEventListener("blur", () => {
     window.setTimeout(() => {
       if (!slashMenuEl.contains(composerHostEl.ownerDocument.activeElement)) {
@@ -195,6 +249,7 @@ export function createComposerView(
     addSelectionButtonEl,
     composerEl,
     composerHostEl,
+    composerInputRowEl,
     contextProgressEl,
     contextUsageEl,
     currentFileBarEl,
@@ -207,6 +262,9 @@ export function createComposerView(
     selectionBarEl,
     sendButtonEl,
     slashMenuEl,
+    slashTokenEl,
+    slashTokenIconEl,
+    slashTokenLabelEl,
     stopButtonEl,
   };
 }
@@ -228,4 +286,39 @@ export function applyComposerState(
       elements.composerEl.focus();
     }
   }
+}
+
+/**
+ * Show or hide the atomic slash token beside the textarea.
+ * Skill tokens use a capsule chrome; native commands stay inline blue text.
+ */
+export function applyComposerSlashToken(
+  elements: Pick<
+    ComposerElements,
+    "slashTokenEl" | "slashTokenIconEl" | "slashTokenLabelEl" | "composerEl"
+  >,
+  token: ComposerSlashToken | null,
+): void {
+  if (!token) {
+    elements.slashTokenEl.hide();
+    elements.slashTokenEl.classList.remove("is-skill", "is-command", "is-capsule");
+    elements.slashTokenEl.removeAttribute("aria-label");
+    elements.slashTokenEl.setAttribute("aria-hidden", "true");
+    elements.slashTokenLabelEl.textContent = "";
+    elements.slashTokenIconEl.empty();
+    return;
+  }
+
+  const label = visibleSlashTokenLabel(token);
+  const isSkill = token.kind === "skill";
+  elements.slashTokenEl.classList.toggle("is-skill", isSkill);
+  elements.slashTokenEl.classList.toggle("is-command", !isSkill);
+  elements.slashTokenEl.classList.toggle("is-capsule", isSkill);
+  elements.slashTokenEl.setAttribute(
+    "aria-label",
+    isSkill ? `Skill ${label}` : `Command ${label}`,
+  );
+  elements.slashTokenEl.setAttribute("aria-hidden", "false");
+  elements.slashTokenLabelEl.textContent = label;
+  elements.slashTokenEl.show();
 }

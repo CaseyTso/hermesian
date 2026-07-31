@@ -72,6 +72,7 @@ import {
   type TurnCallbacks,
 } from "./ui/message-renderer";
 import {
+  applyComposerSlashToken,
   applyComposerState,
   createComposerView,
   type ComposerCallbacks,
@@ -80,7 +81,11 @@ import {
 import {
   buildSlashOutboundPrompt,
   buildSlashMenuItems,
+  composerSlashTokenFromMenuItem,
+  restoreComposerSlashDraft,
+  serializeComposerSlashDraft,
   slashMenuInsertion,
+  type ComposerSlashToken,
   type SlashMenuItem,
 } from "./slash-menu";
 import {
@@ -159,6 +164,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
 export class HermesianSidebarView extends ItemView {
   private addConversationButtonEl!: HTMLButtonElement;
   private composerEl!: HTMLTextAreaElement;
+  private composerSlashToken: ComposerSlashToken | null = null;
   private conversationTabsEl!: HTMLElement;
   private conversationWorkspace: PersistedConversationWorkspace | undefined;
   private controller: ConversationController<HermesAcpClient> | undefined;
@@ -189,6 +195,9 @@ export class HermesianSidebarView extends ItemView {
   private selectionBarEl!: HTMLElement;
   private sendButtonEl!: HTMLButtonElement;
   private slashMenuEl!: HTMLElement;
+  private slashTokenEl!: HTMLElement;
+  private slashTokenIconEl!: HTMLElement;
+  private slashTokenLabelEl!: HTMLElement;
   private stopButtonEl!: HTMLButtonElement;
   private readonly tabSelections = new Map<string, SelectionContext | undefined>();
   private slashMenuIndex = 0;
@@ -480,6 +489,13 @@ export class HermesianSidebarView extends ItemView {
           void this.plugin.getClient(activeTab.id).cancel();
         }
       },
+      onSlashTokenClear: () => {
+        this.setComposerSlashToken(null);
+        this.composerEl.value = "";
+        this.captureActiveConversationRuntime();
+        this.renderSlashMenu(true);
+        this.composerEl.focus();
+      },
     };
 
     const initialComposerState: ComposerState = {
@@ -501,6 +517,9 @@ export class HermesianSidebarView extends ItemView {
     this.imageAttachmentBarEl = composerElements.imageAttachmentBarEl;
     this.composerEl = composerElements.composerEl;
     this.slashMenuEl = composerElements.slashMenuEl;
+    this.slashTokenEl = composerElements.slashTokenEl;
+    this.slashTokenIconEl = composerElements.slashTokenIconEl;
+    this.slashTokenLabelEl = composerElements.slashTokenLabelEl;
     this.modelButtonEl = composerElements.modelButtonEl;
     this.modelLabelEl = composerElements.modelLabelEl;
     this.reasoningButtonEl = composerElements.reasoningButtonEl;
@@ -518,6 +537,7 @@ export class HermesianSidebarView extends ItemView {
     setIcon(composerElements.addSelectionButtonEl.querySelector("span")!, "paperclip");
     setIcon(composerElements.sendButtonEl.querySelector("span")!, "arrow-right");
     setIcon(composerElements.stopButtonEl.querySelector("span")!, "square");
+    this.setComposerSlashToken(null);
 
     // Wire event handlers
     this.currentFileBarEl.addEventListener("click", () => {
@@ -847,8 +867,9 @@ export class HermesianSidebarView extends ItemView {
     const activeTabId = workspace.activeTabId;
     this.tabSelections.set(activeTabId, this.pendingSelection);
     this.conversationWorkspace = updateConversationTab(workspace, activeTabId, {
-      draft: this.composerEl.value,
+      draft: this.getComposerCanonicalDraft(),
       includeCurrentDocumentContext: this.includeCurrentDocumentContext,
+      token: this.composerSlashToken ?? undefined,
     });
     this.plugin.setConversationWorkspace(this.conversationWorkspace);
   }
@@ -858,7 +879,7 @@ export class HermesianSidebarView extends ItemView {
     if (!activeTab) {
       return;
     }
-    this.composerEl.value = activeTab.draft;
+    this.applyComposerCanonicalDraft(activeTab.draft, activeTab.token);
     this.includeCurrentDocumentContext = activeTab.includeCurrentDocumentContext;
     this.pendingSelection = this.tabSelections.get(activeTab.id);
     this.renderCurrentFile();
@@ -1382,17 +1403,17 @@ export class HermesianSidebarView extends ItemView {
     );
     this.contextProgressEl.dataset.level = contextUsageLevel(state.contextUsage);
     this.contextProgressEl.style.width = `${contextUsagePercent(state.contextUsage)}%`;
-    if (this.composerEl.value.startsWith("/")) {
+    if (this.getComposerCanonicalDraft().startsWith("/")) {
       this.renderSlashMenu(false);
     }
   }
 
   private renderSlashMenu(resetIndex: boolean): void {
-    const value = this.composerEl.value;
+    const value = this.getComposerSlashMenuValue();
     if (
       !this.controlAvailability().composer ||
-      this.composerEl.selectionStart !== value.length ||
-      this.composerEl.selectionEnd !== value.length
+      this.composerEl.selectionStart !== this.composerEl.value.length ||
+      this.composerEl.selectionEnd !== this.composerEl.value.length
     ) {
       this.hideSlashMenu();
       return;
@@ -1513,9 +1534,18 @@ export class HermesianSidebarView extends ItemView {
     if (!item) {
       return;
     }
-    const insertion = slashMenuInsertion(item);
-    this.composerEl.value = insertion;
-    this.composerEl.setSelectionRange(insertion.length, insertion.length);
+    const token = composerSlashTokenFromMenuItem(item);
+    if (token) {
+      this.setComposerSlashToken(token);
+      this.composerEl.value = "";
+      this.composerEl.setSelectionRange(0, 0);
+    } else {
+      // skill-loader and any non-token items keep plain insertion text
+      this.setComposerSlashToken(null);
+      const insertion = slashMenuInsertion(item);
+      this.composerEl.value = insertion;
+      this.composerEl.setSelectionRange(insertion.length, insertion.length);
+    }
     this.captureActiveConversationRuntime();
     this.hideSlashMenu();
     this.composerEl.focus();
@@ -1707,7 +1737,7 @@ export class HermesianSidebarView extends ItemView {
     ) {
       return;
     }
-    const rawRequest = this.composerEl.value.trim();
+    const rawRequest = this.getComposerCanonicalDraft().trim();
     const isSlashCommand = rawRequest.startsWith("/");
     const pendingImages = isSlashCommand
       ? []
@@ -1747,6 +1777,7 @@ export class HermesianSidebarView extends ItemView {
     const runtime = this.turnRuntime(activeTab.id);
     this.editScopes.set(activeTab.id, selection ?? documentContext);
     this.appendUserMessage(request, selection, documentContext, activeTab.id, pendingImages);
+    this.setComposerSlashToken(null);
     this.composerEl.value = "";
     this.hideSlashMenu();
     if (!isSlashCommand) {
@@ -2112,7 +2143,7 @@ export class HermesianSidebarView extends ItemView {
       },
       {
         disabled: !availability.composer,
-        draft: this.composerEl.value,
+        draft: this.getComposerCanonicalDraft(),
         placeholder: this.composerPlaceholder(),
         sendEnabled: availability.send,
         stopVisible: availability.stop,
@@ -2125,8 +2156,67 @@ export class HermesianSidebarView extends ItemView {
     this.renderSessionState(this.activeSessionState());
   }
 
+  private getComposerCanonicalDraft(): string {
+    return serializeComposerSlashDraft({
+      token: this.composerSlashToken,
+      task: this.composerEl.value,
+    });
+  }
+
+  /**
+   * Value used for slash-menu matching.
+   * With an active token the textarea only holds the task, so rebuild the
+   * canonical prefix for menu queries (empty task → "/skill name " form).
+   */
+  private getComposerSlashMenuValue(): string {
+    if (!this.composerSlashToken) {
+      return this.composerEl.value;
+    }
+    return serializeComposerSlashDraft({
+      token: this.composerSlashToken,
+      task: this.composerEl.value,
+    });
+  }
+
+  private applyComposerCanonicalDraft(
+    raw: string,
+    explicitToken?: { kind: "skill" | "command"; name: string } | null,
+  ): void {
+    // Single restore decision: restoreComposerSlashDraft validates both the
+    // token metadata AND the draft prefix consistency. Never show a token
+    // before checking; on any mismatch the raw draft stays verbatim.
+    const restored = restoreComposerSlashDraft(raw, explicitToken);
+    this.setComposerSlashToken(restored.token);
+    this.composerEl.value = restored.task;
+  }
+
+  private setComposerSlashToken(token: ComposerSlashToken | null): void {
+    this.composerSlashToken = token;
+    applyComposerSlashToken(
+      {
+        slashTokenEl: this.slashTokenEl,
+        slashTokenIconEl: this.slashTokenIconEl,
+        slashTokenLabelEl: this.slashTokenLabelEl,
+        composerEl: this.composerEl,
+      },
+      token,
+    );
+    if (token) {
+      const iconName = token.kind === "skill" ? "sparkles" : "terminal";
+      setIcon(this.slashTokenIconEl, iconName);
+    } else {
+      this.slashTokenIconEl.empty();
+    }
+    this.updateComposerPlaceholder();
+  }
+
   private composerPlaceholder(): string {
     const activeTabId = this.conversationWorkspace?.activeTabId;
+    if (this.composerSlashToken) {
+      return activeTabId && this.isTabLoading(activeTabId)
+        ? "Add a task for this command…"
+        : "Add a task…  ↵ to send · Shift+↵ for new line";
+    }
     return activeTabId && this.isTabLoading(activeTabId)
       ? "Draft here — this conversation is starting"
       : "Ask Hermes…  ↵ to send · Shift+↵ for new line";

@@ -105,3 +105,50 @@
 5 late-response 50/50 0 flaky
 6 verify 354 tests 0 skipped；coverage S90.08 B79.60 F90.74 L90.00
 7 direct 中位 6077ms new=0；fresh 中位 6275ms new=1；deploy cmp=0；指纹 b50a2f08…7197
+
+---
+
+## 本轮（token 误识别修复 + 日志恢复 + 清理 2026-07-31 14:53）
+- 仓库：hermesian，分支 main，基线 28 files / 364 tests / 0 skipped
+- 视觉指纹保持：273dcffc5dc62b30d1bb1dfc44c3bd7da615ca2e1189a72dd02f55c10420a693
+- 目标：修复三个遗留问题——未知 `/文字` 误包装、进度历史被删除、预览图污染仓库
+
+## 修正
+1. **parseComposerSlashDraft 不再猜测命令 token**：仅保留 `/skill <name>` 识别（无歧义前缀）；`/random ordinary text` 和 `/model grok` 等任意文本不再被误包装为命令 token。命令 token 恢复需通过显式元数据。
+2. **PersistedConversationTab 新增可选 token 字段**：`token?: { kind: "skill" | "command"; name: string }`，`normalizeConversationWorkspace` 验证合法 token 并丢弃非法/空名称。
+3. **captureActiveConversationRuntime 保存 token 元数据**：`updateConversationTab` patch 包含 `token: this.composerSlashToken ?? undefined`。
+4. **restoreActiveConversationRuntime 使用显式 token 元数据**：`applyComposerCanonicalDraft(draft, activeTab.token)` — 有元数据时直接使用，无元数据时回退到 `parseComposerSlashDraft`。
+5. **日志恢复**：HEAD 版本完整恢复，追加本轮记录。
+6. **预览图清理**：删除仓根 `.slash-token-preview.png`。
+
+## 反向验证
+临时恢复「按文本猜 token」的旧逻辑 → 新增 `/random ordinary text` 和 `/model grok` 测试红灯；还原后全绿（59/59）。
+
+## 测试结果
+- 定向：77 tests passed（3 files）
+- 全量：回 baseline 验证 → 364+ → 0 skipped
+
+## 完成条件核对
+1. `/random ordinary text` 永不包装 — 测试新增验证
+2. 显式 skill/command token 元数据在标签切换和持久化后正确恢复 — 新增 conversation-tabs 测试
+3. 视觉指纹 273dcffc5d… 保持 — 未修改 composer-view/styles.css/composer-view.test
+4. 日志删除数 0 — `git diff --numstat` 验证
+5. 预览图不存在 — `test ! -e .slash-token-preview.png` 验证
+
+---
+
+## 本轮（token 恢复三漏洞 2026-07-31 15:46）
+- 基线：28 files / 372 tests / 0 skipped；三文件定向 77 pass；指纹 273dcffc5d… 保持
+- 目标：修 3 个漏洞——无元数据 `/skill` 被包装、非法名称被接受、元数据与 draft 不一致仍显示 token
+- 顺序：纯函数判定红灯 → 实现恢复判定 → 收紧 normalize → view 接线 → 反向 → 全量
+- 最大风险：修“不一致即丢 token”时吞字/改字；或收紧名称规则误伤合法 skill 名
+
+## 完成（token 恢复三漏洞 2026-07-31 15:49）
+1. 红灯 14 fail：restoreComposerSlashDraft 缺失 + /skill 无元数据仍包装 + normalize 接受坏名称
+2. 新增纯函数 `restoreComposerSlashDraft(raw, explicitToken?)`：无元数据一律普通文本；元数据须合法（kind + `/^[a-z0-9][a-z0-9._-]*$/i`）且 draft 等于规范前缀或前缀+单空格；不一致保留原文逐字
+3. `parseComposerSlashDraft` 收口为 `restoreComposerSlashDraft(raw, null)`，删除 /skill 文本推断
+4. `normalizeConversationWorkspace` 用 SLASH_TOKEN_NAME_PATTERN 运行时校验；`bad name`/`../leader`/`/leader`/空/纯空格/` lead:er `/` leader `/未知 kind/非字符串 name 全部丢弃且 workspace+draft 保留
+5. view.ts `applyComposerCanonicalDraft` 只调用 restoreComposerSlashDraft，先验证后显示，禁止先显示再检查
+6. 反向验证 1：放宽为 `name.trim()` → ` leader ` 被接受（1 红）；还原严格版 57 绿
+7. 反向验证 2：临时恢复 /skill 文本推断 → 1 红；还原 22 绿
+8. verify：28 files / 392 tests（>372）/ 0 skipped；typecheck+build+diff-check 绿；指纹 273dcffc5d… 保持

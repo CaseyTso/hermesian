@@ -520,3 +520,165 @@ describe("close intent", () => {
     );
   });
 });
+
+describe("token persistence", () => {
+  it("preserves skill token metadata in persisted tab", () => {
+    const workspace = createConversationWorkspace("tab-a", "session-a");
+    const updated = updateConversationTab(workspace, "tab-a", {
+      draft: "/skill leader 写任务书",
+      includeCurrentDocumentContext: true,
+      token: { kind: "skill", name: "leader" },
+    });
+
+    expect(updated.tabs[0]).toMatchObject({
+      token: { kind: "skill", name: "leader" },
+    });
+  });
+
+  it("preserves command token metadata in persisted tab", () => {
+    const workspace = createConversationWorkspace("tab-a", "session-a");
+    const updated = updateConversationTab(workspace, "tab-a", {
+      draft: "/model grok",
+      includeCurrentDocumentContext: true,
+      token: { kind: "command", name: "model" },
+    });
+
+    expect(updated.tabs[0]).toMatchObject({
+      token: { kind: "command", name: "model" },
+    });
+  });
+
+  it("normalizes old workspace without token field (backward compat)", () => {
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: "/random ordinary text",
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace).toBeDefined();
+    expect(workspace!.tabs[0].draft).toBe("/random ordinary text");
+    // Old data without a token field should not have a token
+    expect((workspace!.tabs[0] as any).token).toBeUndefined();
+  });
+
+  it("safely discards invalid token kind", () => {
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: "/skill leader 写任务书",
+          token: { kind: "invalid", name: "leader" },
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace).toBeDefined();
+    // invalid kind should be discarded, token field should be undefined
+    expect((workspace!.tabs[0] as any).token).toBeUndefined();
+  });
+
+  it("safely discards token with empty name", () => {
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: "/skill leader 写任务书",
+          token: { kind: "skill", name: "" },
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace).toBeDefined();
+    // empty name should be discarded
+    expect((workspace!.tabs[0] as any).token).toBeUndefined();
+  });
+
+  it.each([
+    ["bad name", "skill"],
+    ["../leader", "skill"],
+    ["/leader", "skill"],
+    ["   ", "skill"],
+    [" lead:er ", "command"],
+    [" leader ", "skill"],
+    ["leader", "invalid-kind"],
+  ])(
+    "discards invalid token metadata (%s) but keeps workspace and draft",
+    (name, kind) => {
+      const workspace = normalizeConversationWorkspace({
+        activeTabId: "tab-a",
+        tabs: [
+          {
+            id: "tab-a",
+            label: 1,
+            sessionId: "session-a",
+            draft: `/skill ${name} task`,
+            token: { kind, name },
+          },
+        ],
+        version: 2,
+      });
+
+      expect(workspace).toBeDefined();
+      expect(workspace!.tabs[0].draft).toBe(`/skill ${name} task`);
+      expect((workspace!.tabs[0] as any).token).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ["leader", "skill"],
+    ["research-lookup", "skill"],
+    ["foo.bar", "command"],
+    ["foo_bar", "command"],
+  ])("keeps valid token metadata (%s)", (name, kind) => {
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: `/skill ${name} task`,
+          token: { kind, name },
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace).toBeDefined();
+    expect((workspace!.tabs[0] as any).token).toEqual({ kind, name });
+  });
+
+  it("discards non-string token name", () => {
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: "/skill leader task",
+          token: { kind: "skill", name: 42 },
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace).toBeDefined();
+    expect((workspace!.tabs[0] as any).token).toBeUndefined();
+  });
+});

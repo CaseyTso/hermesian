@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  applyComposerSlashToken,
   applyComposerState,
   createComposerView,
   type ComposerState,
@@ -62,6 +63,7 @@ function setup(state?: Partial<ComposerState>) {
     onPaste: vi.fn(),
     onSend: vi.fn(),
     onStop: vi.fn(),
+    onSlashTokenClear: vi.fn(),
   };
   const elements = createComposerView(parent, defaultState(state), callbacks);
   return { parent, elements, callbacks };
@@ -89,6 +91,19 @@ describe("createComposerView", () => {
     const { elements } = setup({ stopVisible: true });
     expect(elements.sendButtonEl.style.display).toBe("none");
     expect(elements.stopButtonEl.style.display).not.toBe("none");
+  });
+
+  it("keeps current-file bar, input row, footer, and a hidden slash token host", () => {
+    const { elements, parent } = setup();
+    expect(parent.querySelector(".hermesian-current-file")).toBeTruthy();
+    expect(parent.querySelector(".hermesian-composer-footer")).toBeTruthy();
+    expect(elements.composerInputRowEl.classList.contains("hermesian-composer-input-row")).toBe(
+      true,
+    );
+    expect(elements.slashTokenEl.classList.contains("hermesian-slash-token")).toBe(true);
+    expect(elements.slashTokenEl.style.display).toBe("none");
+    expect(elements.composerInputRowEl.contains(elements.composerEl)).toBe(true);
+    expect(elements.composerInputRowEl.contains(elements.slashTokenEl)).toBe(true);
   });
 });
 
@@ -164,5 +179,67 @@ describe("applyComposerState", () => {
     // Switch back to send
     applyComposerState(elements, defaultState({ stopVisible: false }));
     expect(elements.sendButtonEl.style.display).not.toBe("none");
+  });
+});
+
+describe("applyComposerSlashToken", () => {
+  it("renders a skill capsule with accessible name and capsule class", () => {
+    const { elements } = setup();
+    applyComposerSlashToken(elements, { kind: "skill", name: "leader" });
+
+    expect(elements.slashTokenEl.style.display).not.toBe("none");
+    expect(elements.slashTokenEl.classList.contains("is-skill")).toBe(true);
+    expect(elements.slashTokenEl.classList.contains("is-command")).toBe(false);
+    expect(elements.slashTokenEl.classList.contains("is-capsule")).toBe(true);
+    expect(elements.slashTokenLabelEl.textContent).toBe("/leader");
+    expect(elements.slashTokenEl.getAttribute("aria-label")).toBe("Skill /leader");
+  });
+
+  it("renders a native command as blue inline token without capsule border class", () => {
+    const { elements } = setup();
+    applyComposerSlashToken(elements, { kind: "command", name: "model" });
+
+    expect(elements.slashTokenEl.style.display).not.toBe("none");
+    expect(elements.slashTokenEl.classList.contains("is-command")).toBe(true);
+    expect(elements.slashTokenEl.classList.contains("is-skill")).toBe(false);
+    expect(elements.slashTokenEl.classList.contains("is-capsule")).toBe(false);
+    expect(elements.slashTokenLabelEl.textContent).toBe("/model");
+    expect(elements.slashTokenEl.getAttribute("aria-label")).toBe("Command /model");
+  });
+
+  it("hides the token when cleared and supports task-empty backspace clear hook", () => {
+    const { elements, callbacks } = setup();
+    applyComposerSlashToken(elements, { kind: "skill", name: "leader" });
+    expect(elements.slashTokenEl.style.display).not.toBe("none");
+
+    applyComposerSlashToken(elements, null);
+    expect(elements.slashTokenEl.style.display).toBe("none");
+    expect(elements.slashTokenLabelEl.textContent).toBe("");
+
+    applyComposerSlashToken(elements, { kind: "skill", name: "leader" });
+    elements.composerEl.value = "";
+    elements.composerEl.selectionStart = 0;
+    elements.composerEl.selectionEnd = 0;
+    const event = new KeyboardEvent("keydown", {
+      key: "Backspace",
+      bubbles: true,
+      cancelable: true,
+    });
+    const prevented = !elements.composerEl.dispatchEvent(event) || event.defaultPrevented;
+    // Handler may preventDefault; callback must fire for empty-task backspace
+    expect(callbacks.onSlashTokenClear).toHaveBeenCalledOnce();
+    expect(prevented || callbacks.onSlashTokenClear.mock.calls.length === 1).toBe(true);
+  });
+
+  it("does not clear token on Backspace when task text remains", () => {
+    const { elements, callbacks } = setup();
+    applyComposerSlashToken(elements, { kind: "skill", name: "leader" });
+    elements.composerEl.value = "写任务书";
+    elements.composerEl.selectionStart = 0;
+    elements.composerEl.selectionEnd = 0;
+    elements.composerEl.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }),
+    );
+    expect(callbacks.onSlashTokenClear).not.toHaveBeenCalled();
   });
 });

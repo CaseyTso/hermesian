@@ -1,9 +1,13 @@
+import { SLASH_TOKEN_NAME_PATTERN } from "./slash-menu";
+
 export interface PersistedConversationTab {
   draft: string;
   id: string;
   includeCurrentDocumentContext: boolean;
   label: number;
   sessionId: string | null;
+  /** Explicit token metadata from menu selection (not inferred from draft text). */
+  token?: { kind: "skill" | "command"; name: string } | undefined;
 }
 
 export interface PersistedConversationWorkspace {
@@ -16,7 +20,7 @@ export interface PersistedConversationWorkspace {
 export type ConversationTabPatch = Pick<
   PersistedConversationTab,
   "draft" | "includeCurrentDocumentContext"
->;
+> & { token?: { kind: "skill" | "command"; name: string } | undefined };
 
 
 export interface ConversationControlAvailabilityInput {
@@ -400,6 +404,20 @@ export function normalizeConversationWorkspace(
     ) {
       return undefined;
     }
+
+    // Validate optional token metadata (runtime check, not just types):
+    // kind must be skill/command and name must match the slash token pattern.
+    let token: { kind: "skill" | "command"; name: string } | undefined;
+    if (tab.token && typeof tab.token === "object") {
+      const tokenRecord = tab.token as Record<string, unknown>;
+      if (
+        (tokenRecord.kind === "skill" || tokenRecord.kind === "command") &&
+        typeof tokenRecord.name === "string" &&
+        SLASH_TOKEN_NAME_PATTERN.test(tokenRecord.name)
+      ) {
+        token = { kind: tokenRecord.kind, name: tokenRecord.name };
+      }
+    }
     ids.add(tab.id);
     const normalizedSessionId =
       typeof tab.sessionId === "string" ? tab.sessionId.trim() : null;
@@ -416,6 +434,7 @@ export function normalizeConversationWorkspace(
       includeCurrentDocumentContext: tab.includeCurrentDocumentContext ?? true,
       label: tabs.length + 1,
       sessionId,
+      token,
     } as PersistedConversationTab);
   }
 

@@ -938,11 +938,81 @@
   border: 0 !important;
   box-shadow: none !important;
   color: var(--text-normal);
+  flex: 1 1 auto;
   line-height: 1.5;
   min-height: 64px;
+  min-width: 0;
   padding: 9px 2px 7px;
   resize: vertical;
   width: 100%;
+}
+
+.hermesian-composer-input-row {
+  align-items: flex-start;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+
+.hermesian-slash-token {
+  align-items: center;
+  color: var(--text-accent);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  gap: 4px;
+  line-height: 1.3;
+  margin-top: 10px;
+  max-width: 46%;
+  min-width: 0;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.hermesian-slash-token.is-capsule {
+  background: color-mix(in srgb, var(--hermesian-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--hermesian-accent) 45%, transparent);
+  border-radius: 999px;
+  box-sizing: border-box;
+  max-height: 26px;
+  padding: 2px 8px 2px 6px;
+}
+
+.hermesian-slash-token.is-command {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+.hermesian-slash-token-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.hermesian-slash-token-icon svg {
+  height: 13px;
+  width: 13px;
+}
+
+.hermesian-slash-token-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermesian-composer.is-disabled .hermesian-slash-token,
+.hermesian-input:disabled ~ .hermesian-slash-token,
+.hermesian-composer:has(.hermesian-input:disabled) .hermesian-slash-token {
+  opacity: 0.55;
+}
+
+.hermesian-slash-token.is-capsule:hover {
+  background: color-mix(in srgb, var(--hermesian-accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--hermesian-accent) 55%, transparent);
 }
 
 .hermesian-input::placeholder {

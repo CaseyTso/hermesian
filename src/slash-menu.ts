@@ -8,6 +8,17 @@ export interface SlashMenuItem {
   name: string;
 }
 
+/** Atomic slash prefix chosen from the menu (not free-typed plain text). */
+export type ComposerSlashToken =
+  | { kind: "skill"; name: string }
+  | { kind: "command"; name: string };
+
+/** Single source of truth for composer slash display vs send/persist value. */
+export interface ComposerSlashDraft {
+  task: string;
+  token: ComposerSlashToken | null;
+}
+
 function matches(item: SlashMenuItem, query: string): boolean {
   if (!query) {
     return true;
@@ -70,6 +81,86 @@ export function slashMenuInsertion(item: SlashMenuItem): string {
     return `/skill ${item.name} `;
   }
   return `/${item.name} `;
+}
+
+/** Visible label shown in the composer token (e.g. `/leader`, `/model`). */
+export function visibleSlashTokenLabel(token: ComposerSlashToken): string {
+  return `/${token.name}`;
+}
+
+/** Build token state from a menu selection. skill-loader stays plain insertion. */
+export function composerSlashTokenFromMenuItem(
+  item: SlashMenuItem,
+): ComposerSlashToken | null {
+  if (item.kind === "skill") {
+    return { kind: "skill", name: item.name };
+  }
+  if (item.kind === "command") {
+    return { kind: "command", name: item.name };
+  }
+  return null;
+}
+
+/**
+ * Serialize visible token + task into the canonical draft/send string.
+ * Skills always use `/skill <name> …` so outbound loading stays unchanged.
+ */
+export function serializeComposerSlashDraft(draft: ComposerSlashDraft): string {
+  const task = draft.task;
+  if (!draft.token) {
+    return task;
+  }
+  if (draft.token.kind === "skill") {
+    return task ? `/skill ${draft.token.name} ${task}` : `/skill ${draft.token.name} `;
+  }
+  return task ? `/${draft.token.name} ${task}` : `/${draft.token.name} `;
+}
+
+/** Name pattern shared by the slash/skill send protocol and token validation. */
+export const SLASH_TOKEN_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
+
+/**
+ * Parse a persisted/canonical draft back into token + task.
+ * Never infers a token from text alone — without explicit metadata everything
+ * stays plain text (including `/skill <name> task`).
+ */
+export function parseComposerSlashDraft(raw: string): ComposerSlashDraft {
+  return restoreComposerSlashDraft(raw, null);
+}
+
+/**
+ * Single restore decision: raw draft + explicit token metadata → {token, task}.
+ * - Without metadata: never infer a token; return the raw draft verbatim.
+ * - With metadata: the token must be valid (kind + name pattern) AND the draft
+ *   must equal the canonical prefix or start with "prefix + single space".
+ *   Any mismatch keeps the raw draft verbatim as plain text (no token).
+ */
+export function restoreComposerSlashDraft(
+  raw: string,
+  explicitToken?: { kind: "skill" | "command"; name: string } | null,
+): ComposerSlashDraft {
+  if (!explicitToken) {
+    return { token: null, task: raw };
+  }
+  if (explicitToken.kind !== "skill" && explicitToken.kind !== "command") {
+    return { token: null, task: raw };
+  }
+  if (!SLASH_TOKEN_NAME_PATTERN.test(explicitToken.name)) {
+    return { token: null, task: raw };
+  }
+  const prefix =
+    explicitToken.kind === "skill"
+      ? `/skill ${explicitToken.name}`
+      : `/${explicitToken.name}`;
+  if (raw === prefix) {
+    return { token: explicitToken, task: "" };
+  }
+  if (raw.startsWith(`${prefix} `)) {
+    return { token: explicitToken, task: raw.slice(prefix.length + 1) };
+  }
+  // Metadata valid but draft does not match the canonical prefix — keep the
+  // draft verbatim as plain text. Never split or rewrite the raw text.
+  return { token: null, task: raw };
 }
 
 export function buildSlashOutboundPrompt(request: string): string {
