@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 
+import { loadHermesModelCatalog } from "./hermes-model-catalog";
 import type HermesianPlugin from "./main";
 import type { ReasoningEffort } from "./types";
 
@@ -8,6 +9,7 @@ export interface HermesianSettings {
   autoApproveVaultEdits: boolean;
   debugLogging: boolean;
   hermesExecutable: string;
+  hiddenModelSwitchIds: string[];
   profile: string;
   reasoningEffort: ReasoningEffort;
 }
@@ -17,6 +19,7 @@ export const DEFAULT_SETTINGS: HermesianSettings = {
   autoApproveVaultEdits: true,
   debugLogging: false,
   hermesExecutable: "hermes",
+  hiddenModelSwitchIds: [],
   profile: "default",
   reasoningEffort: "default",
 };
@@ -122,5 +125,59 @@ export class HermesianSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
+
+    new Setting(containerEl)
+      .setName("Hidden models")
+      .setDesc(
+        "Hide rarely used models from the composer model picker. Hidden models can always be restored here or from the picker's Manage mode.",
+      );
+    const hiddenModelsContainer = containerEl.createDiv({ cls: "hermesian-hidden-models" });
+    void this.renderHiddenModels(hiddenModelsContainer);
+  }
+
+  private async renderHiddenModels(containerEl: HTMLElement): Promise<void> {
+    containerEl.empty();
+    try {
+      const catalog = await loadHermesModelCatalog(
+        this.plugin.settings.hermesExecutable,
+        this.plugin.settings.profile,
+      );
+      for (const provider of catalog.providers) {
+        containerEl.createDiv({
+          cls: "hermesian-hidden-provider",
+          text: provider.label,
+        });
+        for (const model of provider.models) {
+          const row = containerEl.createDiv({ cls: "hermesian-hidden-model-row" });
+          const checkbox = row.createEl("input", { type: "checkbox" });
+          checkbox.checked = !this.plugin.settings.hiddenModelSwitchIds.includes(
+            model.switchId,
+          );
+          checkbox.addEventListener("change", () => {
+            const hidden = new Set(this.plugin.settings.hiddenModelSwitchIds);
+            if (checkbox.checked) {
+              hidden.delete(model.switchId);
+            } else {
+              hidden.add(model.switchId);
+            }
+            this.plugin.settings.hiddenModelSwitchIds = [...hidden];
+            void this.plugin.saveSettings();
+          });
+          const copy = row.createDiv({ cls: "hermesian-hidden-model-copy" });
+          copy.createDiv({ cls: "hermesian-hidden-model-name", text: model.name });
+          copy.createDiv({
+            cls: "hermesian-hidden-model-provider",
+            text: model.description
+              ? `${model.providerName} · ${model.description}`
+              : model.providerName,
+          });
+        }
+      }
+    } catch {
+      containerEl.createDiv({
+        cls: "hermesian-hidden-models-error",
+        text: "Could not load the Hermes model catalog. Check the Hermes executable and profile settings above, then reopen this tab.",
+      });
+    }
   }
 }

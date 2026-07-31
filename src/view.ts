@@ -54,10 +54,10 @@ import {
 } from "./selection-context";
 import { reasoningEffortLabel } from "./session-history";
 import {
-  HermesModelSuggestModal,
   HermesHistorySuggestModal,
   HermesReasoningSuggestModal,
 } from "./ui/conversation-modals";
+import { HermesModelPickerPopover } from "./ui/model-picker-popover";
 import {
   renderConversationTabsView,
   type ConversationTabsCallbacks,
@@ -180,6 +180,7 @@ export class HermesianSidebarView extends ItemView {
   private messagesEl!: HTMLElement;
   private modelButtonEl!: HTMLButtonElement;
   private modelLabelEl!: HTMLElement;
+  private modelPicker: HermesModelPickerPopover | null = null;
   private pendingSelection: SelectionContext | undefined;
   private readonly permissions = new Map<string, PendingPermission>();
   private readonly loadedMessageTabIds = new Set<string>();
@@ -249,6 +250,8 @@ export class HermesianSidebarView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.modelPicker?.detach();
+    this.modelPicker = null;
     this.startup?.close();
     this.startup = undefined;
     this.captureActiveConversationRuntime();
@@ -1133,20 +1136,35 @@ export class HermesianSidebarView extends ItemView {
     if (!activeTab || this.modelButtonEl.disabled || state.models.length === 0) {
       return;
     }
+    if (this.modelPicker) {
+      // Repeat click on the model button toggles the popover closed.
+      this.modelPicker.detach();
+      return;
+    }
     const targetTabId = activeTab.id;
     let settled = false;
-    new HermesModelSuggestModal(
-      this.app,
-      state.models,
-      state.currentModel?.switchId,
-      (model) => {
+    this.modelPicker = new HermesModelPickerPopover({
+      anchorEl: this.modelButtonEl,
+      models: state.models,
+      hiddenSwitchIds: this.plugin.settings.hiddenModelSwitchIds,
+      currentSwitchId: state.currentModel?.switchId,
+      iconRenderer: (element, icon) => setIcon(element, icon),
+      onChoose: (model) => {
         if (settled) {
           return;
         }
         settled = true;
         void this.chooseModel(targetTabId, model);
       },
-    ).open();
+      onClose: () => {
+        this.modelPicker = null;
+      },
+      onSaveHidden: (switchIds) => {
+        this.plugin.settings.hiddenModelSwitchIds = switchIds;
+        void this.plugin.saveSettings();
+      },
+    });
+    this.modelPicker.open();
   }
 
   private async chooseModel(tabId: string, model: HermesModelOption): Promise<void> {

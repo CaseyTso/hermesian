@@ -35,6 +35,7 @@ import {
   type HermesianSettings,
 } from "./settings";
 import { TabClientRegistry } from "./tab-client-registry";
+import { normalizeHiddenSwitchIds } from "./ui/model-picker-popover";
 import { assignAndPersistWithRollback } from "./workspace-persistence";
 import {
   HERMESIAN_VIEW_TYPE,
@@ -511,6 +512,7 @@ export default class HermesianPlugin extends Plugin {
           : DEFAULT_SETTINGS.hermesExecutable,
       profile:
         typeof saved.profile === "string" ? saved.profile : DEFAULT_SETTINGS.profile,
+      hiddenModelSwitchIds: normalizeHiddenSwitchIds(saved.hiddenModelSwitchIds),
       reasoningEffort:
         typeof saved.reasoningEffort === "string" &&
         isReasoningEffort(saved.reasoningEffort)
