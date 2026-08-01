@@ -102,7 +102,10 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
     expect(prompt).toContain("改写选区");
   });
 
-  it("passes slash commands through unchanged, never wrapped in Obsidian note context", () => {
+  it("passes native control commands through unchanged, never wrapped in Obsidian note context", () => {
+    // Narrowed from the old blanket "slash commands" rule: menu-selected
+    // skills now route like ordinary model requests; native control commands
+    // (and free-typed slash text) keep the bare pass-through.
     const prompt = buildOutboundPrompt({
       request: "/new",
       isSlashCommand: true,
@@ -116,6 +119,120 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
     expect(prompt).not.toContain("<obsidian_context>");
     expect(prompt).not.toContain("<document>");
     expect(prompt).not.toContain(SENTINEL_PATH);
+  });
+
+  it("keeps a native /model command verbatim with no note tags even when a note and selection are available", () => {
+    const prompt = buildOutboundPrompt({
+      request: "/model grok",
+      isSlashCommand: true,
+      includeCurrentDocumentContext: true,
+      selection: sentinelSelectionContext(),
+      documentContext: sentinelDocumentContext(),
+      activeNotePath: SENTINEL_PATH,
+    });
+
+    expect(prompt).toBe("/model grok");
+    expect(prompt).not.toContain("<selection>");
+    expect(prompt).not.toContain("<document>");
+    expect(prompt).not.toContain("<obsidian_context>");
+    expect(prompt).not.toContain("active_note");
+    expect(prompt).not.toContain(SENTINEL_PATH);
+    expect(prompt).not.toContain(SENTINEL_BODY);
+  });
+
+  it("routes a menu-selected skill through the full-document branch when the context capsule is on", () => {
+    const prompt = buildOutboundPrompt({
+      request: "/skill plan 总结这篇笔记",
+      isSlashCommand: false,
+      isSkill: true,
+      includeCurrentDocumentContext: true,
+      selection: undefined,
+      documentContext: sentinelDocumentContext(),
+      activeNotePath: SENTINEL_PATH,
+    });
+
+    expect(prompt).toContain('Load and follow the installed Hermes skill named "plan"');
+    expect(prompt).toContain("总结这篇笔记");
+    expect(prompt).toContain(`文件：${SENTINEL_PATH}`);
+    expect(prompt).toContain("<document>");
+    expect(prompt).toContain(SENTINEL_BODY);
+  });
+
+  it("gives a menu-selected skill the explicit selection with its document", () => {
+    const prompt = buildOutboundPrompt({
+      request: "/skill plan 改写选区",
+      isSlashCommand: false,
+      isSkill: true,
+      includeCurrentDocumentContext: false,
+      selection: sentinelSelectionContext(),
+      documentContext: undefined,
+      activeNotePath: SENTINEL_PATH,
+    });
+
+    expect(prompt).toContain('Load and follow the installed Hermes skill named "plan"');
+    expect(prompt).toContain("改写选区");
+    expect(prompt).toContain("<selection>");
+    expect(prompt).toContain("<document>");
+    expect(prompt).toContain(SENTINEL_PATH);
+    expect(prompt).toContain(SENTINEL_BODY);
+  });
+
+  it("keeps a menu-selected skill free of any note context when the capsule is off and no selection is attached", () => {
+    const prompt = buildOutboundPrompt({
+      request: "/skill plan 写任务书",
+      isSlashCommand: false,
+      isSkill: true,
+      includeCurrentDocumentContext: false,
+      selection: undefined,
+      documentContext: undefined,
+      // Production never fetches the path in the off state; passing it here
+      // proves the skill router itself cannot leak it even when one is available.
+      activeNotePath: SENTINEL_PATH,
+    });
+
+    expect(prompt).toContain('Load and follow the installed Hermes skill named "plan"');
+    expect(prompt).toContain("写任务书");
+    expect(prompt).not.toContain(SENTINEL_PATH);
+    expect(prompt).not.toContain("DO_NOT_SEND_7f3a");
+    expect(prompt).not.toContain(SENTINEL_BODY);
+    expect(prompt).not.toContain("active_note");
+    expect(prompt).not.toContain("<obsidian_context>");
+    expect(prompt).not.toContain("<document>");
+  });
+
+  it("falls back to the active-note marker for a menu-selected skill when the capsule is on but no document was captured", () => {
+    const prompt = buildOutboundPrompt({
+      request: "/skill plan 当前笔记是什么",
+      isSlashCommand: false,
+      isSkill: true,
+      includeCurrentDocumentContext: true,
+      selection: undefined,
+      documentContext: undefined,
+      activeNotePath: SENTINEL_PATH,
+    });
+
+    expect(prompt).toContain('Load and follow the installed Hermes skill named "plan"');
+    expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(prompt).toContain("document_included: false");
+    expect(prompt).toContain("当前笔记是什么");
+    expect(prompt).not.toContain("<document>");
+  });
+
+  it("never sends a menu-selected skill down the bare-slash path, even when it is also flagged as a slash command", () => {
+    const prompt = buildOutboundPrompt({
+      request: "/skill plan 总结这篇笔记",
+      isSlashCommand: true,
+      isSkill: true,
+      includeCurrentDocumentContext: true,
+      selection: undefined,
+      documentContext: sentinelDocumentContext(),
+      activeNotePath: SENTINEL_PATH,
+    });
+
+    expect(prompt).not.toBe("/skill plan 总结这篇笔记");
+    expect(prompt).toContain('Load and follow the installed Hermes skill named "plan"');
+    expect(prompt).toContain(`文件：${SENTINEL_PATH}`);
+    expect(prompt).toContain(SENTINEL_BODY);
   });
 
   it("falls back to the active-note marker only when the capsule is on but no document context was captured", () => {

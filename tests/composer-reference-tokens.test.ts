@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyInlineDraftEdit,
+  composerInlineDraftIsSkill,
   composerInlineDraftIsSlashCommand,
+  composerInlineDraftRouting,
   composerReferenceDraftIsSlashCommand,
   insertInlineReference,
   isInlineReference,
@@ -181,6 +183,53 @@ describe("composerReferenceDraftIsSlashCommand", () => {
         task: "  /model grok",
       }),
     ).toBe(true);
+  });
+});
+
+describe("composerInlineDraftIsSkill", () => {
+  it("treats an explicit menu-selected skill token as a skill invocation", () => {
+    expect(
+      composerInlineDraftIsSkill({ token: { kind: "skill", name: "plan" }, text: "", references: [] }),
+    ).toBe(true);
+  });
+
+  it("treats an explicit menu-selected command token as a command, not a skill", () => {
+    expect(
+      composerInlineDraftIsSkill({ token: { kind: "command", name: "model" }, text: "grok", references: [] }),
+    ).toBe(false);
+  });
+
+  it("never guesses a skill from free-typed /skill text without explicit token metadata", () => {
+    expect(
+      composerInlineDraftIsSkill({ token: null, text: "/skill leader 写任务书", references: [] }),
+    ).toBe(false);
+    expect(
+      composerInlineDraftIsSkill({ token: null, text: "/skill leader ", references: [] }),
+    ).toBe(false);
+  });
+
+  it("returns false for a plain request without any token", () => {
+    expect(
+      composerInlineDraftIsSkill({ token: null, text: "你好", references: [] }),
+    ).toBe(false);
+  });
+});
+
+describe("composerInlineDraftRouting", () => {
+  it("keeps a menu-selected skill inside the image-excluded slash bucket while routing it as a normal request", () => {
+    // Regression: the image/slash exclusivity must key on ANY slash
+    // invocation (hasSlashInvocation), while note/selection context routing
+    // keys on the native-only flag (isNativeSlashCommand). A skill is both
+    // image-excluded AND context-carrying.
+    const routing = composerInlineDraftRouting({
+      token: { kind: "skill", name: "plan" },
+      references: [],
+      text: "写任务书",
+    });
+
+    expect(routing.hasSlashInvocation).toBe(true);
+    expect(routing.isSkill).toBe(true);
+    expect(routing.isNativeSlashCommand).toBe(false);
   });
 });
 

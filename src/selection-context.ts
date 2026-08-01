@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { join, normalize } from "node:path";
 
+import { buildSlashOutboundPrompt } from "./slash-menu";
+
 import type {
   EditorPoint,
   MarkdownDocumentContext,
@@ -191,7 +193,10 @@ export function buildActiveNotePrompt(
 
 export interface OutboundPromptInput {
   request: string;
+  /** Native control command or free-typed slash text: passed through bare. */
   isSlashCommand: boolean;
+  /** Menu-selected skill invocation: routed like an ordinary model request. */
+  isSkill?: boolean;
   includeCurrentDocumentContext: boolean;
   selection?: SelectionContext;
   documentContext?: MarkdownDocumentContext;
@@ -202,25 +207,35 @@ export interface OutboundPromptInput {
 
 /**
  * Single routing point for the production send path (HermesianView.sendMessage).
- * Explicit selection wins (user-granted authorization even when the capsule is
- * off); slash commands and the off state are then passed through as the bare
- * user request. A captured document is only eligible while the capsule is on;
- * the on state with no captured document falls back to the active-note marker.
+ *
+ * A menu-selected skill is first converted into an ordinary model request
+ * (the skill load instruction replaces the raw `/skill <name> …` prefix),
+ * then routed through the same branches as any other request: an explicit
+ * selection wins (user-granted authorization even when the capsule is off);
+ * the off state with no selection passes through without any note context;
+ * a captured document is only eligible while the capsule is on; the on state
+ * with no captured document falls back to the active-note marker.
+ *
+ * Native control commands (and free-typed slash text) stay bare — the skill
+ * flag wins over the bare-slash flag so a skill can never lose its context.
  */
 export function buildOutboundPrompt(input: OutboundPromptInput): string {
-  if (input.isSlashCommand) {
+  if (input.isSlashCommand && !input.isSkill) {
     return input.request;
   }
+  const request = input.isSkill
+    ? buildSlashOutboundPrompt(input.request)
+    : input.request;
   if (input.selection) {
-    return buildSelectionPrompt(input.selection, input.request);
+    return buildSelectionPrompt(input.selection, request);
   }
   if (!input.includeCurrentDocumentContext) {
-    return input.request;
+    return request;
   }
   if (input.documentContext) {
-    return buildDocumentPrompt(input.documentContext, input.request);
+    return buildDocumentPrompt(input.documentContext, request);
   }
-  return buildActiveNotePrompt(input.activeNotePath, input.request);
+  return buildActiveNotePrompt(input.activeNotePath, request);
 }
 
 export function validateSelectionEdit(

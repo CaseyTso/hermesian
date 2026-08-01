@@ -414,3 +414,48 @@ export function composerInlineDraftIsSlashCommand(
     (draft.references.length === 0 && draft.text.trimStart().startsWith("/"))
   );
 }
+
+/**
+ * Menu-selected skill invocation: the explicit token kind is "skill".
+ * Never guessed from free-typed text — without explicit metadata the draft
+ * is plain text (including a hand-typed `/skill <name> …`).
+ */
+export function composerInlineDraftIsSkill(
+  draft: Pick<ComposerInlineDraft, "token" | "references" | "text">,
+): boolean {
+  return draft.token?.kind === "skill";
+}
+
+/** Send-time routing split for a composer draft. */
+export interface ComposerSlashRouting {
+  /**
+   * Any slash invocation (menu token or free-typed slash text): keeps the
+   * image/slash exclusivity — slash turns never carry pasted images.
+   */
+  hasSlashInvocation: boolean;
+  /** Menu-selected skill invocation: routed like an ordinary model request. */
+  isSkill: boolean;
+  /**
+   * Native control commands and free-typed slash text: bare routing, never
+   * wrapped in note/selection context.
+   */
+  isNativeSlashCommand: boolean;
+}
+
+/**
+ * Single decision point for the send path: the image/slash exclusivity keys
+ * on ANY slash invocation, while note/selection context routing keys on the
+ * native-only flag. A menu-selected skill is image-excluded AND
+ * context-carrying — one state cannot serve both purposes.
+ */
+export function composerInlineDraftRouting(
+  draft: Pick<ComposerInlineDraft, "token" | "references" | "text">,
+): ComposerSlashRouting {
+  const hasSlashInvocation = composerInlineDraftIsSlashCommand(draft);
+  const isSkill = composerInlineDraftIsSkill(draft);
+  return {
+    hasSlashInvocation,
+    isSkill,
+    isNativeSlashCommand: hasSlashInvocation && !isSkill,
+  };
+}

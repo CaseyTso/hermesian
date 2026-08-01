@@ -75,6 +75,7 @@ import {
   type ComposerState,
 } from "./ui/composer-view";
 import {
+  composerInlineDraftRouting,
   composerInlineDraftIsSlashCommand,
   removeInlineReference,
   restoreComposerInlineDraft,
@@ -1846,8 +1847,13 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
     const rawRequest = this.getComposerCanonicalDraft().trim();
-    const isSlashCommand = composerInlineDraftIsSlashCommand(this.composerDraft);
-    const pendingImages = isSlashCommand
+    // Two separate states: any slash invocation (menu token or free-typed
+    // slash text) keeps the image/slash exclusivity, while a menu-selected
+    // skill still routes like an ordinary model request (selection/document/
+    // off context handling below). Native control commands stay bare.
+    const { hasSlashInvocation, isSkill, isNativeSlashCommand } =
+      composerInlineDraftRouting(this.composerDraft);
+    const pendingImages = hasSlashInvocation
       ? []
       : this.pendingImages.get(activeTab.id) ?? [];
     if (pendingImages.length > 0 && !client.supportsImagePrompts) {
@@ -1865,12 +1871,12 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
 
-    const selection = isSlashCommand ? undefined : this.pendingSelection;
+    const selection = isNativeSlashCommand ? undefined : this.pendingSelection;
     // The current note's identity (path/title/body) is only ever read when the
     // context capsule is on; with the capsule off, this send path cannot obtain
     // the current note's path at all, so it cannot leak it to Hermes.
     const includeFullContext =
-      !isSlashCommand && !selection && this.includeCurrentDocumentContext;
+      !isNativeSlashCommand && !selection && this.includeCurrentDocumentContext;
     let documentContext: MarkdownDocumentContext | undefined;
     let activeNotePath: string | undefined;
     if (includeFullContext) {
@@ -1884,7 +1890,8 @@ export class HermesianSidebarView extends ItemView {
     }
     const prompt = buildOutboundPrompt({
       request,
-      isSlashCommand,
+      isSlashCommand: isNativeSlashCommand,
+      isSkill,
       includeCurrentDocumentContext: this.includeCurrentDocumentContext,
       selection,
       documentContext,
@@ -1897,7 +1904,7 @@ export class HermesianSidebarView extends ItemView {
     this.composerDraft = { token: null, text: "", references: [] };
     this.renderComposerInlineDraft();
     this.hideSlashMenu();
-    if (!isSlashCommand) {
+    if (!isNativeSlashCommand) {
       this.pendingSelection = undefined;
       this.renderSelectionBar();
     }
@@ -1915,7 +1922,7 @@ export class HermesianSidebarView extends ItemView {
     this.updateControls(false);
 
     try {
-      const outboundPrompt = isSlashCommand
+      const outboundPrompt = isNativeSlashCommand
         ? buildSlashOutboundPrompt(prompt)
         : `${prompt}\n\n${OBSIDIAN_OUTPUT_RULES}`;
       const promptContent: string | ContentBlock[] = pendingImages.length
