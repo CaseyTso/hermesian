@@ -1,7 +1,7 @@
 {
   "id": "hermesian",
   "name": "Hermesian",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.8.0",
   "description": "Use Hermes Agent in an Obsidian sidebar with selection-aware editing and pre-write diff approval.",
   "author": "CaseyTso",
