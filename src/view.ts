@@ -47,9 +47,7 @@ import {
   formatContextUsage,
 } from "./session-state";
 import {
-  buildActiveNotePrompt,
-  buildDocumentPrompt,
-  buildSelectionPrompt,
+  buildOutboundPrompt,
   validateSelectionEdit,
 } from "./selection-context";
 import { reasoningEffortLabel } from "./session-history";
@@ -1868,22 +1866,30 @@ export class HermesianSidebarView extends ItemView {
     }
 
     const selection = isSlashCommand ? undefined : this.pendingSelection;
-    const activeFilePath = this.plugin.getCurrentMarkdownFilePath();
-    this.setCurrentFile(activeFilePath);
-    const documentContext =
-      isSlashCommand || selection || !this.includeCurrentDocumentContext
-        ? undefined
-        : this.plugin.getCurrentDocumentContext();
-    if (documentContext) {
-      this.setCurrentFile(documentContext.filePath);
+    // The current note's identity (path/title/body) is only ever read when the
+    // context capsule is on; with the capsule off, this send path cannot obtain
+    // the current note's path at all, so it cannot leak it to Hermes.
+    const includeFullContext =
+      !isSlashCommand && !selection && this.includeCurrentDocumentContext;
+    let documentContext: MarkdownDocumentContext | undefined;
+    let activeNotePath: string | undefined;
+    if (includeFullContext) {
+      documentContext = this.plugin.getCurrentDocumentContext();
+      if (documentContext) {
+        this.setCurrentFile(documentContext.filePath);
+      } else {
+        activeNotePath = this.plugin.getCurrentMarkdownFilePath();
+        this.setCurrentFile(activeNotePath);
+      }
     }
-    const prompt = selection
-      ? buildSelectionPrompt(selection, request)
-      : documentContext
-        ? buildDocumentPrompt(documentContext, request)
-        : isSlashCommand
-          ? request
-          : buildActiveNotePrompt(activeFilePath, request);
+    const prompt = buildOutboundPrompt({
+      request,
+      isSlashCommand,
+      includeCurrentDocumentContext: this.includeCurrentDocumentContext,
+      selection,
+      documentContext,
+      activeNotePath,
+    });
     const runtime = this.turnRuntime(activeTab.id);
     this.editScopes.set(activeTab.id, selection ?? documentContext);
     this.appendUserMessage(request, selection, documentContext, activeTab.id, pendingImages);

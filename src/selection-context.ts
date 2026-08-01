@@ -189,6 +189,40 @@ export function buildActiveNotePrompt(
   ].join("\n");
 }
 
+export interface OutboundPromptInput {
+  request: string;
+  isSlashCommand: boolean;
+  includeCurrentDocumentContext: boolean;
+  selection?: SelectionContext;
+  documentContext?: MarkdownDocumentContext;
+  /** Only ever supplied when the context capsule is on; the off-state send
+   *  path never obtains the current note's path, so it cannot leak it. */
+  activeNotePath?: string;
+}
+
+/**
+ * Single routing point for the production send path (HermesianView.sendMessage).
+ * Explicit selection wins (user-granted authorization even when the capsule is
+ * off); slash commands and the off state are then passed through as the bare
+ * user request. A captured document is only eligible while the capsule is on;
+ * the on state with no captured document falls back to the active-note marker.
+ */
+export function buildOutboundPrompt(input: OutboundPromptInput): string {
+  if (input.isSlashCommand) {
+    return input.request;
+  }
+  if (input.selection) {
+    return buildSelectionPrompt(input.selection, input.request);
+  }
+  if (!input.includeCurrentDocumentContext) {
+    return input.request;
+  }
+  if (input.documentContext) {
+    return buildDocumentPrompt(input.documentContext, input.request);
+  }
+  return buildActiveNotePrompt(input.activeNotePath, input.request);
+}
+
 export function validateSelectionEdit(
   context: SelectionContext | MarkdownDocumentContext | undefined,
   diffs: SelectionEditDiff[],
