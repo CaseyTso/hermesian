@@ -77,10 +77,28 @@ import {
   type ComposerState,
 } from "./ui/composer-view";
 import {
+  composerInlineDraftIsSlashCommand,
+  removeInlineReference,
+  restoreComposerInlineDraft,
+  serializeComposerInlineDraft,
+  type ComposerInlineDraft,
+  type InlineReference,
+  type ReferenceToken,
+} from "./composer-reference-tokens";
+import {
+  applyInlineCut,
+  getCaretOffset,
+  handleInlineEditorKeydown,
+  handleInlineEditorPaste,
+  inlineCutPayload,
+  renderInlineDraft,
+  setCaretOffset,
+  type InlineEditorRenderOptions,
+} from "./composer-inline-editor";
+import {
   buildSlashOutboundPrompt,
   buildSlashMenuItems,
   composerSlashTokenFromMenuItem,
-  restoreComposerSlashDraft,
   serializeComposerSlashDraft,
   slashMenuInsertion,
   type ComposerSlashToken,
@@ -161,8 +179,12 @@ function readFileAsDataUrl(file: File): Promise<string> {
 
 export class HermesianSidebarView extends ItemView {
   private addConversationButtonEl!: HTMLButtonElement;
-  private composerEl!: HTMLTextAreaElement;
-  private composerSlashToken: ComposerSlashToken | null = null;
+  private composerEl!: HTMLElement;
+  private composerDraft: ComposerInlineDraft = {
+    token: null,
+    text: "",
+    references: [],
+  };
   private conversationTabsEl!: HTMLElement;
   private conversationWorkspace: PersistedConversationWorkspace | undefined;
   private controller: ConversationController<HermesAcpClient> | undefined;
@@ -477,7 +499,9 @@ export class HermesianSidebarView extends ItemView {
     );
 
     const composerCallbacks: ComposerCallbacks = {
-      onDraftChange: (_draft: string) => {
+      getDraft: () => this.composerDraft,
+      onDraftChange: (draft: ComposerInlineDraft) => {
+        this.composerDraft = draft;
         this.renderSlashMenu(true);
         this.captureActiveConversationRuntime();
       },
@@ -493,18 +517,66 @@ export class HermesianSidebarView extends ItemView {
           void this.plugin.getClient(activeTab.id).cancel();
         }
       },
-      onSlashTokenClear: () => {
-        this.setComposerSlashToken(null);
-        this.composerEl.value = "";
+      onKeydown: (event: KeyboardEvent) => {
+        if (this.handleSlashMenuKeydown(event)) {
+          return;
+        }
+        const result = handleInlineEditorKeydown(
+          this.composerEl,
+          event,
+          this.composerDraft,
+          this.inlineRenderOptions(),
+        );
+        if (!result.handled) {
+          return;
+        }
+        event.preventDefault();
+        if (result.draft) {
+          this.composerDraft = result.draft;
+          this.captureActiveConversationRuntime();
+        }
+        if (result.sendRequested) {
+          void this.sendMessage();
+        } else if (result.slashClearRequested) {
+          this.setComposerSlashToken(null);
+          this.captureActiveConversationRuntime();
+          this.renderSlashMenu(true);
+          this.composerEl.focus();
+        }
+      },
+      onCopy: (event: ClipboardEvent) => {
+        const payload = inlineCutPayload(this.composerEl, this.composerDraft);
+        if (payload === null) {
+          return;
+        }
+        event.preventDefault();
+        event.clipboardData?.setData("text/plain", payload);
+      },
+      onCut: (event: ClipboardEvent) => {
+        const result = applyInlineCut(
+          this.composerEl,
+          this.composerDraft,
+          this.inlineRenderOptions(),
+        );
+        if (!result.handled) {
+          return;
+        }
+        event.preventDefault();
+        event.clipboardData?.setData("text/plain", result.payload ?? "");
+        this.composerDraft = result.draft!;
         this.captureActiveConversationRuntime();
-        this.renderSlashMenu(true);
-        this.composerEl.focus();
+      },
+      onReferenceRemove: (index: number) => {
+        this.removeComposerReference(index);
+      },
+      renderIcon: (iconEl, kind) => {
+        setIcon(iconEl, kind === "url" ? "link" : "file");
       },
     };
 
     const initialComposerState: ComposerState = {
       disabled: true,
-      draft: "",
+      draft: { token: null, text: "", references: [] },
       placeholder: "Ask Hermes…  ↵ to send · Shift+↵ for new line",
       sendEnabled: false,
       stopVisible: false,
@@ -542,6 +614,7 @@ export class HermesianSidebarView extends ItemView {
     setIcon(composerElements.sendButtonEl.querySelector("span")!, "arrow-right");
     setIcon(composerElements.stopButtonEl.querySelector("span")!, "square");
     this.setComposerSlashToken(null);
+    this.renderComposerInlineDraft();
 
     // Wire event handlers
     this.currentFileBarEl.addEventListener("click", () => {
@@ -554,15 +627,6 @@ export class HermesianSidebarView extends ItemView {
     });
     this.renderCurrentFile();
 
-    this.composerEl.addEventListener("keydown", (event) => {
-      if (this.handleSlashMenuKeydown(event)) {
-        return;
-      }
-      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-        event.preventDefault();
-        void this.sendMessage();
-      }
-    });
     this.composerEl.addEventListener("blur", () => {
       window.setTimeout(() => {
         if (!this.slashMenuEl.contains(this.containerEl.ownerDocument.activeElement)) {
@@ -873,7 +937,8 @@ export class HermesianSidebarView extends ItemView {
     this.conversationWorkspace = updateConversationTab(workspace, activeTabId, {
       draft: this.getComposerCanonicalDraft(),
       includeCurrentDocumentContext: this.includeCurrentDocumentContext,
-      token: this.composerSlashToken ?? undefined,
+      token: this.composerDraft.token ?? undefined,
+      references: this.composerDraft.references,
     });
     this.plugin.setConversationWorkspace(this.conversationWorkspace);
   }
@@ -883,7 +948,7 @@ export class HermesianSidebarView extends ItemView {
     if (!activeTab) {
       return;
     }
-    this.applyComposerCanonicalDraft(activeTab.draft, activeTab.token);
+    this.applyComposerCanonicalDraft(activeTab.draft, activeTab.token, activeTab.references);
     this.includeCurrentDocumentContext = activeTab.includeCurrentDocumentContext;
     this.pendingSelection = this.tabSelections.get(activeTab.id);
     this.renderCurrentFile();
@@ -1431,7 +1496,7 @@ export class HermesianSidebarView extends ItemView {
     );
     this.contextProgressEl.dataset.level = contextUsageLevel(state.contextUsage);
     this.contextProgressEl.style.width = `${contextUsagePercent(state.contextUsage)}%`;
-    if (this.getComposerCanonicalDraft().startsWith("/")) {
+    if (this.composerInlineDraftIsSlashCommand()) {
       this.renderSlashMenu(false);
     }
   }
@@ -1440,8 +1505,7 @@ export class HermesianSidebarView extends ItemView {
     const value = this.getComposerSlashMenuValue();
     if (
       !this.controlAvailability().composer ||
-      this.composerEl.selectionStart !== this.composerEl.value.length ||
-      this.composerEl.selectionEnd !== this.composerEl.value.length
+      getCaretOffset(this.composerEl) !== this.composerDraft.text.length
     ) {
       this.hideSlashMenu();
       return;
@@ -1565,14 +1629,19 @@ export class HermesianSidebarView extends ItemView {
     const token = composerSlashTokenFromMenuItem(item);
     if (token) {
       this.setComposerSlashToken(token);
-      this.composerEl.value = "";
-      this.composerEl.setSelectionRange(0, 0);
+      this.composerDraft = { token, text: "", references: [] };
+      this.renderComposerInlineDraft();
     } else {
       // skill-loader and any non-token items keep plain insertion text
       this.setComposerSlashToken(null);
       const insertion = slashMenuInsertion(item);
-      this.composerEl.value = insertion;
-      this.composerEl.setSelectionRange(insertion.length, insertion.length);
+      this.composerDraft = {
+        token: null,
+        text: insertion,
+        references: [],
+      };
+      this.renderComposerInlineDraft();
+      setCaretOffset(this.composerEl, insertion.length);
     }
     this.captureActiveConversationRuntime();
     this.hideSlashMenu();
@@ -1612,6 +1681,19 @@ export class HermesianSidebarView extends ItemView {
     const clipboardItems = Array.from(event.clipboardData?.items ?? []);
     const imageItems = clipboardItems.filter(isImageClipboardItem);
     if (imageItems.length === 0) {
+      // No image on the clipboard: the adapter replaces the selection with a
+      // capsule for a whole-paste URL/absolute path, or plain text otherwise.
+      const result = handleInlineEditorPaste(
+        this.composerEl,
+        event,
+        this.composerDraft,
+        this.inlineRenderOptions(),
+      );
+      if (result.handled && result.draft) {
+        event.preventDefault();
+        this.composerDraft = result.draft;
+        this.captureActiveConversationRuntime();
+      }
       return;
     }
 
@@ -1766,7 +1848,7 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
     const rawRequest = this.getComposerCanonicalDraft().trim();
-    const isSlashCommand = rawRequest.startsWith("/");
+    const isSlashCommand = composerInlineDraftIsSlashCommand(this.composerDraft);
     const pendingImages = isSlashCommand
       ? []
       : this.pendingImages.get(activeTab.id) ?? [];
@@ -1806,7 +1888,8 @@ export class HermesianSidebarView extends ItemView {
     this.editScopes.set(activeTab.id, selection ?? documentContext);
     this.appendUserMessage(request, selection, documentContext, activeTab.id, pendingImages);
     this.setComposerSlashToken(null);
-    this.composerEl.value = "";
+    this.composerDraft = { token: null, text: "", references: [] };
+    this.renderComposerInlineDraft();
     this.hideSlashMenu();
     if (!isSlashCommand) {
       this.pendingSelection = undefined;
@@ -2171,7 +2254,7 @@ export class HermesianSidebarView extends ItemView {
       },
       {
         disabled: !availability.composer,
-        draft: this.getComposerCanonicalDraft(),
+        draft: this.composerDraft,
         placeholder: this.composerPlaceholder(),
         sendEnabled: availability.send,
         stopVisible: availability.stop,
@@ -2185,41 +2268,79 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private getComposerCanonicalDraft(): string {
-    return serializeComposerSlashDraft({
-      token: this.composerSlashToken,
-      task: this.composerEl.value,
-    });
+    return serializeComposerInlineDraft(this.composerDraft);
+  }
+
+  private composerInlineDraftIsSlashCommand(): boolean {
+    return composerInlineDraftIsSlashCommand(this.composerDraft);
   }
 
   /**
    * Value used for slash-menu matching.
-   * With an active token the textarea only holds the task, so rebuild the
+   * With an active token the editor only holds the task, so rebuild the
    * canonical prefix for menu queries (empty task → "/skill name " form).
    */
   private getComposerSlashMenuValue(): string {
-    if (!this.composerSlashToken) {
-      return this.composerEl.value;
+    if (!this.composerDraft.token) {
+      return this.composerDraft.text;
     }
     return serializeComposerSlashDraft({
-      token: this.composerSlashToken,
-      task: this.composerEl.value,
+      token: this.composerDraft.token,
+      task: this.composerDraft.text,
     });
   }
 
   private applyComposerCanonicalDraft(
     raw: string,
     explicitToken?: { kind: "skill" | "command"; name: string } | null,
+    explicitReferences?: readonly (ReferenceToken | InlineReference)[] | null,
   ): void {
-    // Single restore decision: restoreComposerSlashDraft validates both the
-    // token metadata AND the draft prefix consistency. Never show a token
-    // before checking; on any mismatch the raw draft stays verbatim.
-    const restored = restoreComposerSlashDraft(raw, explicitToken);
+    // Single restore decision: restoreComposerInlineDraft validates the
+    // token metadata, the reference metadata, AND draft consistency. New
+    // schema placements must be exact; legacy prefix metadata migrates
+    // losslessly. On any mismatch the raw draft stays verbatim as plain text.
+    const restored = restoreComposerInlineDraft(raw, explicitToken, explicitReferences);
     this.setComposerSlashToken(restored.token);
-    this.composerEl.value = restored.task;
+    this.composerDraft = restored;
+    this.renderComposerInlineDraft();
+  }
+
+  /**
+   * Re-render the inline capsules inside the contenteditable editor.
+   * Icons are injected by the host (Obsidian's setIcon).
+   */
+  private renderComposerInlineDraft(): void {
+    renderInlineDraft(
+      this.composerEl,
+      this.composerDraft,
+      this.inlineRenderOptions(),
+    );
+  }
+
+  private inlineRenderOptions(): InlineEditorRenderOptions {
+    return {
+      onRemoveReference: (index) => {
+        this.removeComposerReference(index);
+      },
+      renderIcon: (iconEl, kind) => {
+        setIcon(iconEl, kind === "url" ? "link" : "file");
+      },
+    };
+  }
+
+  private removeComposerReference(index: number): void {
+    this.composerDraft = {
+      ...removeInlineReference(this.composerDraft, index),
+      token: this.composerDraft.token,
+    };
+    this.renderComposerInlineDraft();
+    this.captureActiveConversationRuntime();
+    this.composerEl.focus();
   }
 
   private setComposerSlashToken(token: ComposerSlashToken | null): void {
-    this.composerSlashToken = token;
+    // Single source of truth: update the model FIRST, then project UI.
+    this.composerDraft = { ...this.composerDraft, token };
     applyComposerSlashToken(
       {
         slashTokenEl: this.slashTokenEl,
@@ -2240,7 +2361,7 @@ export class HermesianSidebarView extends ItemView {
 
   private composerPlaceholder(): string {
     const activeTabId = this.conversationWorkspace?.activeTabId;
-    if (this.composerSlashToken) {
+    if (this.composerDraft.token) {
       return activeTabId && this.isTabLoading(activeTabId)
         ? "Add a task for this command…"
         : "Add a task…  ↵ to send · Shift+↵ for new line";
@@ -2251,7 +2372,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private updateComposerPlaceholder(): void {
-    this.composerEl.placeholder = this.composerPlaceholder();
+    this.composerEl.setAttribute("data-placeholder", this.composerPlaceholder());
   }
 
   private scrollToBottom(sourceTabId?: string): void {

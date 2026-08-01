@@ -931,9 +931,88 @@
   line-height: 1.5;
   min-height: 64px;
   min-width: 0;
+  outline: none !important;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
   padding: 9px 2px 7px;
-  resize: vertical;
+  white-space: pre-wrap;
   width: 100%;
+  word-break: break-word;
+}
+
+.hermesian-input[data-placeholder]:empty::before {
+  color: var(--text-faint);
+  content: attr(data-placeholder);
+  pointer-events: none;
+}
+
+/* Inline reference capsules inside the contenteditable editor: atomic
+   display projections of full URL/path values. The full value always lives
+   in title/aria-label and in the model; only the compact label is drawn. */
+.hermesian-inline-ref {
+  align-items: center;
+  background: color-mix(in srgb, var(--hermesian-accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--hermesian-accent) 40%, transparent);
+  border-radius: 6px;
+  box-sizing: border-box;
+  color: var(--text-normal);
+  display: inline-flex;
+  font-size: 0.92em;
+  gap: 3px;
+  line-height: 1.3;
+  margin: 0 1px;
+  max-width: 100%;
+  padding: 0 4px;
+  user-select: none;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+.hermesian-inline-ref.is-url {
+  background: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--interactive-accent) 35%, transparent);
+}
+
+.hermesian-inline-ref-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.hermesian-inline-ref-icon svg {
+  height: 11px;
+  width: 11px;
+}
+
+.hermesian-inline-ref-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hermesian-inline-ref-remove {
+  background: transparent;
+  border: 0 !important;
+  box-shadow: none !important;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 1px;
+}
+
+.hermesian-inline-ref-remove:hover {
+  color: var(--text-error);
+}
+
+.hermesian-composer.is-disabled .hermesian-slash-token,
+.hermesian-input[contenteditable="false"] ~ .hermesian-slash-token,
+.hermesian-composer:has(.hermesian-input[contenteditable="false"]) .hermesian-slash-token {
+  opacity: 0.55;
+}
+
+.hermesian-input[contenteditable="false"] .hermesian-inline-ref {
+  opacity: 0.7;
+  pointer-events: none;
 }
 
 .hermesian-composer-input-row {
@@ -994,14 +1073,85 @@
 }
 
 .hermesian-composer.is-disabled .hermesian-slash-token,
-.hermesian-input:disabled ~ .hermesian-slash-token,
-.hermesian-composer:has(.hermesian-input:disabled) .hermesian-slash-token {
+.hermesian-input[contenteditable="false"] ~ .hermesian-slash-token,
+.hermesian-composer:has(.hermesian-input[contenteditable="false"]) .hermesian-slash-token {
   opacity: 0.55;
 }
 
 .hermesian-slash-token.is-capsule:hover {
   background: color-mix(in srgb, var(--hermesian-accent) 18%, transparent);
   border-color: color-mix(in srgb, var(--hermesian-accent) 55%, transparent);
+}
+
+/* Whole-paste URL/path reference chips: neutral filled capsules, visually
+   and semantically distinct from the accent slash-token chrome. */
+.hermesian-composer-refs {
+  align-items: center;
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  max-width: 100%;
+  /* Never squeeze chips below their natural (un-truncated) width, but cap at
+     the row so oversized labels still ellipsize/wrap instead of overflowing. */
+  min-width: min(100%, min-content);
+}
+
+.hermesian-ref-token {
+  align-items: center;
+  background: color-mix(in srgb, var(--text-muted) 14%, transparent);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  box-sizing: border-box;
+  color: var(--text-normal);
+  cursor: pointer;
+  display: inline-flex;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  gap: 4px;
+  line-height: 1.3;
+  max-height: 26px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 8px 2px 6px;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.hermesian-ref-token:hover {
+  background: color-mix(in srgb, var(--text-muted) 22%, transparent);
+  border-color: var(--text-faint);
+}
+
+.hermesian-ref-token.is-path {
+  color: var(--text-muted);
+}
+
+.hermesian-ref-token-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.hermesian-ref-token-icon svg {
+  height: 13px;
+  width: 13px;
+}
+
+.hermesian-ref-token-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Path and URL chips both stay single-line compact (path=basename,
+   URL=host). Full original values live in title/aria only; no extra
+   .is-url overrides needed beyond the shared .hermesian-ref-token rules. */
+
+.hermesian-composer.is-disabled .hermesian-ref-token,
+.hermesian-composer:has(.hermesian-input:disabled) .hermesian-ref-token {
+  opacity: 0.55;
 }
 
 .hermesian-input::placeholder {

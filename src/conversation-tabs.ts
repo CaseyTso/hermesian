@@ -1,3 +1,8 @@
+import {
+  isInlineReference,
+  isReferenceToken,
+  type ReferenceToken,
+} from "./composer-reference-tokens";
 import { SLASH_TOKEN_NAME_PATTERN } from "./slash-menu";
 
 export interface PersistedConversationTab {
@@ -8,6 +13,8 @@ export interface PersistedConversationTab {
   sessionId: string | null;
   /** Explicit token metadata from menu selection (not inferred from draft text). */
   token?: { kind: "skill" | "command"; name: string } | undefined;
+  /** Explicit reference metadata from whole-paste URL/path recognition. */
+  references?: ReferenceToken[] | undefined;
 }
 
 export interface PersistedConversationWorkspace {
@@ -20,7 +27,10 @@ export interface PersistedConversationWorkspace {
 export type ConversationTabPatch = Pick<
   PersistedConversationTab,
   "draft" | "includeCurrentDocumentContext"
-> & { token?: { kind: "skill" | "command"; name: string } | undefined };
+> & {
+  token?: { kind: "skill" | "command"; name: string } | undefined;
+  references?: ReferenceToken[] | undefined;
+};
 
 
 export interface ConversationControlAvailabilityInput {
@@ -418,6 +428,23 @@ export function normalizeConversationWorkspace(
         token = { kind: tokenRecord.kind, name: tokenRecord.name };
       }
     }
+
+    // Validate optional reference metadata (runtime check, not just types):
+    // every entry must be a well-formed reference token. New-schema entries
+    // must also carry a valid UTF-16 start; legacy entries without a start
+    // stay readable (restore migrates the fixed prefix). Invalid metadata is
+    // dropped (the tab draft stays untouched; restore degrades to plain text).
+    let references: ReferenceToken[] | undefined;
+    if (
+      Array.isArray(tab.references) &&
+      tab.references.every(
+        (entry) =>
+          isReferenceToken(entry) &&
+          (!("start" in entry) || isInlineReference(entry)),
+      )
+    ) {
+      references = tab.references as ReferenceToken[];
+    }
     ids.add(tab.id);
     const normalizedSessionId =
       typeof tab.sessionId === "string" ? tab.sessionId.trim() : null;
@@ -435,6 +462,7 @@ export function normalizeConversationWorkspace(
       label: tabs.length + 1,
       sessionId,
       token,
+      references,
     } as PersistedConversationTab);
   }
 

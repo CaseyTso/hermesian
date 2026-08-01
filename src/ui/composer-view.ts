@@ -1,9 +1,20 @@
 import type { ComposerSlashToken } from "../slash-menu";
 import { visibleSlashTokenLabel } from "../slash-menu";
+import {
+  referenceTokenDisplayLabel,
+  type ReferenceToken,
+  type ReferenceTokenKind,
+} from "../composer-reference-tokens";
+import type { ComposerInlineDraft } from "../composer-reference-tokens";
+import {
+  handleInlineEditorInput,
+  renderInlineDraft,
+  type InlineEditorRenderOptions,
+} from "../composer-inline-editor";
 
 export interface ComposerElements {
   addSelectionButtonEl: HTMLButtonElement;
-  composerEl: HTMLTextAreaElement;
+  composerEl: HTMLElement;
   composerHostEl: HTMLElement;
   composerInputRowEl: HTMLElement;
   contextProgressEl: HTMLElement;
@@ -15,6 +26,7 @@ export interface ComposerElements {
   modelLabelEl: HTMLElement;
   reasoningButtonEl: HTMLButtonElement;
   reasoningLabelEl: HTMLElement;
+  referenceChipsEl: HTMLElement;
   selectionBarEl: HTMLElement;
   sendButtonEl: HTMLButtonElement;
   slashMenuEl: HTMLElement;
@@ -25,11 +37,11 @@ export interface ComposerElements {
 }
 
 export interface ComposerState {
-  /** Whether the composer textarea is disabled (e.g., during initialization). */
+  /** Whether the composer editor is disabled (e.g., during initialization). */
   disabled: boolean;
-  /** Current draft text. */
-  draft: string;
-  /** Placeholder shown when the textarea is empty. */
+  /** Current draft model (full text + inline reference placements). */
+  draft: ComposerInlineDraft;
+  /** Placeholder shown when the editor is empty. */
   placeholder: string;
   /** Whether the Send button is enabled. */
   sendEnabled: boolean;
@@ -38,19 +50,30 @@ export interface ComposerState {
 }
 
 export interface ComposerCallbacks {
-  /** Called when the user modifies the draft text. */
-  onDraftChange(draft: string): void;
+  /** Called when the user modifies the draft (model synced from the editor DOM). */
+  onDraftChange(draft: ComposerInlineDraft): void;
+  /**
+   * Fetch the host's CURRENT draft. The editor must never keep a
+   * creation-time snapshot: external restores / tab switches replace the
+   * host model, and ordinary input has to carry that live token forward.
+   */
+  getDraft(): ComposerInlineDraft;
   /** Called on Enter (without Shift) or Send button click. */
   onSend(): void;
   /** Called on Stop button click. */
   onStop(): void;
-  /** Called on paste events for image handling. */
+  /** Called on paste events (image handling and text pastes). */
   onPaste(event: ClipboardEvent): void;
-  /**
-   * Optional: empty-task Backspace while a slash token is visible.
-   * Parent should clear the atomic token and restore plain input.
-   */
-  onSlashTokenClear?(): void;
+  /** Keydown forwarded from the editor — host drives slash menu + adapter. */
+  onKeydown(event: KeyboardEvent): void;
+  /** Copy event forwarded from the editor (capsule-aware clipboard). */
+  onCopy?(event: ClipboardEvent): void;
+  /** Cut event forwarded from the editor (capsule-aware clipboard). */
+  onCut?(event: ClipboardEvent): void;
+  /** Called when an inline capsule's remove button is clicked. */
+  onReferenceRemove?(index: number): void;
+  /** Optional icon renderer (host injects Obsidian's setIcon). */
+  renderIcon?(iconEl: HTMLElement, kind: ReferenceTokenKind): void;
 }
 
 export function createComposerView(
@@ -100,21 +123,30 @@ export function createComposerView(
     cls: "hermesian-slash-token-label",
   });
 
-  const composerEl = composerInputRowEl.createEl("textarea", {
+  const referenceChipsEl = composerInputRowEl.createDiv({
+    cls: "hermesian-composer-refs",
+  });
+  referenceChipsEl.hide();
+
+  const composerEl = composerInputRowEl.createEl("div", {
     attr: {
       "aria-autocomplete": "list",
       "aria-controls": "hermesian-slash-menu",
       "aria-expanded": "false",
       "aria-label": "Message Hermes",
-      placeholder: state.placeholder,
-      role: "combobox",
-      rows: "3",
+      "aria-multiline": "true",
+      "data-placeholder": state.placeholder,
+      role: "textbox",
     },
     cls: "hermesian-input",
-  }) as HTMLTextAreaElement;
+  }) as HTMLElement;
+  composerEl.setAttribute("contenteditable", state.disabled ? "false" : "true");
 
-  composerEl.value = state.draft;
-  composerEl.disabled = state.disabled;
+  const renderOptions = (): InlineEditorRenderOptions => ({
+    onRemoveReference: callbacks.onReferenceRemove,
+    renderIcon: callbacks.renderIcon,
+  });
+  renderInlineDraft(composerEl, state.draft, renderOptions());
 
   const slashMenuEl = composerHostEl.createDiv({
     attr: {
@@ -188,7 +220,10 @@ export function createComposerView(
 
   // --- Event wiring ---
   composerEl.addEventListener("input", () => {
-    callbacks.onDraftChange(composerEl.value);
+    // Always read the host's LIVE draft — never a creation-time snapshot —
+    // so tokens applied by external restores / tab switches survive typing.
+    const updated = handleInlineEditorInput(composerEl, callbacks.getDraft());
+    callbacks.onDraftChange(updated);
   });
 
   composerEl.addEventListener("paste", (event) => {
@@ -196,25 +231,15 @@ export function createComposerView(
   });
 
   composerEl.addEventListener("keydown", (event) => {
-    if (event.key !== "Backspace" || event.isComposing) {
-      return;
-    }
-    if (!callbacks.onSlashTokenClear) {
-      return;
-    }
-    if (slashTokenEl.style.display === "none") {
-      return;
-    }
-    const start = composerEl.selectionStart ?? 0;
-    const end = composerEl.selectionEnd ?? 0;
-    if (start !== 0 || end !== 0) {
-      return;
-    }
-    if (composerEl.value.length > 0) {
-      return;
-    }
-    event.preventDefault();
-    callbacks.onSlashTokenClear();
+    callbacks.onKeydown(event);
+  });
+
+  composerEl.addEventListener("copy", (event) => {
+    callbacks.onCopy?.(event);
+  });
+
+  composerEl.addEventListener("cut", (event) => {
+    callbacks.onCut?.(event);
   });
 
   composerEl.addEventListener("blur", () => {
@@ -259,6 +284,7 @@ export function createComposerView(
     modelLabelEl,
     reasoningButtonEl,
     reasoningLabelEl,
+    referenceChipsEl,
     selectionBarEl,
     sendButtonEl,
     slashMenuEl,
@@ -273,7 +299,7 @@ export function applyComposerState(
   elements: Pick<ComposerElements, "composerEl" | "sendButtonEl" | "stopButtonEl">,
   state: ComposerState,
 ): void {
-  elements.composerEl.disabled = state.disabled;
+  elements.composerEl.contentEditable = state.disabled ? "false" : "true";
   elements.sendButtonEl.disabled = !state.sendEnabled;
 
   if (state.stopVisible) {
@@ -289,9 +315,71 @@ export function applyComposerState(
 }
 
 /**
- * Show or hide the atomic slash token beside the textarea.
- * Skill tokens use a capsule chrome; native commands stay inline blue text.
+ * Re-render the editor when the draft model changes (structural edits are
+ * applied by the adapter itself; this covers restore/clear paths where the
+ * host supplies a brand-new model reference).
  */
+export function applyComposerDraft(
+  elements: Pick<ComposerElements, "composerEl">,
+  draft: ComposerInlineDraft,
+  callbacks: Pick<ComposerCallbacks, "onReferenceRemove" | "renderIcon">,
+): void {
+  renderInlineDraft(elements.composerEl, draft, {
+    onRemoveReference: callbacks.onReferenceRemove,
+    renderIcon: callbacks.renderIcon,
+  });
+}
+export interface ComposerReferenceElements {
+  referenceChipsEl: HTMLElement;
+}
+
+export interface ComposerReferenceCallbacks {
+  /** Called when a chip's remove button is clicked. */
+  onRemoveReference(index: number): void;
+  /** Optional icon renderer (host injects Obsidian's setIcon). */
+  renderIcon?(iconEl: HTMLElement, kind: ReferenceTokenKind): void;
+}
+
+/**
+ * Render the ordered reference chips (whole-paste URLs / absolute paths)
+ * as neutral filled capsules before the textarea. Multiple chips wrap on
+ * narrow sidebars; each chip shows a compact display label (URL host /
+ * path basename) with the full value in `title` and an accessible remove
+ * name. Never matches the slash-token chrome (accent-colored capsule /
+ * blue inline).
+ */
+export function applyComposerReferences(
+  elements: ComposerReferenceElements,
+  references: ReferenceToken[],
+  callbacks: ComposerReferenceCallbacks,
+): void {
+  const container = elements.referenceChipsEl;
+  container.empty();
+  if (references.length === 0) {
+    container.hide();
+    return;
+  }
+  container.show();
+  references.forEach((reference, index) => {
+    const chip = container.createEl("button", {
+      attr: {
+        "aria-label": `Remove reference ${reference.kind === "url" ? "URL" : "path"} ${reference.value}`,
+        title: reference.value,
+        type: "button",
+      },
+      cls: `hermesian-ref-token is-${reference.kind}`,
+    });
+    const icon = chip.createSpan({ cls: "hermesian-ref-token-icon" });
+    callbacks.renderIcon?.(icon, reference.kind);
+    chip.createSpan({
+      cls: "hermesian-ref-token-label",
+      text: referenceTokenDisplayLabel(reference),
+    });
+    chip.addEventListener("click", () => {
+      callbacks.onRemoveReference(index);
+    });
+  });
+}
 export function applyComposerSlashToken(
   elements: Pick<
     ComposerElements,

@@ -682,3 +682,249 @@ describe("token persistence", () => {
     expect((workspace!.tabs[0] as any).token).toBeUndefined();
   });
 });
+
+describe("reference persistence", () => {
+  it("preserves reference metadata in a persisted tab patch", () => {
+    const workspace = createConversationWorkspace("tab-a", "session-a");
+    const references = [
+      { kind: "url" as const, value: "https://example.com/a" },
+      { kind: "path" as const, value: "/Users/中文 空格/笔记.md" },
+    ];
+    const updated = updateConversationTab(workspace, "tab-a", {
+      draft: "https://example.com/a /Users/中文 空格/笔记.md 请总结",
+      includeCurrentDocumentContext: true,
+      references,
+    });
+
+    expect(updated.tabs[0]).toMatchObject({ references });
+  });
+
+  it("normalizes workspaces and keeps valid reference metadata", () => {
+    const references = [
+      { kind: "url", value: "https://example.com/a" },
+      { kind: "path", value: "/Users/中文 空格/笔记.md" },
+    ];
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: "https://example.com/a /Users/中文 空格/笔记.md 请总结",
+          references,
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace).toBeDefined();
+    expect(workspace!.tabs[0].references).toEqual(references);
+    expect(workspace!.tabs[0].draft).toBe(
+      "https://example.com/a /Users/中文 空格/笔记.md 请总结",
+    );
+  });
+
+  it("normalizes old workspaces without a references field (backward compat)", () => {
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: "https://example.com/a ordinary text",
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace).toBeDefined();
+    expect((workspace!.tabs[0] as any).references).toBeUndefined();
+  });
+
+  it.each([
+    ["not an array", { kind: "url", value: "https://example.com/a" }],
+    [
+      "bad kind",
+      [{ kind: "bookmark", value: "https://example.com/a" }],
+    ],
+    [
+      "empty value",
+      [{ kind: "url", value: "" }],
+    ],
+    [
+      "non-string value",
+      [{ kind: "url", value: 42 }],
+    ],
+    [
+      "kind/value mismatch",
+      [{ kind: "url", value: "/Users/x" }],
+    ],
+    [
+      "untrimmed value",
+      [{ kind: "url", value: " https://example.com/a " }],
+    ],
+  ])(
+    "discards invalid reference metadata (%s) but keeps the workspace and draft",
+    (_label, references) => {
+      const workspace = normalizeConversationWorkspace({
+        activeTabId: "tab-a",
+        tabs: [
+          {
+            id: "tab-a",
+            label: 1,
+            sessionId: "session-a",
+            draft: "https://example.com/a 请总结",
+            references: references as never,
+          },
+        ],
+        version: 2,
+      });
+
+      expect(workspace).toBeDefined();
+      expect((workspace!.tabs[0] as any).references).toBeUndefined();
+      expect(workspace!.tabs[0].draft).toBe("https://example.com/a 请总结");
+    },
+  );
+
+  it("round-trips reference metadata through normalize without loss or duplication", () => {
+    const references = [
+      { kind: "url", value: "https://example.com/once" },
+      { kind: "path", value: "/Users/once/路径 空格.md" },
+    ];
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: "https://example.com/once /Users/once/路径 空格.md task",
+          references,
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace).toBeDefined();
+    expect(workspace!.tabs[0].references).toEqual(references);
+  });
+});
+
+describe("inline reference persistence (start placements)", () => {
+  const URL_A = "https://example.com/a";
+  const URL_B = "https://example.com/b";
+
+  it("preserves inline reference metadata with UTF-16 starts in a tab patch", () => {
+    const workspace = createConversationWorkspace("tab-a", "session-a");
+    const references = [
+      { kind: "url" as const, value: URL_A, start: 3 },
+      { kind: "url" as const, value: URL_B, start: 3 + URL_A.length + 4 },
+    ];
+    const updated = updateConversationTab(workspace, "tab-a", {
+      draft: `先看 ${URL_A}，再看 ${URL_B}`,
+      includeCurrentDocumentContext: true,
+      references,
+    });
+
+    expect(updated.tabs[0]).toMatchObject({
+      draft: `先看 ${URL_A}，再看 ${URL_B}`,
+      references,
+    });
+  });
+
+  it("normalizes workspaces keeping inline placements (new schema)", () => {
+    const references = [
+      { kind: "url" as const, value: URL_A, start: 2 },
+    ];
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: `前文${URL_A}后文`,
+          references,
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace).toBeDefined();
+    expect(workspace!.tabs[0].references).toEqual(references);
+  });
+
+  it("round-trips inline placements through normalize for multiple tabs", () => {
+    const first: Array<{ kind: "url"; value: string; start: number }> = [
+      { kind: "url", value: URL_A, start: 0 },
+    ];
+    const second: Array<{ kind: "url"; value: string; start: number }> = [
+      { kind: "url", value: URL_B, start: 4 },
+    ];
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-b",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: URL_A,
+          references: first,
+        },
+        {
+          id: "tab-b",
+          label: 2,
+          sessionId: "session-b",
+          draft: `正文${URL_B}`,
+          references: second,
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace!.tabs[0].references).toEqual(first);
+    expect(workspace!.tabs[1].references).toEqual(second);
+  });
+
+  it("discards references with malformed starts but keeps the workspace and draft", () => {
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: `前文${URL_A}后文`,
+          references: [{ kind: "url", value: URL_A, start: "broken" }],
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace).toBeDefined();
+    expect((workspace!.tabs[0] as any).references).toBeUndefined();
+    expect(workspace!.tabs[0].draft).toBe(`前文${URL_A}后文`);
+  });
+
+  it("keeps legacy metadata without starts readable alongside new-schema data", () => {
+    const workspace = normalizeConversationWorkspace({
+      activeTabId: "tab-a",
+      tabs: [
+        {
+          id: "tab-a",
+          label: 1,
+          sessionId: "session-a",
+          draft: `${URL_A} task`,
+          references: [{ kind: "url", value: URL_A }],
+        },
+      ],
+      version: 2,
+    });
+
+    expect(workspace!.tabs[0].references).toEqual([
+      { kind: "url", value: URL_A },
+    ]);
+  });
+});

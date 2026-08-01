@@ -5,11 +5,27 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  applyComposerDraft,
+  applyComposerReferences,
   applyComposerSlashToken,
   applyComposerState,
   createComposerView,
   type ComposerState,
 } from "../../src/ui/composer-view";
+import type { ComposerInlineDraft } from "../../src/composer-reference-tokens";
+import {
+  restoreComposerInlineDraft,
+  serializeComposerInlineDraft,
+} from "../../src/composer-reference-tokens";
+import {
+  handleInlineEditorKeydown,
+  readInlineDraftFromDom,
+} from "../../src/composer-inline-editor";
+import {
+  composerSlashTokenFromMenuItem,
+  type ComposerSlashToken,
+  type SlashMenuItem,
+} from "../../src/slash-menu";
 
 // Minimal mock of Obsidian's HTMLElement extensions used by composer-view.ts.
 // The extracted function only calls createDiv, createEl, createSpan, empty,
@@ -45,10 +61,18 @@ import {
   (this as HTMLElement).style.display = "";
 };
 
+function emptyDraft(): ComposerInlineDraft {
+  return { token: null, text: "", references: [] };
+}
+
+function draft(overrides: Partial<ComposerInlineDraft> = {}): ComposerInlineDraft {
+  return { ...emptyDraft(), ...overrides };
+}
+
 function defaultState(overrides: Partial<ComposerState> = {}): ComposerState {
   return {
     disabled: false,
-    draft: "",
+    draft: emptyDraft(),
     placeholder: "Ask Hermes…",
     sendEnabled: true,
     stopVisible: false,
@@ -58,27 +82,54 @@ function defaultState(overrides: Partial<ComposerState> = {}): ComposerState {
 
 function setup(state?: Partial<ComposerState>) {
   const parent = document.createElement("div");
+  // The host keeps ONE live draft model; the editor reads it back through
+  // getDraft() on every input (mirrors HermesianSidebarView.composerDraft).
+  let hostDraft: ComposerInlineDraft = state?.draft ?? emptyDraft();
+  const onDraftChange = vi.fn((draft: ComposerInlineDraft) => {
+    hostDraft = draft;
+  });
   const callbacks = {
-    onDraftChange: vi.fn(),
+    getDraft: () => hostDraft,
+    onDraftChange,
     onPaste: vi.fn(),
     onSend: vi.fn(),
     onStop: vi.fn(),
-    onSlashTokenClear: vi.fn(),
+    onKeydown: vi.fn(),
+    onCopy: vi.fn(),
+    onCut: vi.fn(),
+    onReferenceRemove: vi.fn(),
+    renderIcon: vi.fn(),
   };
   const elements = createComposerView(parent, defaultState(state), callbacks);
-  return { parent, elements, callbacks };
+  return { parent, elements, callbacks, hostDraft: () => hostDraft };
 }
 
 describe("createComposerView", () => {
-  it("renders the composer textarea with the initial draft and placeholder", () => {
-    const { elements } = setup({ draft: "hello", placeholder: "Write here…" });
-    expect(elements.composerEl.value).toBe("hello");
-    expect(elements.composerEl.placeholder).toBe("Write here…");
+  it("renders a contenteditable editor with the initial draft and placeholder", () => {
+    const { elements } = setup({
+      draft: draft({ text: "hello" }),
+      placeholder: "Write here…",
+    });
+    expect(elements.composerEl.tagName).toBe("DIV");
+    expect(elements.composerEl.getAttribute("contenteditable")).toBe("true");
+    expect(elements.composerEl.textContent).toBe("hello");
+    expect(elements.composerEl.getAttribute("data-placeholder")).toBe("Write here…");
   });
 
-  it("disables the textarea when state.disabled is true", () => {
+  it("disables the editor when state.disabled is true", () => {
     const { elements } = setup({ disabled: true });
-    expect(elements.composerEl.disabled).toBe(true);
+    expect(elements.composerEl.contentEditable).toBe("false");
+  });
+
+  it("keeps the composer accessible with combobox/textbox semantics", () => {
+    const { elements } = setup();
+    expect(elements.composerEl.getAttribute("aria-label")).toBe("Message Hermes");
+    expect(elements.composerEl.getAttribute("role")).toBe("textbox");
+    expect(elements.composerEl.getAttribute("aria-multiline")).toBe("true");
+    expect(elements.composerEl.getAttribute("aria-controls")).toBe(
+      "hermesian-slash-menu",
+    );
+    expect(elements.composerEl.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("shows the Send button and hides Stop when stopVisible is false", () => {
@@ -108,11 +159,13 @@ describe("createComposerView", () => {
 });
 
 describe("composer callbacks", () => {
-  it("calls onDraftChange when the user types", () => {
+  it("calls onDraftChange with the synced model when the user types", () => {
     const { elements, callbacks } = setup();
-    elements.composerEl.value = "new text";
+    elements.composerEl.textContent = "new text";
     elements.composerEl.dispatchEvent(new Event("input", { bubbles: true }));
-    expect(callbacks.onDraftChange).toHaveBeenCalledWith("new text");
+    expect(callbacks.onDraftChange).toHaveBeenCalledWith(
+      draft({ text: "new text" }),
+    );
   });
 
   it("calls onSend on Send button click", () => {
@@ -133,11 +186,27 @@ describe("composer callbacks", () => {
     expect(callbacks.onStop).toHaveBeenCalledOnce();
   });
 
-  it("calls onPaste on paste event", () => {
+  it("calls onPaste on paste event (image handling stays host-side)", () => {
     const { elements, callbacks } = setup();
     const event = new ClipboardEvent("paste", { bubbles: true });
     elements.composerEl.dispatchEvent(event);
     expect(callbacks.onPaste).toHaveBeenCalledOnce();
+  });
+
+  it("forwards keydown, copy, and cut events to the host", () => {
+    const { elements, callbacks } = setup();
+    elements.composerEl.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+    );
+    expect(callbacks.onKeydown).toHaveBeenCalledOnce();
+    elements.composerEl.dispatchEvent(
+      new ClipboardEvent("copy", { bubbles: true, cancelable: true }),
+    );
+    expect(callbacks.onCopy).toHaveBeenCalledOnce();
+    elements.composerEl.dispatchEvent(
+      new ClipboardEvent("cut", { bubbles: true, cancelable: true }),
+    );
+    expect(callbacks.onCut).toHaveBeenCalledOnce();
   });
 });
 
@@ -148,12 +217,12 @@ describe("applyComposerState", () => {
     elements = setup().elements;
   });
 
-  it("updates disabled state on the textarea", () => {
+  it("updates disabled state on the editor", () => {
     applyComposerState(elements, defaultState({ disabled: true }));
-    expect(elements.composerEl.disabled).toBe(true);
+    expect(elements.composerEl.contentEditable).toBe("false");
 
     applyComposerState(elements, defaultState({ disabled: false }));
-    expect(elements.composerEl.disabled).toBe(false);
+    expect(elements.composerEl.contentEditable).toBe("true");
   });
 
   it("disables Send button when sendEnabled is false", () => {
@@ -207,39 +276,382 @@ describe("applyComposerSlashToken", () => {
     expect(elements.slashTokenEl.getAttribute("aria-label")).toBe("Command /model");
   });
 
-  it("hides the token when cleared and supports task-empty backspace clear hook", () => {
-    const { elements, callbacks } = setup();
+  it("hides the token when cleared and keeps the editor surface intact", () => {
+    const { elements } = setup();
     applyComposerSlashToken(elements, { kind: "skill", name: "leader" });
     expect(elements.slashTokenEl.style.display).not.toBe("none");
 
     applyComposerSlashToken(elements, null);
     expect(elements.slashTokenEl.style.display).toBe("none");
     expect(elements.slashTokenLabelEl.textContent).toBe("");
-
-    applyComposerSlashToken(elements, { kind: "skill", name: "leader" });
-    elements.composerEl.value = "";
-    elements.composerEl.selectionStart = 0;
-    elements.composerEl.selectionEnd = 0;
-    const event = new KeyboardEvent("keydown", {
-      key: "Backspace",
-      bubbles: true,
-      cancelable: true,
-    });
-    const prevented = !elements.composerEl.dispatchEvent(event) || event.defaultPrevented;
-    // Handler may preventDefault; callback must fire for empty-task backspace
-    expect(callbacks.onSlashTokenClear).toHaveBeenCalledOnce();
-    expect(prevented || callbacks.onSlashTokenClear.mock.calls.length === 1).toBe(true);
   });
 
-  it("does not clear token on Backspace when task text remains", () => {
+  it("forwards every keydown to the host (slash clear is a host decision now)", () => {
     const { elements, callbacks } = setup();
     applyComposerSlashToken(elements, { kind: "skill", name: "leader" });
-    elements.composerEl.value = "写任务书";
-    elements.composerEl.selectionStart = 0;
-    elements.composerEl.selectionEnd = 0;
     elements.composerEl.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }),
+      new KeyboardEvent("keydown", {
+        key: "Backspace",
+        bubbles: true,
+        cancelable: true,
+      }),
     );
-    expect(callbacks.onSlashTokenClear).not.toHaveBeenCalled();
+    expect(callbacks.onKeydown).toHaveBeenCalledOnce();
+  });
+});
+
+describe("composer reference chips (legacy container API)", () => {
+  it("renders a url chip with neutral capsule class, ellipsis label, title, and accessible name", () => {
+    const { elements, callbacks } = setup();
+    applyComposerReferences(
+      elements,
+      [{ kind: "url", value: "https://example.com/a" }],
+      { onRemoveReference: callbacks.onReferenceRemove },
+    );
+
+    expect(elements.referenceChipsEl.style.display).not.toBe("none");
+    const chips = elements.referenceChipsEl.querySelectorAll(".hermesian-ref-token");
+    expect(chips).toHaveLength(1);
+    const chip = chips[0] as HTMLElement;
+    expect(chip.classList.contains("is-url")).toBe(true);
+    expect(chip.classList.contains("is-path")).toBe(false);
+    expect(chip.querySelector(".hermesian-ref-token-label")!.textContent).toBe("example.com");
+    expect(chip.getAttribute("title")).toBe("https://example.com/a");
+    expect(chip.getAttribute("aria-label")).toBe(
+      "Remove reference URL https://example.com/a",
+    );
+    // chips render inside the input row
+    expect(elements.composerInputRowEl.contains(chip)).toBe(true);
+  });
+
+  it("renders a path chip with its own category class and file icon slot", () => {
+    const { elements, callbacks } = setup();
+    const renderIcon = vi.fn();
+    applyComposerReferences(
+      elements,
+      [{ kind: "path", value: "/Users/中文 空格/笔记.md" }],
+      { onRemoveReference: callbacks.onReferenceRemove, renderIcon },
+    );
+
+    const chip = elements.referenceChipsEl.querySelector(
+      ".hermesian-ref-token",
+    ) as HTMLElement;
+    expect(chip.classList.contains("is-path")).toBe(true);
+    expect(chip.classList.contains("is-url")).toBe(false);
+    expect(chip.getAttribute("aria-label")).toBe(
+      "Remove reference path /Users/中文 空格/笔记.md",
+    );
+    expect(renderIcon).toHaveBeenCalledWith(expect.any(HTMLElement), "path");
+  });
+
+  it("renders multiple reference chips in paste order", () => {
+    const { elements, callbacks } = setup();
+    applyComposerReferences(
+      elements,
+      [
+        { kind: "url", value: "https://example.com/a" },
+        { kind: "path", value: "/Users/笔记 空格.md" },
+        { kind: "url", value: "https://example.com/b" },
+      ],
+      { onRemoveReference: callbacks.onReferenceRemove },
+    );
+
+    const labels = Array.from(
+      elements.referenceChipsEl.querySelectorAll(".hermesian-ref-token-label"),
+    ).map((el) => el.textContent);
+    expect(labels).toEqual([
+      "example.com",
+      "笔记 空格.md",
+      "example.com",
+    ]);
+  });
+
+  it("shows only the host on a long URL chip while title and aria keep the full URL", () => {
+    const { elements, callbacks } = setup();
+    const url =
+      "https://example.com/very/long/path/page.html?q=%E4%B8%AD%E6%96%87&x=1234567890#section-2";
+    applyComposerReferences(elements, [{ kind: "url", value: url }], {
+      onRemoveReference: callbacks.onReferenceRemove,
+    });
+
+    const chip = elements.referenceChipsEl.querySelector(
+      ".hermesian-ref-token",
+    ) as HTMLElement;
+    expect(chip.querySelector(".hermesian-ref-token-label")!.textContent).toBe("example.com");
+    expect(chip.getAttribute("title")).toBe(url);
+    expect(chip.getAttribute("aria-label")).toBe(`Remove reference URL ${url}`);
+  });
+
+  it("shows only the basename on a path chip while title and aria keep the full path", () => {
+    const { elements, callbacks } = setup();
+    applyComposerReferences(
+      elements,
+      [{ kind: "path", value: "/Users/中文 空格/文献笔记.md" }],
+      { onRemoveReference: callbacks.onReferenceRemove },
+    );
+
+    const chip = elements.referenceChipsEl.querySelector(
+      ".hermesian-ref-token",
+    ) as HTMLElement;
+    expect(chip.querySelector(".hermesian-ref-token-label")!.textContent).toBe("文献笔记.md");
+    expect(chip.getAttribute("title")).toBe("/Users/中文 空格/文献笔记.md");
+    expect(chip.getAttribute("aria-label")).toBe(
+      "Remove reference path /Users/中文 空格/文献笔记.md",
+    );
+  });
+
+  it("shows the last non-empty segment for a directory path with a trailing slash", () => {
+    const { elements, callbacks } = setup();
+    applyComposerReferences(
+      elements,
+      [{ kind: "path", value: "/Users/a/文献笔记/" }],
+      { onRemoveReference: callbacks.onReferenceRemove },
+    );
+
+    const chip = elements.referenceChipsEl.querySelector(
+      ".hermesian-ref-token",
+    ) as HTMLElement;
+    expect(chip.querySelector(".hermesian-ref-token-label")!.textContent).toBe("文献笔记");
+    expect(chip.getAttribute("title")).toBe("/Users/a/文献笔记/");
+  });
+
+  it("hides the chips container when there are no references", () => {
+    const { elements, callbacks } = setup();
+    applyComposerReferences(elements, [], {
+      onRemoveReference: callbacks.onReferenceRemove,
+    });
+    expect(elements.referenceChipsEl.querySelectorAll(".hermesian-ref-token")).toHaveLength(0);
+    expect(elements.referenceChipsEl.style.display).toBe("none");
+  });
+
+  it("removes the clicked chip by index", () => {
+    const { elements } = setup();
+    const onRemoveReference = vi.fn();
+    applyComposerReferences(
+      elements,
+      [
+        { kind: "url", value: "https://example.com/a" },
+        { kind: "url", value: "https://example.com/b" },
+      ],
+      { onRemoveReference },
+    );
+
+    const chips = elements.referenceChipsEl.querySelectorAll(".hermesian-ref-token");
+    (chips[1] as HTMLElement).click();
+    expect(onRemoveReference).toHaveBeenCalledWith(1);
+  });
+});
+
+describe("inline capsule rendering inside the editor", () => {
+  it("renders reference capsules inline in the editor with full values in the model", () => {
+    const { elements } = setup({
+      draft: draft({
+        text: "前文https://example.com/a后文",
+        references: [{ kind: "url", value: "https://example.com/a", start: 2 }],
+      }),
+    });
+    const capsules = elements.composerEl.querySelectorAll(".hermesian-inline-ref");
+    expect(capsules).toHaveLength(1);
+    const capsule = capsules[0] as HTMLElement;
+    expect(capsule.getAttribute("contenteditable")).toBe("false");
+    expect(capsule.getAttribute("title")).toBe("https://example.com/a");
+    expect(capsule.getAttribute("aria-label")).toBe(
+      "Reference URL https://example.com/a",
+    );
+    expect(
+      readInlineDraftFromDom(elements.composerEl).text,
+    ).toBe("前文https://example.com/a后文");
+  });
+
+  it("wires the capsule remove button to onReferenceRemove", () => {
+    const { elements, callbacks } = setup({
+      draft: draft({
+        text: "https://example.com/a",
+        references: [{ kind: "url", value: "https://example.com/a", start: 0 }],
+      }),
+    });
+    const capsule = elements.composerEl.querySelector(
+      ".hermesian-inline-ref",
+    ) as HTMLElement;
+    const button = capsule.querySelector("button")!;
+    expect(button.getAttribute("aria-label")).toBe(
+      "Remove reference URL https://example.com/a",
+    );
+    button.click();
+    expect(callbacks.onReferenceRemove).toHaveBeenCalledWith(0);
+  });
+
+  it("keeps the empty editor as a placeholder surface (no child nodes)", () => {
+    const { elements } = setup();
+    expect(elements.composerEl.childNodes).toHaveLength(0);
+  });
+});
+
+describe("slash token single source (production paths)", () => {
+  /**
+   * Host harness mirroring HermesianSidebarView's composer wiring: the view
+   * keeps ONE draft model (composerDraft); the editor reads it back through
+   * getDraft() on every input; every mutation updates the model FIRST and
+   * only then projects UI (applyComposerSlashToken just mirrors the model).
+   * Menu selection, external restore, capture and clear all flow through
+   * composerDraft.token, and the canonical send/persist string is
+   * serializeComposerInlineDraft — the same functions view.ts calls.
+   */
+  function setupHost() {
+    const parent = document.createElement("div");
+    let hostDraft: ComposerInlineDraft = emptyDraft();
+    const onDraftChange = vi.fn((draft: ComposerInlineDraft) => {
+      hostDraft = draft;
+    });
+    const callbacks = {
+      getDraft: () => hostDraft,
+      onDraftChange,
+      onPaste: vi.fn(),
+      onSend: vi.fn(),
+      onStop: vi.fn(),
+      onKeydown: vi.fn(),
+      onCopy: vi.fn(),
+      onCut: vi.fn(),
+      onReferenceRemove: vi.fn(),
+      renderIcon: vi.fn(),
+    };
+    const elements = createComposerView(parent, defaultState(), callbacks);
+
+    // Mirrors view.setComposerSlashToken: model first, then UI projection.
+    const setToken = (token: ComposerSlashToken | null): void => {
+      hostDraft = { ...hostDraft, token };
+      applyComposerSlashToken(elements, token);
+    };
+
+    // Mirrors view.applyComposerCanonicalDraft (tab restore path).
+    const applyRestoredDraft = (draft: ComposerInlineDraft): void => {
+      hostDraft = draft;
+      applyComposerSlashToken(elements, draft.token);
+      applyComposerDraft(elements, draft, {
+        onReferenceRemove: callbacks.onReferenceRemove,
+        renderIcon: callbacks.renderIcon,
+      });
+    };
+
+    // Real input event through the editor's production listener.
+    const typeText = (text: string): ComposerInlineDraft => {
+      elements.composerEl.appendChild(document.createTextNode(text));
+      elements.composerEl.dispatchEvent(new Event("input", { bubbles: true }));
+      return hostDraft;
+    };
+
+    // Real Backspace keydown through the production keydown chain.
+    const pressBackspace = (): { slashClearRequested?: boolean } => {
+      const event = new KeyboardEvent("keydown", {
+        key: "Backspace",
+        bubbles: true,
+        cancelable: true,
+      });
+      const result = handleInlineEditorKeydown(elements.composerEl, event, hostDraft, {
+        onRemoveReference: callbacks.onReferenceRemove,
+        renderIcon: callbacks.renderIcon,
+      });
+      if (result.slashClearRequested) {
+        setToken(null);
+      }
+      return result;
+    };
+
+    return {
+      parent,
+      elements,
+      callbacks,
+      hostDraft: () => hostDraft,
+      setToken,
+      applyRestoredDraft,
+      typeText,
+      pressBackspace,
+    };
+  }
+
+  it("keeps a host-applied /leader token across ordinary input (no creation-time snapshot)", () => {
+    const { elements, setToken, typeText, hostDraft, callbacks } = setupHost();
+    // Fresh composer: token starts null.
+    expect(hostDraft().token).toBeNull();
+
+    // External restore path: host applies the persisted /leader draft.
+    setToken({ kind: "skill", name: "leader" });
+    expect(elements.slashTokenLabelEl.textContent).toBe("/leader");
+    expect(elements.slashTokenEl.style.display).not.toBe("none");
+
+    // Ordinary input must carry the SAME token into the model.
+    typeText("测试");
+    expect(callbacks.onDraftChange).toHaveBeenLastCalledWith({
+      token: { kind: "skill", name: "leader" },
+      text: "测试",
+      references: [],
+    });
+    expect(hostDraft().token).toEqual({ kind: "skill", name: "leader" });
+  });
+
+  it("keeps a menu-selected token while typing and serializes to /skill leader 任务", () => {
+    const { setToken, typeText, hostDraft } = setupHost();
+    // Real menu item → real token extraction (chooseSlashMenuItem path).
+    const item: SlashMenuItem = {
+      kind: "skill",
+      name: "leader",
+      description: "Split the goal into executable task books",
+    };
+    const token = composerSlashTokenFromMenuItem(item);
+    expect(token).toEqual({ kind: "skill", name: "leader" });
+
+    setToken(token);
+    typeText("任务");
+
+    expect(hostDraft().token).toEqual({ kind: "skill", name: "leader" });
+    expect(serializeComposerInlineDraft(hostDraft())).toBe("/skill leader 任务");
+  });
+
+  it("preserves token, reference start and full text through restore → input → persist → restore", () => {
+    const { applyRestoredDraft, typeText, hostDraft } = setupHost();
+    // Tab restore: raw draft + explicit token/reference metadata.
+    const restored = restoreComposerInlineDraft(
+      "/skill leader 测试 https://example.com/a",
+      { kind: "skill", name: "leader" },
+      [{ kind: "url", value: "https://example.com/a", start: 3 }],
+    );
+    expect(restored.token).toEqual({ kind: "skill", name: "leader" });
+    applyRestoredDraft(restored);
+
+    // User types at the end of the restored text.
+    typeText("任务");
+    const persisted = hostDraft();
+    expect(persisted.token).toEqual({ kind: "skill", name: "leader" });
+    expect(persisted.references).toEqual([
+      { kind: "url", value: "https://example.com/a", start: 3 },
+    ]);
+    expect(persisted.text).toBe("测试 https://example.com/a任务");
+
+    // Persist (capture) → restore round-trip must keep everything identical.
+    const canonical = serializeComposerInlineDraft(persisted);
+    expect(canonical).toBe("/skill leader 测试 https://example.com/a任务");
+    const roundTrip = restoreComposerInlineDraft(
+      canonical,
+      persisted.token,
+      persisted.references,
+    );
+    expect(roundTrip.token).toEqual(persisted.token);
+    expect(roundTrip.references).toEqual(persisted.references);
+    expect(roundTrip.text).toBe(persisted.text);
+  });
+
+  it("clears the token display and the canonical string together on empty Backspace", () => {
+    const { elements, setToken, pressBackspace, hostDraft } = setupHost();
+    setToken({ kind: "skill", name: "leader" });
+    expect(elements.slashTokenEl.style.display).not.toBe("none");
+    expect(serializeComposerInlineDraft(hostDraft())).toBe("/skill leader ");
+
+    // Real Backspace on the empty editor → slashClearRequested → host clears.
+    const result = pressBackspace();
+    expect(result.slashClearRequested).toBe(true);
+    expect(elements.slashTokenEl.style.display).toBe("none");
+    expect(elements.slashTokenLabelEl.textContent).toBe("");
+    expect(hostDraft().token).toBeNull();
+    expect(serializeComposerInlineDraft(hostDraft())).toBe("");
   });
 });
