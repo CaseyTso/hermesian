@@ -41,6 +41,7 @@ import {
   type PastedImageAttachment,
 } from "./image-attachments";
 import { normalizeMathDelimiters } from "./markdown-math";
+import { normalizeTableSpacing } from "./markdown-table";
 import {
   contextUsageLevel,
   contextUsagePercent,
@@ -2063,7 +2064,7 @@ export class HermesianSidebarView extends ItemView {
     target.dataset.sourcePath = sourcePath;
     await MarkdownRenderer.render(
       this.app,
-      normalizeMathDelimiters(text),
+      normalizeTableSpacing(normalizeMathDelimiters(text)),
       target,
       sourcePath,
       this,
