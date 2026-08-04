@@ -56,9 +56,9 @@ describe("recognizeReferenceToken", () => {
   });
 
   it("recognizes a plain absolute POSIX path", () => {
-    expect(recognizeReferenceToken("/Users/juicewrld/notes/paper.md")).toEqual({
+    expect(recognizeReferenceToken("/Users/user/notes/paper.md")).toEqual({
       kind: "path",
-      value: "/Users/juicewrld/notes/paper.md",
+      value: "/Users/user/notes/paper.md",
     });
   });
 
@@ -135,7 +135,7 @@ describe("referenceTokenDisplayLabel", () => {
     expect(
       referenceTokenDisplayLabel({
         kind: "path",
-        value: "/Users/juicewrld/Downloads/obsidian/知识库/05 Literature/文献笔记",
+        value: "/Users/user/Vault/05 Literature/文献笔记",
       }),
     ).toBe("文献笔记");
   });
