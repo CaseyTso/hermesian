@@ -64,7 +64,7 @@ describe("parseHermesModelCatalogOutput", () => {
 
   it("encodes colon-bearing raw directory model ids with their provider", () => {
     const output = [
-      'HERMESIAN_MODEL_CATALOG={"currentProviderId":"openai-codex","providers":[{"id":"ollama-cloud","label":"Ollama Cloud","models":[{"id":"qwen3.5:397b","description":"Qwen tag"}]},{"id":"openrouter","label":"OpenRouter","models":[{"id":"nvidia/nemotron-3-super-120b-a12b:free","description":"Free"},{"id":"anthropic/claude-sonnet-4","description":""}]},{"id":"custom:botcf-grok","label":"BotCF Grok","models":[{"id":"grok-4.5","description":"Grok"}]}]}',
+      'HERMESIAN_MODEL_CATALOG={"currentProviderId":"openai-codex","providers":[{"id":"ollama-cloud","label":"Ollama Cloud","models":[{"id":"qwen3.5:397b","description":"Qwen tag"}]},{"id":"openrouter","label":"OpenRouter","models":[{"id":"nvidia/nemotron-3-super-120b-a12b:free","description":"Free"},{"id":"anthropic/claude-sonnet-4","description":""}]},{"id":"custom:botcf-grok","label":"BotCF Grok","models":[{"id":"grok-4.5","description":"Grok"}]},{"id":"custom:future-grok","label":"future-grok","models":[{"id":"grok-4.5","description":""}]}]}',
     ].join("\n");
 
     const catalog = parseHermesModelCatalogOutput(output);
@@ -77,11 +77,17 @@ describe("parseHermesModelCatalogOutput", () => {
       "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
       "openrouter:anthropic/claude-sonnet-4",
       "custom:botcf-grok:grok-4.5",
+      "custom:future-grok:grok-4.5",
     ]);
     expect(catalog.providers[0].models[0]).toMatchObject({
       modelId: "qwen3.5:397b",
       providerId: "ollama-cloud",
       switchId: "ollama-cloud:qwen3.5:397b",
+    });
+    expect(catalog.providers[3].models[0]).toMatchObject({
+      modelId: "grok-4.5",
+      providerId: "custom:future-grok",
+      switchId: "custom:future-grok:grok-4.5",
     });
   });
 

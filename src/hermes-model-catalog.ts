@@ -27,30 +27,80 @@ if profile:
 from hermes_cli.env_loader import load_hermes_dotenv
 load_hermes_dotenv(hermes_home=os.environ.get("HERMES_HOME"))
 
-from hermes_cli.models import curated_models_for_provider, list_available_providers
+# Use the same inventory substrate as ACP / desktop pickers. Canonical
+# list_available_providers() never includes named providers:/custom_providers:
+# rows, so future-grok and friends were invisible or only appeared as bare
+# inventory slugs that session/set_model cannot route.
+from hermes_cli.inventory import build_models_payload, load_picker_context
+from hermes_cli.providers import custom_provider_slug
 
 current_provider = ""
 try:
-    from hermes_cli.runtime_provider import resolve_runtime_provider
-    current_provider = str(resolve_runtime_provider().get("provider") or "")
+    from hermes_cli.runtime_provider import (
+        canonical_custom_identity,
+        resolve_runtime_provider,
+    )
+    runtime = resolve_runtime_provider()
+    current_provider = str(runtime.get("provider") or "").strip()
+    # Bare billing class "custom" is not a routable menu key; heal to custom:<name>.
+    if current_provider == "custom" or not current_provider:
+        healed = canonical_custom_identity(
+            base_url=runtime.get("base_url"),
+            config_provider=current_provider or None,
+            model=runtime.get("model"),
+        )
+        if healed:
+            current_provider = str(healed).strip()
 except Exception:
     pass
 
 providers = []
 seen_providers = set()
-for provider in list_available_providers():
-    provider_id = str(provider.get("id") or "").strip()
-    if not provider_id or provider_id in seen_providers or not provider.get("authenticated"):
+try:
+    context = load_picker_context()
+    inventory = build_models_payload(
+        context,
+        explicit_only=True,
+        include_unconfigured=False,
+        picker_hints=False,
+        canonical_order=True,
+        pricing=False,
+        capabilities=False,
+        refresh=False,
+        probe_custom_providers=False,
+        probe_current_custom_provider=False,
+        max_models=200,
+    )
+except Exception:
+    inventory = {"providers": []}
+
+for row in inventory.get("providers") or []:
+    if not isinstance(row, dict):
         continue
-    seen_providers.add(provider_id)
-    try:
-        raw_models = curated_models_for_provider(provider_id)
-    except Exception:
-        raw_models = []
+    raw_slug = str(row.get("slug") or "").strip()
+    if not raw_slug or raw_slug in seen_providers:
+        continue
+    label = str(row.get("name") or raw_slug).strip() or raw_slug
+    # Named user endpoints must use the custom:<name> identity that
+    # parse_model_input / resolve_runtime_provider already understand.
+    # Inventory may emit bare config keys (future-grok); ACP named-catalog
+    # and desktop successful switches use custom:future-grok.
+    if row.get("is_user_defined"):
+        provider_id = custom_provider_slug(label, raw_slug)
+    else:
+        provider_id = raw_slug
+    if not provider_id or provider_id in seen_providers:
+        continue
+
     models = []
     seen_models = set()
-    for item in raw_models:
-        if isinstance(item, (list, tuple)):
+    for item in row.get("models") or []:
+        if isinstance(item, dict):
+            model_id = str(
+                item.get("id") or item.get("model") or item.get("name") or ""
+            ).strip()
+            description = str(item.get("description") or "")
+        elif isinstance(item, (list, tuple)):
             model_id = str(item[0] if item else "").strip()
             description = str(item[1] if len(item) > 1 else "")
         else:
@@ -60,12 +110,17 @@ for provider in list_available_providers():
             continue
         seen_models.add(model_id)
         models.append({"id": model_id, "description": description})
-    if models:
-        providers.append({
-            "id": provider_id,
-            "label": str(provider.get("label") or provider_id),
-            "models": models,
-        })
+    if not models:
+        continue
+    seen_providers.add(provider_id)
+    # Also reserve the bare inventory slug so a later custom: form of the
+    # same endpoint cannot double-register under a second id.
+    seen_providers.add(raw_slug)
+    providers.append({
+        "id": provider_id,
+        "label": label,
+        "models": models,
+    })
 
 payload = {"currentProviderId": current_provider, "providers": providers}
 print("${CATALOG_MARKER}" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  acpModelSwitchId,
   contextUsageLevel,
   contextUsagePercent,
   formatContextUsage,
@@ -44,6 +45,42 @@ describe("modelSwitchId (provider catalog / raw model ids)", () => {
     expect(modelSwitchId("custom:botcf-grok", "grok-4.5")).toBe(
       "custom:botcf-grok:grok-4.5",
     );
+    expect(modelSwitchId("custom:future-grok", "grok-4.5")).toBe(
+      "custom:future-grok:grok-4.5",
+    );
+  });
+});
+
+describe("acpModelSwitchId (routable ACP choice ids)", () => {
+  it("rewrites bare named-custom inventory slugs to custom:<name>:<model>", () => {
+    // ACP inventory emits future-grok:grok-4.5; parse_model_input does not
+    // treat "future-grok" as a provider delimiter, so set_model must receive
+    // the custom: form that desktop already uses successfully.
+    expect(acpModelSwitchId("future-grok:grok-4.5")).toBe(
+      "custom:future-grok:grok-4.5",
+    );
+    expect(acpModelSwitchId("botcf-grok:grok-4.5")).toBe(
+      "custom:botcf-grok:grok-4.5",
+    );
+    expect(acpModelSwitchId("botcf-ds:deepseek-v4-pro")).toBe(
+      "custom:botcf-ds:deepseek-v4-pro",
+    );
+  });
+
+  it("leaves already-routable and built-in choice ids unchanged", () => {
+    expect(acpModelSwitchId("custom:future-grok:grok-4.5")).toBe(
+      "custom:future-grok:grok-4.5",
+    );
+    expect(acpModelSwitchId("ollama-cloud:qwen3.5:397b")).toBe(
+      "ollama-cloud:qwen3.5:397b",
+    );
+    expect(acpModelSwitchId("openrouter:x-ai/grok-4.5")).toBe(
+      "openrouter:x-ai/grok-4.5",
+    );
+    expect(acpModelSwitchId("opencode-go:deepseek-v4-flash")).toBe(
+      "opencode-go:deepseek-v4-flash",
+    );
+    expect(acpModelSwitchId("gpt-5.5")).toBe("gpt-5.5");
   });
 });
 
@@ -75,10 +112,10 @@ describe("normalizeAcpModelState (ACP choice ids)", () => {
     expect(result.current?.modelId).toBe("gpt-5.5");
   });
 
-  it("passes ACP choice ids through verbatim for set_model", () => {
+  it("passes ACP choice ids through for set_model and rewrites bare named-custom", () => {
     const result = normalizeAcpModelState(
       {
-        currentModelId: "custom:botcf-grok:grok-4.5",
+        currentModelId: "future-grok:grok-4.5",
         availableModels: [
           {
             modelId: "custom:botcf-grok:grok-4.5",
@@ -89,6 +126,16 @@ describe("normalizeAcpModelState (ACP choice ids)", () => {
           {
             modelId: "custom:botcf-grok:grok-4.5",
             name: "grok-4.5 duplicate",
+          },
+          // Inventory bare slug for the same BotCF endpoint — must collapse
+          // onto the custom: switch id already seen above.
+          {
+            modelId: "botcf-grok:grok-4.5",
+            name: "grok-4.5 bare",
+          },
+          {
+            modelId: "future-grok:grok-4.5",
+            name: "future grok",
           },
           {
             modelId: "ollama-cloud:qwen3.5:397b",
@@ -110,6 +157,7 @@ describe("normalizeAcpModelState (ACP choice ids)", () => {
 
     expect(result.models.map((model) => model.switchId)).toEqual([
       "custom:botcf-grok:grok-4.5",
+      "custom:future-grok:grok-4.5",
       "ollama-cloud:qwen3.5:397b",
       "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
       "openai-codex:minimax-m3",
@@ -117,22 +165,27 @@ describe("normalizeAcpModelState (ACP choice ids)", () => {
       "custom:orphan",
     ]);
     expect(result.current).toMatchObject({
+      modelId: "future-grok:grok-4.5",
+      providerId: "custom:future-grok",
+      providerName: "custom:future-grok",
+      switchId: "custom:future-grok:grok-4.5",
+    });
+    expect(result.models[0]).toMatchObject({
       modelId: "custom:botcf-grok:grok-4.5",
       providerId: "custom:botcf-grok",
-      providerName: "custom:botcf-grok",
       switchId: "custom:botcf-grok:grok-4.5",
     });
-    expect(result.models[1]).toMatchObject({
+    expect(result.models[2]).toMatchObject({
       modelId: "ollama-cloud:qwen3.5:397b",
       providerId: "ollama-cloud",
       switchId: "ollama-cloud:qwen3.5:397b",
     });
-    expect(result.models[2]).toMatchObject({
+    expect(result.models[3]).toMatchObject({
       modelId: "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
       providerId: "openrouter",
       switchId: "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
     });
-    expect(result.models[3]).toMatchObject({
+    expect(result.models[4]).toMatchObject({
       modelId: "minimax-m3",
       providerId: "openai-codex",
       providerName: "OpenAI Codex",

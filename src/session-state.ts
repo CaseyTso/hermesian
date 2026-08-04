@@ -16,6 +16,142 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 /**
+ * Built-in / alias provider names that Hermes `parse_model_input` treats as a
+ * real left-hand `provider:` delimiter. Named user endpoints such as
+ * `future-grok` are *not* in this set — a bare `future-grok:grok-4.5` choice
+ * is therefore not routable until rewritten to `custom:future-grok:grok-4.5`.
+ *
+ * Keep this aligned with hermes_cli.models._KNOWN_PROVIDER_NAMES (canonical
+ * slugs + common aliases). Unknown left-hand segments are assumed to be
+ * named custom provider config keys.
+ */
+const KNOWN_PROVIDER_PREFIXES = new Set([
+  "ai-gateway",
+  "aigateway",
+  "alibaba",
+  "alibaba-cloud",
+  "alibaba-coding-plan",
+  "aliyun",
+  "amazon",
+  "amazon-bedrock",
+  "anthropic",
+  "arcee",
+  "arcee-ai",
+  "arceeai",
+  "aws",
+  "aws-bedrock",
+  "azure-foundry",
+  "bedrock",
+  "build-nvidia",
+  "claude",
+  "claude-code",
+  "copilot",
+  "copilot-acp",
+  "copilot-acp-agent",
+  "custom",
+  "dashscope",
+  "deep-seek",
+  "deepinfra",
+  "deepseek",
+  "fireworks",
+  "fireworks-ai",
+  "fw",
+  "gcp-vertex",
+  "gemini",
+  "github",
+  "github-copilot",
+  "github-copilot-acp",
+  "github-model",
+  "github-models",
+  "glm",
+  "gmi",
+  "gmi-cloud",
+  "gmicloud",
+  "go",
+  "google",
+  "google-ai-studio",
+  "google-gemini",
+  "google-vertex",
+  "grok",
+  "grok-oauth",
+  "hf",
+  "hugging-face",
+  "huggingface",
+  "huggingface-hub",
+  "kilo",
+  "kilo-code",
+  "kilo-gateway",
+  "kilocode",
+  "kimi",
+  "kimi-cn",
+  "kimi-coding",
+  "kimi-coding-cn",
+  "lm-studio",
+  "lm_studio",
+  "lmstudio",
+  "mimo",
+  "minimax",
+  "minimax-china",
+  "minimax-cn",
+  "minimax-global",
+  "minimax-oauth",
+  "minimax-portal",
+  "minimax_cn",
+  "minimax_oauth",
+  "moa",
+  "moonshot",
+  "moonshot-cn",
+  "nemotron",
+  "nim",
+  "nous",
+  "novita",
+  "novita-ai",
+  "novitaai",
+  "nvidia",
+  "nvidia-nim",
+  "ollama",
+  "ollama-cloud",
+  "ollama_cloud",
+  "openai-api",
+  "openai-codex",
+  "opencode",
+  "opencode-go",
+  "opencode-go-sub",
+  "opencode-zen",
+  "openrouter",
+  "qwen",
+  "qwen-oauth",
+  "qwen-portal",
+  "step",
+  "stepfun",
+  "stepfun-coding-plan",
+  "tencent",
+  "tencent-cloud",
+  "tencent-tokenhub",
+  "tencentmaas",
+  "tokenhub",
+  "upstage",
+  "vercel",
+  "vercel-ai-gateway",
+  "vertex",
+  "vertex-ai",
+  "vertexai",
+  "x-ai",
+  "x-ai-oauth",
+  "x.ai",
+  "xai",
+  "xai-grok-oauth",
+  "xai-oauth",
+  "xiaomi",
+  "xiaomi-mimo",
+  "z-ai",
+  "z.ai",
+  "zai",
+  "zen",
+  "zhipu",
+]);
+
+/**
  * Encode a *provider-directory* raw model id for `session/set_model`.
  *
  * Directory models are owned by a known provider row. Even when the raw id
@@ -24,7 +160,7 @@ function nonEmptyString(value: unknown): string | undefined {
  * prefixed so Hermes routes away from the session's current provider.
  *
  * This is NOT for ACP choice ids — those are opaque and must be returned by
- * {@link acpModelSwitchId} without re-wrapping.
+ * {@link acpModelSwitchId} (which may rewrite bare named-custom slugs).
  */
 export function modelSwitchId(providerId: string, modelId: string): string {
   if (!providerId) {
@@ -37,13 +173,35 @@ export function modelSwitchId(providerId: string, modelId: string): string {
 }
 
 /**
- * ACP `availableModels[].modelId` values are opaque choice ids already
- * suitable for `session/set_model` (e.g. `custom:botcf-grok:grok-4.5`,
+ * ACP `availableModels[].modelId` values are choice ids for `session/set_model`.
+ *
+ * Most are already routable (`custom:botcf-grok:grok-4.5`,
  * `ollama-cloud:qwen3.5:397b`, bare `gpt-5.5` under the current provider).
- * Pass them through unchanged — never re-prefix with the session provider.
+ *
+ * Inventory-backed ACP rows for named user endpoints sometimes omit the
+ * `custom:` prefix (`future-grok:grok-4.5`). Hermes `parse_model_input` only
+ * treats the left segment as a provider when it is a built-in name, so those
+ * bare slugs stay glued to the current provider and the request hits the wrong
+ * endpoint. Rewrite them to the `custom:<name>:<model>` form that runtime
+ * resolution already understands.
  */
 export function acpModelSwitchId(modelId: string): string {
-  return modelId;
+  if (!modelId || modelId.startsWith("custom:")) {
+    return modelId;
+  }
+  const colon = modelId.indexOf(":");
+  if (colon <= 0) {
+    return modelId;
+  }
+  const left = modelId.slice(0, colon).trim().toLowerCase();
+  const right = modelId.slice(colon + 1).trim();
+  if (!left || !right) {
+    return modelId;
+  }
+  if (KNOWN_PROVIDER_PREFIXES.has(left)) {
+    return modelId;
+  }
+  return `custom:${left}:${right}`;
 }
 
 function providerFromEncodedModelId(
@@ -90,9 +248,8 @@ export function normalizeAcpModelState(
     if (!modelId) {
       continue;
     }
-    // ACP choice path: opaque id goes to set_model as-is.
-    // Bare ids still need the current provider so set_model receives a
-    // routable identity (directory-style encode only for unprefixed bare ids).
+    // ACP choice path: rewrite bare named-custom slugs; bare model ids still
+    // need the current provider so set_model receives a routable identity.
     const switchId = modelId.includes(":")
       ? acpModelSwitchId(modelId)
       : modelSwitchId(providerId, modelId);
@@ -100,7 +257,9 @@ export function normalizeAcpModelState(
       continue;
     }
     seen.add(switchId);
-    const entryProviderId = providerFromEncodedModelId(modelId, providerId);
+    // Derive provider from the *routable* switch id so bare future-grok:* rows
+    // land under custom:future-grok after rewrite.
+    const entryProviderId = providerFromEncodedModelId(switchId, providerId);
     const entryProviderName =
       entryProviderId === providerId
         ? providerName
@@ -116,12 +275,19 @@ export function normalizeAcpModelState(
   }
 
   const currentModelId = nonEmptyString(record.currentModelId);
+  const currentSwitchId = currentModelId
+    ? currentModelId.includes(":")
+      ? acpModelSwitchId(currentModelId)
+      : modelSwitchId(providerId, currentModelId)
+    : undefined;
   return {
     models,
     current: currentModelId
       ? models.find(
           (model) =>
-            model.modelId === currentModelId || model.switchId === currentModelId,
+            model.modelId === currentModelId ||
+            model.switchId === currentModelId ||
+            (currentSwitchId !== undefined && model.switchId === currentSwitchId),
         )
       : undefined,
   };
