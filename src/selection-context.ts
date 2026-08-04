@@ -242,11 +242,13 @@ export function validateSelectionEdit(
   context: SelectionContext | MarkdownDocumentContext | undefined,
   diffs: SelectionEditDiff[],
 ): SelectionEditValidation {
-  if (!context) {
-    return { allowed: false, reason: "No editable file context is attached to this turn." };
+  // A document snapshot supplies context, not an exclusive edit boundary.
+  // Vault-wide path validation and approval happen in the ACP client. Only an
+  // explicit text selection narrows the user's authorization to one range.
+  if (!context || !("selectedText" in context)) {
+    return { allowed: true };
   }
 
-  const hasSelection = "selectedText" in context;
   if (diffs.length !== 1) {
     return {
       allowed: false,
@@ -273,13 +275,8 @@ export function validateSelectionEdit(
     };
   }
 
-  if (!hasSelection) {
-    // Document-only context: allow full-file replacement
-    return { allowed: true };
-  }
-
-  const prefix = context.documentContent.slice(0, (context as SelectionContext).selectionStartOffset);
-  const suffix = context.documentContent.slice((context as SelectionContext).selectionEndOffset);
+  const prefix = context.documentContent.slice(0, context.selectionStartOffset);
+  const suffix = context.documentContent.slice(context.selectionEndOffset);
   if (diff.newText.length < prefix.length + suffix.length) {
     return { allowed: false, reason: "The edit removes content outside the selection." };
   }

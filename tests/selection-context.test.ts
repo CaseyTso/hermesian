@@ -125,78 +125,30 @@ describe("validateSelectionEdit", () => {
     ).toEqual({ allowed: true });
   });
 
-  it("allows full-file replacement when only document context (no selection)", () => {
+  it("does not restrict Vault edits when only document context is attached", () => {
     const docCtx = createDocumentContext({
       content: "full file content\nmulti line",
       filePath: "note.md",
       vaultPath,
     });
-    // full file replacement: oldText matches documentContent, newText is new
     expect(
       validateSelectionEdit(docCtx, [
         {
-          path: "/vault/note.md",
-          oldText: docCtx.documentContent,
-          newText: "replaced\nfull content",
+          path: "/vault/wiki-hermes/SCHEMA.md",
+          oldText: "old schema",
+          newText: "new schema",
+        },
+        {
+          path: "/vault/wiki-hermes/entities/tool.md",
+          oldText: "",
+          newText: "new entity",
         },
       ]),
     ).toEqual({ allowed: true });
   });
 
-  it("rejects document context edits where oldText differs from documentContent", () => {
-    const docCtx = createDocumentContext({
-      content: "original content",
-      filePath: "note.md",
-      vaultPath,
-    });
-    expect(
-      validateSelectionEdit(docCtx, [
-        {
-          path: "/vault/note.md",
-          oldText: "stale content",
-          newText: "something",
-        },
-      ]).allowed,
-    ).toBe(false);
-  });
-
-  it("rejects document context edits targeting a different file", () => {
-    const docCtx = createDocumentContext({
-      content: "content",
-      filePath: "note.md",
-      vaultPath,
-    });
-    expect(
-      validateSelectionEdit(docCtx, [
-        {
-          path: "/vault/other.md",
-          oldText: "content",
-          newText: "content",
-        },
-      ]).allowed,
-    ).toBe(false);
-  });
-
-  it("rejects document context edits with more than one diff", () => {
-    const docCtx = createDocumentContext({
-      content: "content",
-      filePath: "note.md",
-      vaultPath,
-    });
-    expect(
-      validateSelectionEdit(docCtx, [
-        {
-          path: "/vault/note.md",
-          oldText: "content",
-          newText: "content",
-        },
-        {
-          path: "/vault/note.md",
-          oldText: "content",
-          newText: "content",
-        },
-      ]).allowed,
-    ).toBe(false);
+  it("does not impose a note scope when no document context is attached", () => {
+    expect(validateSelectionEdit(undefined, [])).toEqual({ allowed: true });
   });
 
   it("rejects edits outside the selection, another file, and stale snapshots", () => {
