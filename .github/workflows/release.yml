@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "*"
 
 permissions:
   contents: write
@@ -34,7 +34,7 @@ jobs:
           import fs from "node:fs";
           const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
           const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-          const expected = `v${manifest.version}`;
+          const expected = manifest.version;
           if (process.env.TAG_NAME !== expected || pkg.version !== manifest.version) {
             throw new Error(`Version mismatch: tag=${process.env.TAG_NAME}, manifest=${manifest.version}, package=${pkg.version}`);
           }
@@ -63,7 +63,7 @@ jobs:
           else
             gh release create "${TAG_NAME}" \
               --verify-tag \
-              --title "Hermesian ${TAG_NAME#v}" \
+              --title "Hermesian ${TAG_NAME}" \
               --generate-notes \
               main.js manifest.json styles.css "${archive}"
           fi
