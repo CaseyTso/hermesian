@@ -96,7 +96,6 @@ import {
   type InlineEditorRenderOptions,
 } from "./composer-inline-editor";
 import {
-  buildSlashOutboundPrompt,
   buildSlashMenuItems,
   composerSlashTokenFromMenuItem,
   serializeComposerSlashDraft,
@@ -104,6 +103,7 @@ import {
   type ComposerSlashToken,
   type SlashMenuItem,
 } from "./slash-menu";
+import { buildEnvelopePrompt } from "./outbound-envelope";
 import {
   hermesEventEndsTurn,
   type HermesHistoryEntry,
@@ -119,10 +119,6 @@ import { HermesAcpClient, type PermissionRequest } from "./acp-client";
 import { ViewStartupCoordinator } from "./view-startup";
 
 export const HERMESIAN_VIEW_TYPE = "hermesian-sidebar";
-
-const OBSIDIAN_OUTPUT_RULES = `<hermesian_output_rules>
-When referring to a note in the current Obsidian Vault, use an Obsidian wikilink such as [[folder/note|note]]. Preserve heading (#) and block (^) suffixes when relevant. Do not wrap wikilinks in backticks or code blocks.
-</hermesian_output_rules>`;
 
 const DISABLED_CONVERSATION_CONTROLS: ConversationControlAvailability =
   Object.freeze({
@@ -1923,9 +1919,7 @@ export class HermesianSidebarView extends ItemView {
     this.updateControls(false);
 
     try {
-      const outboundPrompt = isNativeSlashCommand
-        ? buildSlashOutboundPrompt(prompt)
-        : `${prompt}\n\n${OBSIDIAN_OUTPUT_RULES}`;
+      const outboundPrompt = buildEnvelopePrompt(prompt, isNativeSlashCommand);
       const promptContent: string | ContentBlock[] = pendingImages.length
         ? buildImagePrompt(outboundPrompt, pendingImages)
         : outboundPrompt;
