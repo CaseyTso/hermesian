@@ -49,7 +49,10 @@ import {
 } from "./session-state";
 import {
   buildOutboundPrompt,
+  resolveNoteContextInjection,
   validateSelectionEdit,
+  type NoteContextFingerprint,
+  type NoteContextInjectionKind,
 } from "./selection-context";
 import { reasoningEffortLabel } from "./session-history";
 import { HermesHistorySuggestModal } from "./ui/conversation-modals";
@@ -218,6 +221,11 @@ export class HermesianSidebarView extends ItemView {
   private slashTokenLabelEl!: HTMLElement;
   private stopButtonEl!: HTMLButtonElement;
   private readonly tabSelections = new Map<string, SelectionContext | undefined>();
+  /** Per-tab in-memory fingerprint of the last note context actually sent
+   *  ({filePath, documentHash}); drives the full/changed/none dedupe. Never
+   *  persisted to plugin data. A path with only an active-note marker is
+   *  recorded with an empty hash. */
+  private readonly noteContextFingerprints = new Map<string, NoteContextFingerprint>();
   private slashMenuIndex = 0;
   private slashMenuItems: SlashMenuItem[] = [];
   private statusEl!: HTMLElement;
@@ -302,6 +310,30 @@ export class HermesianSidebarView extends ItemView {
     this.currentFilePath = filePath;
     if (this.currentFileLabelEl) {
       this.renderCurrentFile();
+    }
+  }
+
+  /** Seeds a tab's dedupe fingerprint with the *current* note (path+hash,
+   *  empty hash when only the active-note marker is available). Used after a
+   *  successful session resume so the next same-path request is deduped;
+   *  nothing is sent here. */
+  private seedNoteContextFingerprint(tabId: string): void {
+    const doc = this.plugin.getCurrentDocumentContext();
+    if (doc) {
+      this.noteContextFingerprints.set(tabId, {
+        filePath: doc.filePath,
+        documentHash: doc.documentHash,
+      });
+      return;
+    }
+    const path = this.plugin.getCurrentMarkdownFilePath();
+    if (path) {
+      this.noteContextFingerprints.set(tabId, {
+        filePath: path,
+        documentHash: "",
+      });
+    } else {
+      this.noteContextFingerprints.delete(tabId);
     }
   }
 
@@ -1009,6 +1041,7 @@ export class HermesianSidebarView extends ItemView {
       const result = await adding;
       this.conversationWorkspace = result.workspace;
       this.loadedMessageTabIds.add(result.tabId);
+      this.noteContextFingerprints.delete(result.tabId);
       if (result.workspace.activeTabId === result.tabId) {
         this.showConversationMessages(result.tabId);
         this.resetConversationView(result.tabId);
@@ -1047,6 +1080,7 @@ export class HermesianSidebarView extends ItemView {
       this.conversationWorkspace = result.workspace;
       this.tabSelections.delete(tabId);
       this.pendingImages.delete(tabId);
+      this.noteContextFingerprints.delete(tabId);
       this.forgetConversationMessages(tabId);
       this.turnManager.delete(tabId);
 
@@ -1102,9 +1136,11 @@ export class HermesianSidebarView extends ItemView {
             ownerId,
           );
           this.loadedMessageTabIds.add(ownerId);
+          this.seedNoteContextFingerprint(ownerId);
         } else if (result.started) {
           this.resetConversationView(ownerId);
           this.loadedMessageTabIds.add(ownerId);
+          this.noteContextFingerprints.delete(ownerId);
           this.appendSystemMessage(
             "New Hermes conversation started.",
             false,
@@ -1166,9 +1202,11 @@ export class HermesianSidebarView extends ItemView {
           false,
           result.tabId,
         );
+        this.seedNoteContextFingerprint(result.tabId);
       } else if (result.started) {
         this.resetConversationView(result.tabId);
         this.loadedMessageTabIds.add(result.tabId);
+        this.noteContextFingerprints.delete(result.tabId);
         this.appendSystemMessage(
           "New Hermes conversation started.",
           false,
@@ -1283,6 +1321,7 @@ export class HermesianSidebarView extends ItemView {
         this.showConversationMessages(result.tabId);
         this.restoreActiveConversationRuntime();
         this.renderConversationTabs();
+        this.seedNoteContextFingerprint(result.tabId);
         const owner = result.workspace.tabs.find((tab) => tab.id === result.tabId);
         new Notice(
           `That Hermes session is already open in conversation ${owner?.label ?? result.tabId}.`,
@@ -1295,6 +1334,7 @@ export class HermesianSidebarView extends ItemView {
         await this.renderHistorySession(session, result.items, true, result.tabId);
       }
       this.editScopes.set(result.tabId, undefined);
+      this.seedNoteContextFingerprint(result.tabId);
       this.showConversationMessages(result.tabId);
       this.restoreActiveConversationRuntime();
       this.renderConversationTabs();
@@ -1885,6 +1925,18 @@ export class HermesianSidebarView extends ItemView {
         this.setCurrentFile(activeNotePath);
       }
     }
+    const notePath =
+      !isNativeSlashCommand && !selection
+        ? (documentContext?.filePath ?? activeNotePath)
+        : undefined;
+    const noteContextInjection: NoteContextInjectionKind | undefined =
+      includeFullContext && notePath !== undefined
+        ? resolveNoteContextInjection({
+            previous: this.noteContextFingerprints.get(activeTab.id),
+            currentPath: notePath,
+            currentHash: documentContext?.documentHash,
+          })
+        : undefined;
     const prompt = buildOutboundPrompt({
       request,
       isSlashCommand: isNativeSlashCommand,
@@ -1893,10 +1945,26 @@ export class HermesianSidebarView extends ItemView {
       selection,
       documentContext,
       activeNotePath,
+      noteContextInjection,
     });
     const runtime = this.turnRuntime(activeTab.id);
-    this.editScopes.set(activeTab.id, selection ?? documentContext);
-    this.appendUserMessage(request, selection, documentContext, activeTab.id, pendingImages);
+    // Only a full-document injection (or an explicit selection) narrows the
+    // edit scope; changed/none injections carry no document body.
+    this.editScopes.set(
+      activeTab.id,
+      selection ??
+        ((noteContextInjection ?? "full") === "full" ? documentContext : undefined),
+    );
+    this.appendUserMessage(
+      request,
+      selection,
+      noteContextInjection === "none" ? undefined : documentContext,
+      activeTab.id,
+      pendingImages,
+      noteContextInjection === "changed"
+        ? `${notePath} · note changed (not re-sent)`
+        : undefined,
+    );
     this.setComposerSlashToken(null);
     this.composerDraft = { token: null, text: "", references: [] };
     this.renderComposerInlineDraft();
@@ -1924,6 +1992,22 @@ export class HermesianSidebarView extends ItemView {
         ? buildImagePrompt(outboundPrompt, pendingImages)
         : outboundPrompt;
       await client.sendPrompt(promptContent);
+      // Fingerprints update only after a successful send: a native
+      // /new|/reset|/compress resets the tab's dedupe state, otherwise the
+      // sent note path+hash is recorded (full/changed) or left untouched
+      // (none). Failed sends never write or update the fingerprint.
+      if (isNativeSlashCommand && /^\/(new|reset|compress)(\s|$)/.test(request)) {
+        this.noteContextFingerprints.delete(activeTab.id);
+      } else if (
+        notePath !== undefined &&
+        noteContextInjection !== "none" &&
+        noteContextInjection !== undefined
+      ) {
+        this.noteContextFingerprints.set(activeTab.id, {
+          filePath: notePath,
+          documentHash: documentContext?.documentHash ?? "",
+        });
+      }
     } catch (error) {
       new Notice(`Hermesian: ${this.messageFor(error)}`);
       if (pendingImages.length > 0) {
@@ -1967,6 +2051,7 @@ export class HermesianSidebarView extends ItemView {
       this.conversationWorkspace = result.workspace;
       this.resetConversationView(tabId);
       this.editScopes.set(tabId, undefined);
+      this.noteContextFingerprints.delete(tabId);
       this.appendSystemMessage("New Hermes session started.", false, tabId);
       if (this.conversationWorkspace.activeTabId === tabId) {
         this.showConversationMessages(tabId);
@@ -1992,6 +2077,7 @@ export class HermesianSidebarView extends ItemView {
     documentContext?: MarkdownDocumentContext,
     tabId = this.conversationWorkspace?.activeTabId,
     images: readonly PastedImageAttachment[] = [],
+    contextChip?: string,
   ): void {
     const parent = tabId ? this.messageContainer(tabId) : this.messagesEl;
     const message = parent.createDiv({
@@ -2004,7 +2090,13 @@ export class HermesianSidebarView extends ItemView {
       });
     } else if (documentContext) {
       message.createDiv({
-        text: `${documentContext.filePath} · full note context`,
+        text: contextChip ?? `${documentContext.filePath} · full note context`,
+        cls: "hermesian-message-context",
+      });
+    } else if (contextChip) {
+      // changed-note marker with only an active-note path (no captured body)
+      message.createDiv({
+        text: contextChip,
         cls: "hermesian-message-context",
       });
     }

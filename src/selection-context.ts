@@ -191,6 +191,63 @@ export function buildActiveNotePrompt(
   ].join("\n");
 }
 
+export type NoteContextInjectionKind = "full" | "changed" | "none";
+
+export interface NoteContextFingerprint {
+  filePath: string;
+  documentHash: string;
+}
+
+export interface ResolveNoteContextInput {
+  previous?: NoteContextFingerprint;
+  currentPath?: string;
+  currentHash?: string;
+}
+
+/**
+ * Per-tab note-context dedupe decision. With no previous fingerprint the full
+ * document must go out; a path change always re-sends the full document; the
+ * same path with a different hash only announces the change (the agent may
+ * re-read the note via the obsidian skill); identical path+hash sends nothing.
+ * A missing current path can never be injected.
+ */
+export function resolveNoteContextInjection(
+  input: ResolveNoteContextInput,
+): NoteContextInjectionKind {
+  if (!input.currentPath) {
+    return "none";
+  }
+  if (!input.previous) {
+    return "full";
+  }
+  if (input.previous.filePath !== input.currentPath) {
+    return "full";
+  }
+  if ((input.previous.documentHash ?? "") !== (input.currentHash ?? "")) {
+    return "changed";
+  }
+  return "none";
+}
+
+export function buildNoteChangedPrompt(
+  filePath: string | undefined,
+  request: string,
+): string {
+  return [
+    "你正在通过 Hermesian 协助用户使用 Obsidian。",
+    "",
+    "<obsidian_context>",
+    `active_note: ${filePath ?? "none"}`,
+    "document_included: false",
+    "note_changed: true",
+    "</obsidian_context>",
+    "",
+    "当前笔记内容在本会话中已经发送过，本轮因笔记已发生变化不再重复发送全文；如需最新内容，请加载 obsidian skill 自行读取当前 active_note。",
+    "",
+    `用户请求：${request.trim()}`,
+  ].join("\n");
+}
+
 export interface OutboundPromptInput {
   request: string;
   /** Native control command or free-typed slash text: passed through bare. */
@@ -203,6 +260,11 @@ export interface OutboundPromptInput {
   /** Only ever supplied when the context capsule is on; the off-state send
    *  path never obtains the current note's path, so it cannot leak it. */
   activeNotePath?: string;
+  /** Optional per-tab dedupe override (see resolveNoteContextInjection).
+   *  Only consulted when the capsule is on and no explicit selection is
+   *  attached; omitted (or "full") keeps the historical document-first
+   *  routing, so legacy callers are unaffected. */
+  noteContextInjection?: NoteContextInjectionKind;
 }
 
 /**
@@ -232,10 +294,20 @@ export function buildOutboundPrompt(input: OutboundPromptInput): string {
   if (!input.includeCurrentDocumentContext) {
     return request;
   }
-  if (input.documentContext) {
-    return buildDocumentPrompt(input.documentContext, request);
+  switch (input.noteContextInjection ?? "full") {
+    case "none":
+      return request;
+    case "changed":
+      return buildNoteChangedPrompt(
+        input.documentContext?.filePath ?? input.activeNotePath,
+        request,
+      );
+    default:
+      if (input.documentContext) {
+        return buildDocumentPrompt(input.documentContext, request);
+      }
+      return buildActiveNotePrompt(input.activeNotePath, request);
   }
-  return buildActiveNotePrompt(input.activeNotePath, request);
 }
 
 export function validateSelectionEdit(

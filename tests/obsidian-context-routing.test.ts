@@ -264,4 +264,125 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
     expect(prompt).toBe("  你好  ");
     expect(prompt).not.toMatch(/obsidian_context|document_included|active_note/);
   });
+
+  it("routes a changed-note injection to the note_changed marker without the document body", () => {
+    const prompt = buildOutboundPrompt({
+      request: "继续总结",
+      isSlashCommand: false,
+      includeCurrentDocumentContext: true,
+      selection: undefined,
+      documentContext: sentinelDocumentContext(),
+      activeNotePath: SENTINEL_PATH,
+      noteContextInjection: "changed",
+    });
+
+    expect(prompt).toContain("note_changed: true");
+    expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(prompt).toContain("document_included: false");
+    expect(prompt).toContain("继续总结");
+    expect(prompt).not.toContain("<document>");
+    expect(prompt).not.toContain(SENTINEL_BODY);
+  });
+
+  it("emits only the request for a none injection even when a captured document is available", () => {
+    const prompt = buildOutboundPrompt({
+      request: "继续",
+      isSlashCommand: false,
+      includeCurrentDocumentContext: true,
+      selection: undefined,
+      documentContext: sentinelDocumentContext(),
+      activeNotePath: SENTINEL_PATH,
+      noteContextInjection: "none",
+    });
+
+    expect(prompt).toBe("继续");
+    expect(prompt).not.toContain(SENTINEL_BODY);
+    expect(prompt).not.toContain(SENTINEL_PATH);
+    expect(prompt).not.toContain("active_note");
+    expect(prompt).not.toContain("<obsidian_context>");
+  });
+
+  it("keeps the skill load instruction for a none injection while omitting all note context", () => {
+    const prompt = buildOutboundPrompt({
+      request: "/skill plan 继续",
+      isSlashCommand: false,
+      isSkill: true,
+      includeCurrentDocumentContext: true,
+      selection: undefined,
+      documentContext: sentinelDocumentContext(),
+      activeNotePath: SENTINEL_PATH,
+      noteContextInjection: "none",
+    });
+
+    expect(prompt).toContain('Load and follow the installed Hermes skill named "plan"');
+    expect(prompt).toContain("继续");
+    expect(prompt).not.toContain(SENTINEL_BODY);
+    expect(prompt).not.toContain(SENTINEL_PATH);
+    expect(prompt).not.toContain("active_note");
+    expect(prompt).not.toContain("<obsidian_context>");
+  });
+
+  it("uses the active-note path for a changed injection when no document was captured", () => {
+    const prompt = buildOutboundPrompt({
+      request: "继续",
+      isSlashCommand: false,
+      includeCurrentDocumentContext: true,
+      selection: undefined,
+      documentContext: undefined,
+      activeNotePath: SENTINEL_PATH,
+      noteContextInjection: "changed",
+    });
+
+    expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(prompt).toContain("note_changed: true");
+    expect(prompt).not.toContain("<document>");
+  });
+
+  it("ignores a none override when an explicit selection is attached", () => {
+    const prompt = buildOutboundPrompt({
+      request: "改写选区",
+      isSlashCommand: false,
+      includeCurrentDocumentContext: false,
+      selection: sentinelSelectionContext(),
+      documentContext: undefined,
+      activeNotePath: SENTINEL_PATH,
+      noteContextInjection: "none",
+    });
+
+    expect(prompt).toContain("<selection>");
+    expect(prompt).toContain("<document>");
+    expect(prompt).toContain(SENTINEL_BODY);
+  });
+
+  it("ignores a changed override for a native control command", () => {
+    const prompt = buildOutboundPrompt({
+      request: "/new",
+      isSlashCommand: true,
+      includeCurrentDocumentContext: true,
+      selection: undefined,
+      documentContext: sentinelDocumentContext(),
+      activeNotePath: SENTINEL_PATH,
+      noteContextInjection: "changed",
+    });
+
+    expect(prompt).toBe("/new");
+    expect(prompt).not.toContain("note_changed");
+    expect(prompt).not.toContain(SENTINEL_BODY);
+  });
+
+  it("ignores a changed override when the context capsule is off", () => {
+    const prompt = buildOutboundPrompt({
+      request: "你好",
+      isSlashCommand: false,
+      includeCurrentDocumentContext: false,
+      selection: undefined,
+      documentContext: sentinelDocumentContext(),
+      activeNotePath: SENTINEL_PATH,
+      noteContextInjection: "changed",
+    });
+
+    expect(prompt).toBe("你好");
+    expect(prompt).not.toContain("note_changed");
+    expect(prompt).not.toContain(SENTINEL_BODY);
+  });
 });
