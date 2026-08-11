@@ -34,8 +34,19 @@ const VERSION_TIMEOUT_MS = 30_000;
 const STDOUT_CAP = 256 * 1024;
 const STDERR_CAP = 16_000;
 
-const TRANSCRIBE_SCRIPT =
-  "import json,sys; from tools.voice_mode import transcribe_recording; print(json.dumps(transcribe_recording(sys.argv[1])))";
+export const TRANSCRIBE_SCRIPT = String.raw`
+import json
+import os
+import sys
+
+profile = (os.environ.get("HERMES_PROFILE") or "").strip()
+if profile:
+    from hermes_cli.profiles import resolve_profile_env
+    os.environ["HERMES_HOME"] = resolve_profile_env(profile)
+
+from tools.voice_mode import transcribe_recording
+print(json.dumps(transcribe_recording(sys.argv[1])))
+`;
 
 export type DictationResult =
   | { ok: true; transcript: string }
@@ -75,7 +86,12 @@ export type DictationRunCommand = (
 ) => Promise<DictationCommandResult>;
 
 export interface DictationTempFile {
-  cleanup: () => void | Promise<void>;
+  /**
+   * Remove the temp file and verify it is gone. Resolves true when the file
+   * no longer exists, false when it could not be removed (diagnosable, never
+   * silent).
+   */
+  cleanup: () => boolean | Promise<boolean>;
   path: string;
 }
 
@@ -212,28 +228,42 @@ export interface ResolvedHermesPython {
 }
 
 function isVenvExecutable(executable: string): boolean {
-  return /[\\/]venv[\\/]bin[\\/]hermes$/.test(executable);
+  return (
+    // POSIX: <install>/venv/bin/hermes
+    /[\\/]venv[\\/]bin[\\/]hermes$/.test(executable) ||
+    // Windows: <install>\venv\Scripts\hermes(.exe)
+    /[\\/]venv[\\/]Scripts[\\/]hermes(\.exe)?$/i.test(executable)
+  );
 }
 
 /**
  * Locate the venv python for transcription. Prefers the sibling python when
- * the resolved executable already lives in <install>/venv/bin; otherwise
- * probes `hermes --version` for the "Install directory:" line. Fails closed —
+ * the resolved executable already lives in the venv; otherwise probes
+ * `hermes --version` for the "Install directory:" line. Fails closed —
  * never falls back to system python.
  */
 export async function resolveHermesPython(
   executable: string,
   runCommand: DictationRunCommand,
   fileExists: (path: string) => boolean,
+  isWindows = process.platform === "win32",
 ): Promise<ResolvedHermesPython> {
   if (isVenvExecutable(executable)) {
+    const venvDir = dirname(dirname(executable));
+    if (isWindows) {
+      const python = join(venvDir, "Scripts", "python.exe");
+      if (fileExists(python)) {
+        return { installDir: dirname(venvDir), python };
+      }
+      throw new Error("Hermes venv python not found next to executable");
+    }
     const python = join(dirname(executable), "python");
     if (fileExists(python)) {
-      // <install>/venv/bin/hermes → install dir is three levels up.
-      return {
-        installDir: dirname(dirname(dirname(executable))),
-        python,
-      };
+      return { installDir: dirname(venvDir), python };
+    }
+    const python3 = join(dirname(executable), "python3");
+    if (fileExists(python3)) {
+      return { installDir: dirname(venvDir), python: python3 };
     }
     throw new Error("Hermes venv python not found next to executable");
   }
@@ -250,6 +280,13 @@ export async function resolveHermesPython(
   const installDir = parseInstallDirectory(result.stdout);
   if (!installDir) {
     throw new Error("hermes --version did not report an install directory");
+  }
+  if (isWindows) {
+    const python = join(installDir, "venv", "Scripts", "python.exe");
+    if (fileExists(python)) {
+      return { installDir, python };
+    }
+    throw new Error("Hermes venv python not found under install directory");
   }
   const python = join(installDir, "venv", "bin", "python");
   const python3 = join(installDir, "venv", "bin", "python3");
@@ -275,7 +312,16 @@ function buildDictationEnv(profile: string): NodeJS.ProcessEnv {
   return env;
 }
 
-async function defaultRunCommand(
+const KILL_WAIT_MS = 5_000;
+
+/**
+ * Run a command with a hard timeout. On timeout the child is SIGKILLed and
+ * the promise resolves only after the child has actually exited (or a
+ * bounded 5s fallback), so callers never race a half-reaped process — on
+ * Windows this is what makes temp-file deletion reliable. The resolved
+ * result carries the actual exit code/signal when available.
+ */
+export async function defaultRunCommand(
   options: DictationRunCommandOptions,
 ): Promise<DictationCommandResult> {
   return new Promise<DictationCommandResult>((resolve, reject) => {
@@ -291,9 +337,26 @@ async function defaultRunCommand(
       if (settled) {
         return;
       }
+      // Timeout: kill, then wait for the exit event (with a fallback timer)
+      // before resolving so the child is fully reaped.
       settled = true;
       child.kill("SIGKILL");
-      resolve({ code: null, signal: null, stderr, stdout, timedOut: true });
+      let killSettled = false;
+      const killFallback = setTimeout(() => {
+        if (killSettled) {
+          return;
+        }
+        killSettled = true;
+        resolve({ code: null, signal: null, stderr, stdout, timedOut: true });
+      }, KILL_WAIT_MS);
+      child.once("exit", (code, signal) => {
+        if (killSettled) {
+          return;
+        }
+        killSettled = true;
+        clearTimeout(killFallback);
+        resolve({ code, signal, stderr, stdout, timedOut: true });
+      });
     }, options.timeoutMs);
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -322,15 +385,33 @@ async function defaultRunCommand(
   });
 }
 
-async function defaultCreateTempAudioFile(
+/**
+ * Write the recording to a private (0600) temp file and return a cleanup
+ * that removes it and verifies the removal, resolving false (never throwing
+ * silently) when the file could not be deleted.
+ */
+export async function defaultCreateTempAudioFile(
   buffer: Uint8Array,
   extension: string,
 ): Promise<DictationTempFile> {
   const path = join(tmpdir(), `hermesian-dictation-${randomUUID()}${extension}`);
-  await writeFile(path, buffer);
+  await writeFile(path, buffer, { mode: 0o600 });
   return {
     path,
-    cleanup: () => unlink(path).catch(() => undefined),
+    cleanup: async () => {
+      try {
+        await unlink(path);
+      } catch {
+        // Fall through to the existence check: ENOENT means it is already
+        // gone, anything else means the file may still be present.
+      }
+      try {
+        accessSync(path);
+        return false;
+      } catch {
+        return true;
+      }
+    },
   };
 }
 
@@ -416,7 +497,21 @@ export class DictationBridge {
       });
       return { ok: false, reason: "spawn_failed" };
     } finally {
-      await temp.cleanup();
+      try {
+        const cleaned = await temp.cleanup();
+        if (cleaned !== true) {
+          this.#logger.warn("dictation.temp-cleanup-failed", {
+            path: temp.path,
+            reason: "file-still-present",
+          });
+        }
+      } catch (error) {
+        // Never let cleanup failure override the already-computed result.
+        this.#logger.warn("dictation.temp-cleanup-failed", {
+          path: temp.path,
+          reason: errorMessage(error),
+        });
+      }
     }
   }
 }

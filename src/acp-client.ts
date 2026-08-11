@@ -71,12 +71,27 @@ export const STEER_QUEUED_MARKERS = [
 
 export const STEER_FAILED_MARKERS = ["Steer failed", "⚠️"] as const;
 
+/**
+ * A steer failure receipt is a single sentence the server emits when the
+ * redirect was rejected: `⚠️ Steer failed: <detail>`. The combined
+ * ⚠️ + "Steer failed" unit is matched wherever it appears (a success
+ * sentence may precede it in a merged chunk), while a bare "Steer failed" or
+ * a leading "⚠️" only counts at sentence start — ordinary main-turn prose
+ * such as "I won't say Steer failed" or "The ⚠️ icon warns" must never be
+ * swallowed as a receipt.
+ */
+function hasSteerFailureMarker(text: string): boolean {
+  return (
+    /⚠️\s*Steer failed/.test(text) ||
+    /^\s*Steer failed/.test(text) ||
+    /^\s*⚠️/.test(text)
+  );
+}
+
 function stripSteerMarkers(text: string): string {
-  let stripped = text.split(STEER_SUCCESS_MARKER).join("");
-  for (const marker of [...STEER_QUEUED_MARKERS, ...STEER_FAILED_MARKERS]) {
-    stripped = stripped.split(marker).join("");
-  }
-  return stripped;
+  // Only the success marker can survive into the success branch; failure and
+  // queue receipts are suppressed entirely before this runs.
+  return text.split(STEER_SUCCESS_MARKER).join("");
 }
 
 export interface SteerCaptureClassification {
@@ -87,28 +102,64 @@ export interface SteerCaptureClassification {
 }
 
 /**
- * Classify a steer outcome purely from the captured agent text. Markers are
- * authoritative: the success marker wins, queue markers are explicit
- * failures, and anything else is unverifiable. Marker text never survives
- * into `body` (the assistant-delta replay stream).
+ * Classify a single captured agent chunk as a steer receipt or plain prose.
+ * Failure and queue receipts are authoritative and win over the success
+ * marker; a receipt is suppressed entirely (its dynamic detail never reaches
+ * `body`), while ordinary prose is preserved verbatim.
  */
 export function classifySteerCapture(
   captured: string,
 ): SteerCaptureClassification {
+  if (hasSteerFailureMarker(captured)) {
+    return { body: "", ok: false, reason: "steer_failed" };
+  }
+  if (STEER_QUEUED_MARKERS.some((marker) => captured.includes(marker))) {
+    return { body: "", ok: false, reason: "queued" };
+  }
   if (captured.includes(STEER_SUCCESS_MARKER)) {
     return { body: stripSteerMarkers(captured), ok: true };
   }
-  if (
-    STEER_QUEUED_MARKERS.some((marker) => captured.includes(marker))
-  ) {
-    return { body: stripSteerMarkers(captured), ok: false, reason: "queued" };
-  }
-  if (
-    STEER_FAILED_MARKERS.some((marker) => captured.includes(marker))
-  ) {
-    return { body: stripSteerMarkers(captured), ok: false, reason: "steer_failed" };
-  }
   return { body: captured, ok: false, reason: "unverifiable" };
+}
+
+/**
+ * Aggregate per-chunk classifications from the steer capture buffer. Receipt
+ * chunks (success/queue/failure) contribute no body; ordinary prose chunks
+ * are preserved verbatim in capture order. The verdict follows the strictest
+ * outcome seen: steer_failed > queued > success > unverifiable.
+ */
+export function aggregateSteerCapture(
+  chunks: string[],
+): SteerCaptureClassification {
+  let body = "";
+  let outcome: "unverifiable" | "queued" | "steer_failed" | "success" =
+    "unverifiable";
+  for (const chunk of chunks) {
+    const classification = classifySteerCapture(chunk);
+    if (classification.reason === "steer_failed") {
+      outcome = "steer_failed";
+    } else if (classification.reason === "queued") {
+      if (outcome !== "steer_failed") {
+        outcome = "queued";
+      }
+    } else if (classification.ok) {
+      if (outcome !== "steer_failed" && outcome !== "queued") {
+        outcome = "success";
+      }
+    } else {
+      body += classification.body;
+    }
+  }
+  switch (outcome) {
+    case "steer_failed":
+      return { body, ok: false, reason: "steer_failed" };
+    case "queued":
+      return { body, ok: false, reason: "queued" };
+    case "success":
+      return { body, ok: true };
+    default:
+      return { body, ok: false, reason: "unverifiable" };
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -240,6 +291,24 @@ export class HermesAcpClient {
   private imagePromptSupported = false;
   private intentionalShutdown = false;
   private lifecycleGeneration = 0;
+  /**
+   * True once the main prompt has actually been dispatched on the session.
+   * `busy` alone only means sendPrompt claimed the slot; steer must never
+   * overtake a main prompt that is still connecting/dispatching.
+   */
+  private mainTurnActive = false;
+  /**
+   * One-shot commit signal for the in-flight main prompt: created when
+   * sendPrompt claims busy, resolved at dispatch and again in finally so
+   * waiters are always released. The resolved value snapshots ownership at
+   * fire time, so a steer that was legitimately waiting on an active turn
+   * may still dispatch after the main prompt finishes, while a main prompt
+   * that never committed (connect failure) releases waiters as
+   * no_active_turn.
+   */
+  private mainTurnCommit:
+    | { fire: () => void; promise: Promise<boolean> }
+    | undefined;
   /** In-flight steer capture; at most one steer runs at a time. */
   private pendingSteer: { captured: string[] } | undefined;
   private sessionOperation:
@@ -353,6 +422,9 @@ export class HermesAcpClient {
     this.historyCapture = undefined;
     this.sessionOperation = undefined;
     this.busy = false;
+    this.mainTurnActive = false;
+    this.mainTurnCommit?.fire();
+    this.mainTurnCommit = undefined;
     this.imagePromptSupported = false;
     // Drop transport ownership so late awaits fail assertLifecycleOwned even
     // if signal.aborted was not observed on the captured connection object.
@@ -848,6 +920,14 @@ export class HermesAcpClient {
       throw new Error("Hermes is already processing a prompt");
     }
     this.busy = true;
+    let fireCommit!: (committed: boolean) => void;
+    const commitPromise = new Promise<boolean>((resolve) => {
+      fireCommit = resolve;
+    });
+    this.mainTurnCommit = {
+      fire: () => fireCommit(this.mainTurnActive),
+      promise: commitPromise,
+    };
     try {
       await this.connect();
       const session = this.activeSession;
@@ -856,6 +936,10 @@ export class HermesAcpClient {
         throw new Error("Hermes ACP session is unavailable");
       }
       if (resumedSessionId) {
+        // Ownership transfers the instant the main prompt is about to be
+        // dispatched so a steer waiting on the commit signal never overtakes.
+        this.mainTurnActive = true;
+        this.mainTurnCommit?.fire();
         const response = await this.context.request(acp.methods.agent.session.prompt, {
           prompt: Array.isArray(prompt) ? prompt : [{ type: "text", text: prompt }],
           sessionId: resumedSessionId,
@@ -867,6 +951,8 @@ export class HermesAcpClient {
         throw new Error("Hermes ACP session is unavailable");
       }
       void session.prompt(prompt);
+      this.mainTurnActive = true;
+      this.mainTurnCommit?.fire();
       for (;;) {
         const message = await session.nextUpdate();
         if (message.kind === "stop") {
@@ -880,6 +966,9 @@ export class HermesAcpClient {
       this.emit({ type: "error", message: errorMessage(error), terminal: true });
       throw error;
     } finally {
+      this.mainTurnActive = false;
+      this.mainTurnCommit?.fire();
+      this.mainTurnCommit = undefined;
       this.busy = false;
     }
   }
@@ -903,22 +992,46 @@ export class HermesAcpClient {
    * still running, so the sendPrompt busy guard stays intact.
    */
   async steerActiveTurn(text: string): Promise<SteerResult> {
-    if (!this.busy) {
-      return { ok: false, reason: "no_active_turn" };
-    }
     if (this.pendingSteer) {
       return { ok: false, reason: "steer_in_flight" };
     }
     if (!text.trim()) {
       return { ok: false, reason: "unverifiable" };
     }
+    if (!this.busy) {
+      return { ok: false, reason: "no_active_turn" };
+    }
+    if (!this.mainTurnActive) {
+      // The main prompt is still connecting or dispatching. Wait (bounded) on
+      // the commit signal — never dispatch ahead of the main prompt. The
+      // signal latches whether ownership existed at fire time, so a main
+      // prompt that never committed (connect failure) releases the waiter as
+      // no_active_turn instead of hanging.
+      const commit = this.mainTurnCommit;
+      if (!commit) {
+        return { ok: false, reason: "no_active_turn" };
+      }
+      let committed: boolean;
+      try {
+        committed = await withTimeout(
+          commit.promise,
+          FINITE_OPERATION_TIMEOUT_MS,
+          "Hermes ACP main-turn commit",
+        );
+      } catch {
+        return { ok: false, reason: "no_active_turn" };
+      }
+      if (!committed) {
+        return { ok: false, reason: "no_active_turn" };
+      }
+    }
     const steer = { captured: [] as string[] };
     this.pendingSteer = steer;
-    let classification: SteerCaptureClassification = classifySteerCapture("");
+    let classification: SteerCaptureClassification = aggregateSteerCapture([]);
     try {
       const sessionId = this.sessionId;
       if (!this.context || !sessionId) {
-        classification = classifySteerCapture("");
+        classification = aggregateSteerCapture([]);
         return { ok: false, reason: "unverifiable" };
       }
       await withTimeout(
@@ -929,14 +1042,14 @@ export class HermesAcpClient {
         FINITE_OPERATION_TIMEOUT_MS,
         "Hermes ACP steer",
       );
-      classification = classifySteerCapture(steer.captured.join(""));
+      classification = aggregateSteerCapture(steer.captured);
       return classification.ok
         ? { ok: true }
         : { ok: false, reason: classification.reason ?? "unverifiable" };
     } catch {
       // Timeout / transport failure: cannot verify the outcome. Concurrent
       // main-turn text captured during the window is still replayed below.
-      classification = classifySteerCapture(steer.captured.join(""));
+      classification = aggregateSteerCapture(steer.captured);
       return { ok: false, reason: "unverifiable" };
     } finally {
       this.pendingSteer = undefined;
@@ -956,6 +1069,9 @@ export class HermesAcpClient {
     this.transportPromise = undefined;
     this.intentionalShutdown = true;
     this.busy = false;
+    this.mainTurnActive = false;
+    this.mainTurnCommit?.fire();
+    this.mainTurnCommit = undefined;
     this.imagePromptSupported = false;
     this.sessionOperation = undefined;
     this.catalogGeneration += 1;

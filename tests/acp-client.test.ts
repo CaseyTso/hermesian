@@ -7,8 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RequestPermissionRequest } from "@agentclientprotocol/sdk";
 
 import {
+  aggregateSteerCapture,
   automaticVaultEditApproval,
   buildHermesAcpArgs,
+  classifySteerCapture,
   HermesAcpClient,
 } from "../src/acp-client";
 
@@ -929,6 +931,7 @@ describe("HermesAcpClient steer", () => {
     const request = vi.fn(() => pending.promise);
     steerTransport(client, request);
     Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
     Reflect.set(client, "resumedSessionId", "live-session");
 
     const steer = client.steerActiveTurn("rename the function");
@@ -960,6 +963,7 @@ describe("HermesAcpClient steer", () => {
     const pending = steerDeferred<{ stopReason: string }>();
     steerTransport(client, vi.fn(() => pending.promise));
     Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
     Reflect.set(client, "resumedSessionId", "live-session");
 
     const steer = client.steerActiveTurn("correction");
@@ -976,6 +980,7 @@ describe("HermesAcpClient steer", () => {
     const pendingA = steerDeferred<{ stopReason: string }>();
     steerTransport(noActiveTurn, vi.fn(() => pendingA.promise));
     Reflect.set(noActiveTurn, "busy", true);
+    Reflect.set(noActiveTurn, "mainTurnActive", true);
     Reflect.set(noActiveTurn, "resumedSessionId", "live-session");
     const steerA = noActiveTurn.steerActiveTurn("correction");
     pushSteerUpdate(noActiveTurn, steerChunk("No active turn — queued for the next turn. (1 queued)"));
@@ -988,6 +993,7 @@ describe("HermesAcpClient steer", () => {
     const pendingB = steerDeferred<{ stopReason: string }>();
     steerTransport(failed, vi.fn(() => pendingB.promise));
     Reflect.set(failed, "busy", true);
+    Reflect.set(failed, "mainTurnActive", true);
     Reflect.set(failed, "resumedSessionId", "live-session");
     const steerB = failed.steerActiveTurn("correction");
     pushSteerUpdate(failed, steerChunk("⚠️ Steer failed: model rejected the guidance"));
@@ -1003,6 +1009,7 @@ describe("HermesAcpClient steer", () => {
     const pending = steerDeferred<{ stopReason: string }>();
     steerTransport(client, vi.fn(() => pending.promise));
     Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
     Reflect.set(client, "resumedSessionId", "live-session");
 
     const steer = client.steerActiveTurn("correction");
@@ -1020,6 +1027,7 @@ describe("HermesAcpClient steer", () => {
       const client = steerClient();
       steerTransport(client, vi.fn(() => new Promise(() => undefined)));
       Reflect.set(client, "busy", true);
+      Reflect.set(client, "mainTurnActive", true);
       Reflect.set(client, "resumedSessionId", "live-session");
 
       const steer = client.steerActiveTurn("correction");
@@ -1039,6 +1047,7 @@ describe("HermesAcpClient steer", () => {
       }),
     );
     Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
     Reflect.set(client, "resumedSessionId", "live-session");
 
     await expect(client.steerActiveTurn("correction")).resolves.toEqual({
@@ -1065,6 +1074,7 @@ describe("HermesAcpClient steer", () => {
     const request = vi.fn(() => pending.promise);
     steerTransport(client, request);
     Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
     Reflect.set(client, "resumedSessionId", "live-session");
 
     const first = client.steerActiveTurn("first correction");
@@ -1083,6 +1093,7 @@ describe("HermesAcpClient steer", () => {
     const pending = steerDeferred<{ stopReason: string }>();
     steerTransport(client, vi.fn(() => pending.promise));
     Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
     Reflect.set(client, "resumedSessionId", "live-session");
 
     await expect(client.sendPrompt("blocked")).rejects.toThrow(
@@ -1103,6 +1114,7 @@ describe("HermesAcpClient steer", () => {
     const pending = steerDeferred<{ stopReason: string }>();
     steerTransport(client, vi.fn(() => pending.promise));
     Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
     Reflect.set(client, "resumedSessionId", "live-session");
 
     const steer = client.steerActiveTurn("correction");
@@ -1111,5 +1123,225 @@ describe("HermesAcpClient steer", () => {
     await steer;
 
     expect(events.join("")).not.toContain("Queued for the next turn");
+  });
+
+  it("replays interleaved prose in order and suppresses every receipt tail", async () => {
+    const client = steerClient();
+    const capture = assistantDeltas(client);
+    const pending = steerDeferred<{ stopReason: string }>();
+    steerTransport(client, vi.fn(() => pending.promise));
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const steer = client.steerActiveTurn("correction");
+    pushSteerUpdate(client, steerChunk("Queued for the next turn. (2 queued)"));
+    pushSteerUpdate(client, steerChunk("first half "));
+    pushSteerUpdate(client, steerChunk("second half"));
+    pushSteerUpdate(client, steerChunk("⚠️ Steer failed: too late"));
+    pending.resolve({ stopReason: "end_turn" });
+
+    await expect(steer).resolves.toEqual({ ok: false, reason: "steer_failed" });
+    expect(capture.deltas).toEqual(["first half second half"]);
+    expect(capture.all()).not.toContain("Queued for the next turn");
+    expect(capture.all()).not.toContain("Steer failed");
+  });
+
+  it("preserves prose that merely mentions marker words alongside a receipt", async () => {
+    const client = steerClient();
+    const capture = assistantDeltas(client);
+    const pending = steerDeferred<{ stopReason: string }>();
+    steerTransport(client, vi.fn(() => pending.promise));
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const steer = client.steerActiveTurn("correction");
+    pushSteerUpdate(client, steerChunk("⚠️ Steer failed: model rejected the guidance"));
+    pushSteerUpdate(client, steerChunk("I won't say Steer failed"));
+    pushSteerUpdate(client, steerChunk("The ⚠️ icon warns"));
+    pending.resolve({ stopReason: "end_turn" });
+
+    await expect(steer).resolves.toEqual({ ok: false, reason: "steer_failed" });
+    expect(capture.deltas).toEqual(["I won't say Steer failedThe ⚠️ icon warns"]);
+    expect(capture.all()).not.toContain("⚠️ Steer failed");
+  });
+
+  it("dispatches the main prompt before a same-tick steer on a resumed session", async () => {
+    const calls: string[] = [];
+    const client = steerClient();
+    const request = vi.fn(
+      async (...args: unknown[]) => {
+        const params = args[1] as { prompt: Array<{ text: string }> };
+        calls.push(params.prompt[0].text);
+        return { stopReason: "end_turn" };
+      },
+    );
+    steerTransport(client, request);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const main = client.sendPrompt("main prompt");
+    const steer = client.steerActiveTurn("correction");
+    await Promise.all([main, steer]);
+
+    expect(calls).toEqual(["main prompt", "correction"]);
+  });
+
+  it("waits for a main prompt that is still connecting before dispatching steer", async () => {
+    const calls: string[] = [];
+    let resolveConnect!: () => void;
+    const pendingConnect = new Promise<void>((resolve) => {
+      resolveConnect = resolve;
+    });
+    const client = steerClient();
+    const request = vi.fn(
+      async (...args: unknown[]) => {
+        const params = args[1] as { prompt: Array<{ text: string }> };
+        calls.push(params.prompt[0].text);
+        return { stopReason: "end_turn" };
+      },
+    );
+    steerTransport(client, request);
+    Reflect.set(client, "resumedSessionId", "live-session");
+    Reflect.set(client, "connect", vi.fn(() => pendingConnect));
+
+    const main = client.sendPrompt("main prompt");
+    const steer = client.steerActiveTurn("correction");
+    await Promise.resolve();
+    expect(request).not.toHaveBeenCalled();
+
+    resolveConnect();
+    await Promise.all([main, steer]);
+
+    expect(calls).toEqual(["main prompt", "correction"]);
+  });
+
+  it("returns no_active_turn after the main prompt has already finished", async () => {
+    const client = steerClient();
+    const request = vi.fn(async () => ({ stopReason: "end_turn" }));
+    steerTransport(client, request);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    await client.sendPrompt("finished main prompt");
+    expect(request).toHaveBeenCalledTimes(1);
+
+    await expect(client.steerActiveTurn("correction")).resolves.toEqual({
+      ok: false,
+      reason: "no_active_turn",
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns no_active_turn for a steer waiting on a failed connect", async () => {
+    const client = steerClient();
+    const request = vi.fn();
+    steerTransport(client, request);
+    Reflect.set(client, "connect", vi.fn(async () => {
+      throw new Error("connect blew up");
+    }));
+
+    const main = client.sendPrompt("main prompt");
+    const steer = client.steerActiveTurn("correction");
+
+    await expect(steer).resolves.toEqual({ ok: false, reason: "no_active_turn" });
+    await expect(main).rejects.toThrow("connect blew up");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("bounds the wait for a main prompt that never commits", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = steerClient();
+      const request = vi.fn();
+      steerTransport(client, request);
+      Reflect.set(client, "connect", vi.fn(() => new Promise<void>(() => undefined)));
+
+      void client.sendPrompt("main prompt");
+      const steer = client.steerActiveTurn("correction");
+      await vi.advanceTimersByTimeAsync(30_001);
+
+      await expect(steer).resolves.toEqual({ ok: false, reason: "no_active_turn" });
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("classifySteerCapture per-chunk receipts", () => {
+  it("suppresses the complete queue acknowledgement including its dynamic count", () => {
+    expect(classifySteerCapture("Queued for the next turn. (2 queued)")).toEqual({
+      body: "",
+      ok: false,
+      reason: "queued",
+    });
+    expect(
+      classifySteerCapture("No active turn — queued for the next turn. (1 queued)"),
+    ).toEqual({
+      body: "",
+      ok: false,
+      reason: "queued",
+    });
+  });
+
+  it("suppresses steer-failure receipts entirely, dynamic detail included", () => {
+    expect(classifySteerCapture("⚠️ Steer failed: boom")).toEqual({
+      body: "",
+      ok: false,
+      reason: "steer_failed",
+    });
+  });
+
+  it("never lets the success marker beat an explicit failure", () => {
+    expect(
+      classifySteerCapture(
+        "Redirected the active turn with your correction. ⚠️ Steer failed",
+      ),
+    ).toEqual({ body: "", ok: false, reason: "steer_failed" });
+  });
+
+  it("keeps ordinary prose that merely mentions marker words", () => {
+    expect(classifySteerCapture("I won't say Steer failed")).toEqual({
+      body: "I won't say Steer failed",
+      ok: false,
+      reason: "unverifiable",
+    });
+    expect(classifySteerCapture("The ⚠️ icon warns")).toEqual({
+      body: "The ⚠️ icon warns",
+      ok: false,
+      reason: "unverifiable",
+    });
+  });
+
+  it("strips only the success marker from a success receipt", () => {
+    expect(classifySteerCapture("Redirected the active turn with your correction.")).toEqual({
+      body: "",
+      ok: true,
+    });
+  });
+
+  it("aggregates per chunk: a failure receipt wins the verdict but prose survives", () => {
+    expect(
+      aggregateSteerCapture([
+        "⚠️ Steer failed: model rejected",
+        "I won't say Steer failed",
+      ]),
+    ).toEqual({ body: "I won't say Steer failed", ok: false, reason: "steer_failed" });
+  });
+
+  it("keeps prose captured before and after a receipt, in order", () => {
+    expect(
+      aggregateSteerCapture([
+        "before ",
+        "Queued for the next turn. (2 queued)",
+        "after",
+      ]),
+    ).toEqual({ body: "before after", ok: false, reason: "queued" });
+  });
+
+  it("treats a lone success receipt as ok with no body", () => {
+    expect(
+      aggregateSteerCapture(["Redirected the active turn with your correction."]),
+    ).toEqual({ body: "", ok: true });
   });
 });
