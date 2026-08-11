@@ -63,36 +63,25 @@ const FINITE_OPERATION_TIMEOUT_MS = 30_000;
  */
 export const STEER_SUCCESS_MARKER = "Redirected the active turn with your correction.";
 
-/** Queue fallbacks — receiving any of these means the steer was NOT applied. */
-export const STEER_QUEUED_MARKERS = [
-  "Queued for the next turn",
-  "No active turn — queued",
-] as const;
-
-export const STEER_FAILED_MARKERS = ["Steer failed", "⚠️"] as const;
+/**
+ * Complete queue-receipt sentences. The server emits each receipt as one
+ * standalone session_update sentence: `Queued for the next turn. (N queued)`
+ * or the older `No active turn — queued for the next turn. (N queued)`.
+ * Classification anchors on the whole trimmed text, so a substring mention
+ * inside ordinary main-stream prose is never mistaken for a receipt.
+ */
+const STEER_QUEUED_RECEIPT =
+  /^(?:Queued for the next turn\.|No active turn — queued for the next turn\.) \(\d+ queued\)$/;
 
 /**
- * A steer failure receipt is a single sentence the server emits when the
- * redirect was rejected: `⚠️ Steer failed: <detail>`. The combined
- * ⚠️ + "Steer failed" unit is matched wherever it appears (a success
- * sentence may precede it in a merged chunk), while a bare "Steer failed" or
- * a leading "⚠️" only counts at sentence start — ordinary main-turn prose
- * such as "I won't say Steer failed" or "The ⚠️ icon warns" must never be
- * swallowed as a receipt.
+ * Complete failure-receipt shape: `⚠️ Steer failed: <detail>`, a
+ * sentence-start `Steer failed …`, or a leading `⚠️`, optionally preceded by
+ * the success sentence in a merged chunk. Anchored at the start of the whole
+ * trimmed text so mid-sentence mentions ("The ⚠️ icon warns", "I won't say
+ * Steer failed") are preserved as ordinary prose.
  */
-function hasSteerFailureMarker(text: string): boolean {
-  return (
-    /⚠️\s*Steer failed/.test(text) ||
-    /^\s*Steer failed/.test(text) ||
-    /^\s*⚠️/.test(text)
-  );
-}
-
-function stripSteerMarkers(text: string): string {
-  // Only the success marker can survive into the success branch; failure and
-  // queue receipts are suppressed entirely before this runs.
-  return text.split(STEER_SUCCESS_MARKER).join("");
-}
+const STEER_FAILURE_RECEIPT =
+  /^(?:Redirected the active turn with your correction\.\s*)?(?:⚠️\s*Steer failed|Steer failed|⚠️)/;
 
 export interface SteerCaptureClassification {
   /** Non-marker captured text that must still be replayed as assistant-delta. */
@@ -103,21 +92,23 @@ export interface SteerCaptureClassification {
 
 /**
  * Classify a single captured agent chunk as a steer receipt or plain prose.
- * Failure and queue receipts are authoritative and win over the success
- * marker; a receipt is suppressed entirely (its dynamic detail never reaches
- * `body`), while ordinary prose is preserved verbatim.
+ * Anchored to the complete receipt sentence (trimmed, whole-text match): a
+ * full failure/queue/success receipt is suppressed entirely (dynamic detail
+ * never reaches `body`), while ordinary prose — even prose that mentions or
+ * explains the receipt wording — is preserved verbatim.
  */
 export function classifySteerCapture(
   captured: string,
 ): SteerCaptureClassification {
-  if (hasSteerFailureMarker(captured)) {
+  const text = captured.trim();
+  if (STEER_FAILURE_RECEIPT.test(text)) {
     return { body: "", ok: false, reason: "steer_failed" };
   }
-  if (STEER_QUEUED_MARKERS.some((marker) => captured.includes(marker))) {
+  if (STEER_QUEUED_RECEIPT.test(text)) {
     return { body: "", ok: false, reason: "queued" };
   }
-  if (captured.includes(STEER_SUCCESS_MARKER)) {
-    return { body: stripSteerMarkers(captured), ok: true };
+  if (text === STEER_SUCCESS_MARKER) {
+    return { body: "", ok: true };
   }
   return { body: captured, ok: false, reason: "unverifiable" };
 }
@@ -1037,6 +1028,15 @@ export class HermesAcpClient {
         if (!committed) {
           return { ok: false, reason: "no_active_turn" };
         }
+        // Liveness gate: the commit only latches that the main prompt was
+        // dispatched at fire time. If the main request has already reached
+        // terminal completion (or rejected) by the time this continuation
+        // runs, busy/mainTurnActive are already cleared — only a genuinely
+        // pending main request keeps them set. Dispatch only while the turn
+        // is still live.
+        if (!this.busy || !this.mainTurnActive) {
+          return { ok: false, reason: "no_active_turn" };
+        }
       } finally {
         this.steerPending = false;
       }
@@ -1145,6 +1145,19 @@ export class HermesAcpClient {
           // which converge here.
           if (this.pendingSteer) {
             this.pendingSteer.captured.push(update.content.text);
+            return;
+          }
+          // No steer in flight: a receipt that arrives late (the steer
+          // request timed out or the transport rejected while the server
+          // still emitted it) must never render as assistant text. Only an
+          // exact, complete receipt is suppressed; ordinary prose passes
+          // through verbatim.
+          const classification = classifySteerCapture(update.content.text);
+          if (
+            classification.ok ||
+            classification.reason === "queued" ||
+            classification.reason === "steer_failed"
+          ) {
             return;
           }
           this.emit({ type: "assistant-delta", text: update.content.text });

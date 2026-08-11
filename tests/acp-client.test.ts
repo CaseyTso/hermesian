@@ -12,6 +12,7 @@ import {
   buildHermesAcpArgs,
   classifySteerCapture,
   HermesAcpClient,
+  STEER_SUCCESS_MARKER,
 } from "../src/acp-client";
 
 function permissionRequest(
@@ -1167,7 +1168,7 @@ describe("HermesAcpClient steer", () => {
     expect(capture.all()).not.toContain("⚠️ Steer failed");
   });
 
-  it("dispatches the main prompt before a same-tick steer on a resumed session", async () => {
+  it("resolves a same-tick steer as no_active_turn when the main request already reached terminal completion", async () => {
     const calls: string[] = [];
     const client = steerClient();
     const request = vi.fn(
@@ -1182,12 +1183,64 @@ describe("HermesAcpClient steer", () => {
 
     const main = client.sendPrompt("main prompt");
     const steer = client.steerActiveTurn("correction");
-    await Promise.all([main, steer]);
 
-    expect(calls).toEqual(["main prompt", "correction"]);
+    await expect(steer).resolves.toEqual({ ok: false, reason: "no_active_turn" });
+    await main;
+    expect(calls).toEqual(["main prompt"]);
   });
 
-  it("waits for a main prompt that is still connecting before dispatching steer", async () => {
+  it("dispatches a same-tick steer only after a genuinely pending main request", async () => {
+    const calls: string[] = [];
+    let resolveMain!: (value: { stopReason: string }) => void;
+    const pendingMain = new Promise<{ stopReason: string }>((resolve) => {
+      resolveMain = resolve;
+    });
+    const client = steerClient();
+    const request = vi.fn(
+      (...args: unknown[]) => {
+        const params = args[1] as { prompt: Array<{ text: string }> };
+        calls.push(params.prompt[0].text);
+        if (params.prompt[0].text === "main prompt") {
+          return pendingMain;
+        }
+        return Promise.resolve({ stopReason: "end_turn" });
+      },
+    );
+    steerTransport(client, request);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const main = client.sendPrompt("main prompt");
+    const steer = client.steerActiveTurn("correction");
+
+    // The main request is still pending when the steer dispatches.
+    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    expect(calls).toEqual(["main prompt", "correction"]);
+    resolveMain({ stopReason: "end_turn" });
+    await main;
+  });
+
+  it("never dispatches a same-tick steer when the main request rejects immediately", async () => {
+    const calls: string[] = [];
+    const client = steerClient();
+    const request = vi.fn(
+      async (...args: unknown[]) => {
+        const params = args[1] as { prompt: Array<{ text: string }> };
+        calls.push(params.prompt[0].text);
+        throw new Error("transport blew up");
+      },
+    );
+    steerTransport(client, request);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const main = client.sendPrompt("main prompt");
+    const steer = client.steerActiveTurn("correction");
+
+    await expect(steer).resolves.toEqual({ ok: false, reason: "no_active_turn" });
+    await expect(main).rejects.toThrow("transport blew up");
+    expect(calls).toEqual(["main prompt"]);
+  });
+
+  it("does not dispatch a steer when the client disconnects while waiting on the commit", async () => {
     const calls: string[] = [];
     let resolveConnect!: () => void;
     const pendingConnect = new Promise<void>((resolve) => {
@@ -1210,10 +1263,53 @@ describe("HermesAcpClient steer", () => {
     await Promise.resolve();
     expect(request).not.toHaveBeenCalled();
 
-    resolveConnect();
-    await Promise.all([main, steer]);
+    await client.disconnect();
+    await expect(steer).resolves.toEqual({ ok: false, reason: "no_active_turn" });
 
+    resolveConnect();
+    await expect(main).rejects.toThrow("Hermes ACP session is unavailable");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("waits for a main prompt that is still connecting before dispatching steer", async () => {
+    const calls: string[] = [];
+    let resolveConnect!: () => void;
+    const pendingConnect = new Promise<void>((resolve) => {
+      resolveConnect = resolve;
+    });
+    let resolveMain!: (value: { stopReason: string }) => void;
+    const pendingMain = new Promise<{ stopReason: string }>((resolve) => {
+      resolveMain = resolve;
+    });
+    const client = steerClient();
+    const request = vi.fn(
+      (...args: unknown[]) => {
+        const params = args[1] as { prompt: Array<{ text: string }> };
+        calls.push(params.prompt[0].text);
+        // The main request must stay genuinely pending while the steer
+        // dispatches — an immediately-terminal main is the no_active_turn
+        // boundary, not an ordering scenario.
+        if (params.prompt[0].text === "main prompt") {
+          return pendingMain;
+        }
+        return Promise.resolve({ stopReason: "end_turn" });
+      },
+    );
+    steerTransport(client, request);
+    Reflect.set(client, "resumedSessionId", "live-session");
+    Reflect.set(client, "connect", vi.fn(() => pendingConnect));
+
+    const main = client.sendPrompt("main prompt");
+    const steer = client.steerActiveTurn("correction");
+    await Promise.resolve();
+    expect(request).not.toHaveBeenCalled();
+
+    resolveConnect();
+    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
     expect(calls).toEqual(["main prompt", "correction"]);
+
+    resolveMain({ stopReason: "end_turn" });
+    await main;
   });
 
   it("returns no_active_turn after the main prompt has already finished", async () => {
@@ -1273,12 +1369,20 @@ describe("HermesAcpClient steer", () => {
     const pendingConnect = new Promise<void>((resolve) => {
       resolveConnect = resolve;
     });
+    let resolveMain!: (value: { stopReason: string }) => void;
+    const pendingMain = new Promise<{ stopReason: string }>((resolve) => {
+      resolveMain = resolve;
+    });
     const client = steerClient();
     const request = vi.fn(
-      async (...args: unknown[]) => {
+      (...args: unknown[]) => {
         const params = args[1] as { prompt: Array<{ text: string }> };
         calls.push(params.prompt[0].text);
-        return { stopReason: "end_turn" };
+        // The main request stays genuinely pending while the steer dispatches.
+        if (params.prompt[0].text === "main prompt") {
+          return pendingMain;
+        }
+        return Promise.resolve({ stopReason: "end_turn" });
       },
     );
     steerTransport(client, request);
@@ -1297,9 +1401,11 @@ describe("HermesAcpClient steer", () => {
     expect(request).not.toHaveBeenCalled();
 
     resolveConnect();
-    await Promise.all([main, first]);
-
+    await expect(first).resolves.toEqual({ ok: false, reason: "unverifiable" });
     expect(calls).toEqual(["main prompt", "first correction"]);
+
+    resolveMain({ stopReason: "end_turn" });
+    await main;
   });
 
   it("clears the steer reservation when the main-turn commit fails", async () => {
@@ -1323,6 +1429,45 @@ describe("HermesAcpClient steer", () => {
       ok: false,
       reason: "no_active_turn",
     });
+  });
+
+  it("never renders a late success receipt that arrives after the steer settled", async () => {
+    const client = steerClient();
+    const capture = assistantDeltas(client);
+    const pending = steerDeferred<{ stopReason: string }>();
+    steerTransport(client, vi.fn(() => pending.promise));
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const steer = client.steerActiveTurn("correction");
+    // Settle the steer without any captured receipt (transport rejected).
+    pending.reject(new Error("transport blew up"));
+    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+
+    // The receipt arrives after pendingSteer was cleared — it must not become
+    // visible assistant text.
+    pushSteerUpdate(client, steerChunk(STEER_SUCCESS_MARKER));
+    expect(capture.deltas).toEqual([]);
+  });
+
+  it("suppresses late queue and failure receipts but keeps late ordinary prose", async () => {
+    const client = steerClient();
+    const capture = assistantDeltas(client);
+    const pending = steerDeferred<{ stopReason: string }>();
+    steerTransport(client, vi.fn(() => pending.promise));
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const steer = client.steerActiveTurn("correction");
+    pending.reject(new Error("transport blew up"));
+    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+
+    pushSteerUpdate(client, steerChunk("Queued for the next turn. (2 queued)"));
+    pushSteerUpdate(client, steerChunk("⚠️ Steer failed: boom"));
+    pushSteerUpdate(client, steerChunk("The model then finished its answer."));
+    expect(capture.deltas).toEqual(["The model then finished its answer."]);
   });
 });
 
@@ -1366,6 +1511,31 @@ describe("classifySteerCapture per-chunk receipts", () => {
     });
     expect(classifySteerCapture("The ⚠️ icon warns")).toEqual({
       body: "The ⚠️ icon warns",
+      ok: false,
+      reason: "unverifiable",
+    });
+  });
+
+  it("never swallows ordinary prose that mentions the queue wording", () => {
+    const prose = "The server says Queued for the next turn when it is busy.";
+    expect(classifySteerCapture(prose)).toEqual({
+      body: prose,
+      ok: false,
+      reason: "unverifiable",
+    });
+  });
+
+  it("keeps marker-like prose that embeds a receipt shape inside a sentence", () => {
+    const quoted =
+      'The assistant said "Redirected the active turn with your correction." earlier';
+    expect(classifySteerCapture(quoted)).toEqual({
+      body: quoted,
+      ok: false,
+      reason: "unverifiable",
+    });
+    const depth = "Queue depth reported as Queued for the next turn. (2 queued) entries";
+    expect(classifySteerCapture(depth)).toEqual({
+      body: depth,
       ok: false,
       reason: "unverifiable",
     });
