@@ -4,8 +4,10 @@ import {
   ConversationOperationCoordinator,
   deriveConversationControlAvailability,
   deriveConversationControls,
+  isSteerableDraft,
   removeTabOperation,
   type ConversationRuntimeState,
+  type SteerableDraftFacts,
   type TabOperationState,
 } from "../src/conversation-runtime";
 
@@ -94,7 +96,7 @@ describe("conversation runtime control availability", () => {
     expect(availability).toMatchObject({
       add: true,
       close: false,
-      composer: false,
+      composer: true,
       history: false,
       model: false,
       reasoning: false,
@@ -222,7 +224,7 @@ describe("conversation runtime control availability", () => {
     );
 
     expect(controls.byTab.get("tab-a")).toMatchObject({
-      composer: false,
+      composer: true,
       send: false,
       stop: true,
     });
@@ -236,6 +238,22 @@ describe("conversation runtime control availability", () => {
       connectionSettings: false,
       reasoning: false,
       tabNavigation: true,
+    });
+  });
+
+  it("keeps the composer editable while a tab is busy with send disabled", () => {
+    const availability = deriveConversationControlAvailability(
+      runtimeState(
+        new Map([["tab-b", tabState({ prompt: "running" })]]),
+        { activeTabId: "tab-b" },
+      ),
+    );
+
+    expect(availability).toMatchObject({
+      composer: true,
+      hasSession: true,
+      send: false,
+      stop: true,
     });
   });
 
@@ -262,6 +280,108 @@ describe("conversation runtime control availability", () => {
       reasoning: false,
       tabNavigation: false,
     });
+  });
+});
+
+describe("conversation runtime steer derivation", () => {
+  function steerableDraft(): SteerableDraftFacts {
+    return { hasText: true };
+  }
+
+  function busyState(): ConversationRuntimeState {
+    return runtimeState(
+      new Map([["tab-b", tabState({ prompt: "running" })]]),
+      { activeTabId: "tab-b" },
+    );
+  }
+
+  it("enables steer only for a busy tab with a steerable pure-text draft", () => {
+    const busy = busyState();
+    expect(deriveConversationControlAvailability(busy, "tab-b", steerableDraft()).steer).toBe(true);
+
+    // Empty draft (no text) is not steerable.
+    expect(deriveConversationControlAvailability(busy, "tab-b", {}).steer).toBe(false);
+    expect(deriveConversationControlAvailability(busy, "tab-b", { hasText: false }).steer).toBe(false);
+
+    // Non-pure-text drafts are never steerable.
+    expect(
+      deriveConversationControlAvailability(busy, "tab-b", { hasText: true, hasPendingImages: true }).steer,
+    ).toBe(false);
+    expect(
+      deriveConversationControlAvailability(busy, "tab-b", { hasText: true, hasPendingSelection: true }).steer,
+    ).toBe(false);
+    expect(
+      deriveConversationControlAvailability(busy, "tab-b", { hasText: true, hasSlashToken: true }).steer,
+    ).toBe(false);
+    expect(
+      deriveConversationControlAvailability(busy, "tab-b", { hasText: true, hasReferenceCapsules: true }).steer,
+    ).toBe(false);
+  });
+
+  it("never enables steer on an idle or missing tab", () => {
+    const idle = runtimeState(new Map([["tab-b", tabState()]]), {
+      activeTabId: "tab-b",
+    });
+    expect(deriveConversationControlAvailability(idle, "tab-b", steerableDraft()).steer).toBe(false);
+    expect(deriveConversationControlAvailability(idle, "tab-b", steerableDraft()).stop).toBe(false);
+
+    // No draft facts at all — the view has not reported a draft yet.
+    expect(deriveConversationControlAvailability(busyState(), "tab-b").steer).toBe(false);
+  });
+
+  it("keeps steer behind connection, permission, and closing guards", () => {
+    const noSession = runtimeState(
+      new Map([["tab-b", tabState({ prompt: "running", hasSession: false, connection: "loading" })]]),
+      { activeTabId: "tab-b" },
+    );
+    expect(deriveConversationControlAvailability(noSession, "tab-b", steerableDraft()).steer).toBe(false);
+
+    const permissionPending = runtimeState(
+      new Map([["tab-b", tabState({ prompt: "running", permissionPending: true })]]),
+      { activeTabId: "tab-b" },
+    );
+    expect(
+      deriveConversationControlAvailability(permissionPending, "tab-b", steerableDraft()).steer,
+    ).toBe(false);
+
+    const closing = runtimeState(
+      new Map([["tab-b", tabState({ prompt: "running", closing: true })]]),
+      { activeTabId: "tab-b" },
+    );
+    expect(deriveConversationControlAvailability(closing, "tab-b", steerableDraft()).steer).toBe(false);
+  });
+
+  it("keeps an idle sibling tab fully usable while another tab is busy", () => {
+    const controls = deriveConversationControls(
+      runtimeState(
+        new Map([
+          ["tab-a", tabState({ prompt: "running" })],
+          ["tab-b", tabState()],
+        ]),
+      ),
+    );
+
+    expect(controls.byTab.get("tab-a")).toMatchObject({
+      composer: true,
+      send: false,
+      stop: true,
+    });
+    expect(controls.byTab.get("tab-b")).toMatchObject({
+      composer: true,
+      send: true,
+      stop: false,
+    });
+  });
+
+  it("treats a draft as steerable only when it has pure text and no blockers", () => {
+    expect(isSteerableDraft({ hasText: true })).toBe(true);
+    expect(isSteerableDraft({ hasText: true, hasPendingImages: false })).toBe(true);
+    expect(isSteerableDraft()).toBe(false);
+    expect(isSteerableDraft({ hasText: false })).toBe(false);
+    expect(isSteerableDraft({ hasText: true, hasPendingImages: true })).toBe(false);
+    expect(isSteerableDraft({ hasText: true, hasPendingSelection: true })).toBe(false);
+    expect(isSteerableDraft({ hasText: true, hasSlashToken: true })).toBe(false);
+    expect(isSteerableDraft({ hasText: true, hasReferenceCapsules: true })).toBe(false);
   });
 });
 

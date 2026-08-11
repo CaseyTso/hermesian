@@ -30,6 +30,7 @@ import type {
   HermesUiEvent,
   ReasoningEffort,
   SessionContextUsage,
+  SteerResult,
 } from "./types";
 import { readVaultTextFile, resolveVaultPath } from "./vault-files";
 
@@ -55,6 +56,60 @@ export interface HermesAcpClientOptions {
 
 const STARTUP_TIMEOUT_MS = 30_000;
 const FINITE_OPERATION_TIMEOUT_MS = 30_000;
+
+/**
+ * The only accepted success marker for a steer. The server emits this exact
+ * text (as an agent_message_chunk) when it redirected the active turn.
+ */
+export const STEER_SUCCESS_MARKER = "Redirected the active turn with your correction.";
+
+/** Queue fallbacks — receiving any of these means the steer was NOT applied. */
+export const STEER_QUEUED_MARKERS = [
+  "Queued for the next turn",
+  "No active turn — queued",
+] as const;
+
+export const STEER_FAILED_MARKERS = ["Steer failed", "⚠️"] as const;
+
+function stripSteerMarkers(text: string): string {
+  let stripped = text.split(STEER_SUCCESS_MARKER).join("");
+  for (const marker of [...STEER_QUEUED_MARKERS, ...STEER_FAILED_MARKERS]) {
+    stripped = stripped.split(marker).join("");
+  }
+  return stripped;
+}
+
+export interface SteerCaptureClassification {
+  /** Non-marker captured text that must still be replayed as assistant-delta. */
+  body: string;
+  ok: boolean;
+  reason?: "queued" | "steer_failed" | "unverifiable";
+}
+
+/**
+ * Classify a steer outcome purely from the captured agent text. Markers are
+ * authoritative: the success marker wins, queue markers are explicit
+ * failures, and anything else is unverifiable. Marker text never survives
+ * into `body` (the assistant-delta replay stream).
+ */
+export function classifySteerCapture(
+  captured: string,
+): SteerCaptureClassification {
+  if (captured.includes(STEER_SUCCESS_MARKER)) {
+    return { body: stripSteerMarkers(captured), ok: true };
+  }
+  if (
+    STEER_QUEUED_MARKERS.some((marker) => captured.includes(marker))
+  ) {
+    return { body: stripSteerMarkers(captured), ok: false, reason: "queued" };
+  }
+  if (
+    STEER_FAILED_MARKERS.some((marker) => captured.includes(marker))
+  ) {
+    return { body: stripSteerMarkers(captured), ok: false, reason: "steer_failed" };
+  }
+  return { body: captured, ok: false, reason: "unverifiable" };
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -185,6 +240,8 @@ export class HermesAcpClient {
   private imagePromptSupported = false;
   private intentionalShutdown = false;
   private lifecycleGeneration = 0;
+  /** In-flight steer capture; at most one steer runs at a time. */
+  private pendingSteer: { captured: string[] } | undefined;
   private sessionOperation:
     | { kind: "history" | "model" | "new-session"; token: symbol }
     | undefined;
@@ -838,6 +895,61 @@ export class HermesAcpClient {
     this.emit({ type: "notice", text: "Cancellation requested" });
   }
 
+  /**
+   * Steer the running active turn with a pure-text correction. Runs over a
+   * bounded direct JSON-RPC request, never touching the queue: if the server
+   * falls back to queueing, the queue marker text is classified as an
+   * explicit failure. Steer does not change busy state — the main turn is
+   * still running, so the sendPrompt busy guard stays intact.
+   */
+  async steerActiveTurn(text: string): Promise<SteerResult> {
+    if (!this.busy) {
+      return { ok: false, reason: "no_active_turn" };
+    }
+    if (this.pendingSteer) {
+      return { ok: false, reason: "steer_in_flight" };
+    }
+    if (!text.trim()) {
+      return { ok: false, reason: "unverifiable" };
+    }
+    const steer = { captured: [] as string[] };
+    this.pendingSteer = steer;
+    let classification: SteerCaptureClassification = classifySteerCapture("");
+    try {
+      const sessionId = this.sessionId;
+      if (!this.context || !sessionId) {
+        classification = classifySteerCapture("");
+        return { ok: false, reason: "unverifiable" };
+      }
+      await withTimeout(
+        this.context.request(acp.methods.agent.session.prompt, {
+          prompt: [{ type: "text", text }],
+          sessionId,
+        }),
+        FINITE_OPERATION_TIMEOUT_MS,
+        "Hermes ACP steer",
+      );
+      classification = classifySteerCapture(steer.captured.join(""));
+      return classification.ok
+        ? { ok: true }
+        : { ok: false, reason: classification.reason ?? "unverifiable" };
+    } catch {
+      // Timeout / transport failure: cannot verify the outcome. Concurrent
+      // main-turn text captured during the window is still replayed below.
+      classification = classifySteerCapture(steer.captured.join(""));
+      return { ok: false, reason: "unverifiable" };
+    } finally {
+      this.pendingSteer = undefined;
+      this.replaySteerCapture(classification);
+    }
+  }
+
+  private replaySteerCapture(classification: SteerCaptureClassification): void {
+    if (classification.body.trim()) {
+      this.emit({ type: "assistant-delta", text: classification.body });
+    }
+  }
+
   async disconnect(): Promise<void> {
     this.lifecycleGeneration += 1;
     this.connectPromise = undefined;
@@ -890,6 +1002,15 @@ export class HermesAcpClient {
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
         if (update.content.type === "text") {
+          // While a steer is in flight, streamed agent text goes into the
+          // steer capture buffer instead of assistant-delta; it is classified
+          // and replayed once the steer request settles. This covers both the
+          // fresh-session nextUpdate loop and the resumed notification route,
+          // which converge here.
+          if (this.pendingSteer) {
+            this.pendingSteer.captured.push(update.content.text);
+            return;
+          }
           this.emit({ type: "assistant-delta", text: update.content.text });
         }
         return;

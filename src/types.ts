@@ -128,6 +128,20 @@ export type HermesUiEvent =
   | { type: "error"; message: string; terminal: boolean }
   | { type: "turn-stop"; reason: string };
 
+/**
+ * Why a steer (running-turn pure-text correction) did not apply. The client
+ * must never fall back to queueing — the server's queue reply is treated as
+ * an explicit failure, never as success.
+ */
+export type SteerFailureReason =
+  | "queued"
+  | "steer_failed"
+  | "unverifiable"
+  | "no_active_turn"
+  | "steer_in_flight";
+
+export type SteerResult = { ok: true } | { ok: false; reason: SteerFailureReason };
+
 export function hermesEventEndsTurn(event: HermesUiEvent): boolean {
   return event.type === "turn-stop" || (event.type === "error" && event.terminal);
 }

@@ -36,8 +36,44 @@ export interface ConversationControlAvailability {
   reasoning: boolean;
   restart: boolean;
   send: boolean;
+  /**
+   * Whether the active turn on this tab can be corrected with a pure-text
+   * steer. Requires the tab's own turn to be running plus a steerable draft
+   * (draft facts are UI-layer input; absent facts mean not steerable).
+   * Optional so read-only callers (e.g. the view's disabled fallback) may
+   * omit it; treat undefined as false.
+   */
+  steer?: boolean;
   stop: boolean;
   tabNavigation: boolean;
+}
+
+/**
+ * Pure UI-layer facts describing the composer draft. Content itself belongs
+ * to the composer; this derivation only needs its steerability description.
+ */
+export interface SteerableDraftFacts {
+  /** Whether the draft contains non-whitespace text. */
+  hasText?: boolean;
+  hasPendingImages?: boolean;
+  hasPendingSelection?: boolean;
+  hasReferenceCapsules?: boolean;
+  hasSlashToken?: boolean;
+}
+
+/**
+ * A draft is steerable only when it is pure text: non-empty and free of
+ * pending images, selection, slash tokens, and reference capsules.
+ */
+export function isSteerableDraft(draft?: SteerableDraftFacts): boolean {
+  return Boolean(
+    draft &&
+      draft.hasText === true &&
+      draft.hasPendingImages !== true &&
+      draft.hasPendingSelection !== true &&
+      draft.hasReferenceCapsules !== true &&
+      draft.hasSlashToken !== true,
+  );
 }
 
 export interface ConversationAggregateControlAvailability {
@@ -63,6 +99,7 @@ function isSessionOperationRunning(tab: TabOperationState): boolean {
 export function deriveConversationControlAvailability(
   state: ConversationRuntimeState,
   tabId = state.activeTabId,
+  draft?: SteerableDraftFacts,
 ): ConversationControlAvailability {
   const activeTab = tabId ? state.tabs.get(tabId) : undefined;
   const globalBusy = state.initializing || state.globalOperation !== "idle";
@@ -129,10 +166,11 @@ export function deriveConversationControlAvailability(
       !activeSessionOperation &&
       !activePermissionPending &&
       activeTab?.closing !== true,
+    // The composer stays editable while the tab's own turn is running so the
+    // user can type a correction (Steer) or prep the next message.
     composer:
       Boolean(activeTab) &&
       !globalBusy &&
-      !activeTabBusy &&
       !activeSessionOperation &&
       !activePermissionPending &&
       activeTab?.closing !== true,
@@ -142,6 +180,15 @@ export function deriveConversationControlAvailability(
     reasoning: aggregate.reasoning,
     restart: !activeSessionBusy,
     send: !activeSessionBusy && hasSession,
+    steer:
+      Boolean(activeTab) &&
+      activeTabBusy &&
+      hasSession &&
+      !globalBusy &&
+      !activeSessionOperation &&
+      !activePermissionPending &&
+      activeTab?.closing !== true &&
+      isSteerableDraft(draft),
     stop: activeTabBusy === true,
     tabNavigation: aggregate.tabNavigation,
   };

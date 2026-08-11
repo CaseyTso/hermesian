@@ -835,3 +835,281 @@ describe("automaticVaultEditApproval", () => {
     ).toThrow(/outside the Obsidian vault/i);
   });
 });
+
+describe("HermesAcpClient steer", () => {
+  function steerDeferred<T>(): {
+    promise: Promise<T>;
+    reject: (reason?: unknown) => void;
+    resolve: (value: T | PromiseLike<T>) => void;
+  } {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((promiseResolve, promiseReject) => {
+      resolve = promiseResolve;
+      reject = promiseReject;
+    });
+    return { promise, reject, resolve };
+  }
+
+  function steerClient(
+    onEvent: (event: { type: string; text?: string }) => void = () => undefined,
+  ): HermesAcpClient {
+    return new HermesAcpClient({
+      onEvent: (event) => {
+        onEvent(event as { type: string; text?: string });
+      },
+      onPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+      pluginVersion: "test",
+      settings: () => ({
+        acceptHooks: true,
+        autoApproveVaultEdits: true,
+        debugLogging: false,
+        hermesExecutable: "/definitely/missing/hermes",
+        hiddenModelSwitchIds: [],
+        profile: "default",
+        reasoningEffort: "default",
+      }),
+      vaultPath: "/tmp/hermesian-test-vault",
+    });
+  }
+
+  function steerTransport(
+    client: HermesAcpClient,
+    request: (...args: unknown[]) => Promise<unknown>,
+  ): void {
+    Reflect.set(client, "connection", {
+      close: vi.fn(),
+      signal: { aborted: false },
+    });
+    Reflect.set(client, "context", { request });
+    Reflect.set(client, "intentionalShutdown", false);
+  }
+
+  function steerChunk(text: string): unknown {
+    return {
+      content: { text, type: "text" },
+      sessionUpdate: "agent_message_chunk",
+    };
+  }
+
+  function pushSteerUpdate(client: HermesAcpClient, update: unknown): void {
+    const handler = Reflect.get(client, "handleSessionUpdate") as
+      | ((update: unknown) => void)
+      | undefined;
+    expect(typeof handler).toBe("function");
+    handler!.call(client, update);
+  }
+
+  function assistantDeltas(
+    client: HermesAcpClient,
+  ): { deltas: string[]; all: () => string } {
+    const deltas: string[] = [];
+    const original = Reflect.get(client, "emit") as
+      | ((event: { type: string; text?: string }) => void)
+      | undefined;
+    Reflect.set(
+      client,
+      "emit",
+      (event: { type: string; text?: string }) => {
+        if (event.type === "assistant-delta" && typeof event.text === "string") {
+          deltas.push(event.text);
+        }
+        if (typeof original === "function") {
+          original.call(client, event);
+        }
+      },
+    );
+    return { deltas, all: () => deltas.join("") };
+  }
+
+  it("classifies the exact redirect marker as success and replays only non-marker text", async () => {
+    const client = steerClient();
+    const capture = assistantDeltas(client);
+    const pending = steerDeferred<{ stopReason: string }>();
+    const request = vi.fn(() => pending.promise);
+    steerTransport(client, request);
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const steer = client.steerActiveTurn("rename the function");
+    expect(request).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledWith(
+      "session/prompt",
+      expect.objectContaining({
+        prompt: [{ text: "rename the function", type: "text" }],
+        sessionId: "live-session",
+      }),
+    );
+
+    // Both fresh nextUpdate-loop and resumed notification routes converge on
+    // handleSessionUpdate; drive it directly to cover the capture path.
+    pushSteerUpdate(client, steerChunk("Redirected the active turn with your correction."));
+    pushSteerUpdate(client, steerChunk("main stream keeps flowing"));
+    pending.resolve({ stopReason: "end_turn" });
+
+    await expect(steer).resolves.toEqual({ ok: true });
+    expect(capture.deltas).toEqual(["main stream keeps flowing"]);
+    expect(capture.all()).not.toContain("Redirected the active turn");
+    expect(capture.all()).not.toContain("Queued for the next turn");
+    expect(capture.all()).not.toContain("No active turn — queued");
+  });
+
+  it("rejects the queue fallback and never renders queue copy as assistant text", async () => {
+    const client = steerClient();
+    const capture = assistantDeltas(client);
+    const pending = steerDeferred<{ stopReason: string }>();
+    steerTransport(client, vi.fn(() => pending.promise));
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const steer = client.steerActiveTurn("correction");
+    pushSteerUpdate(client, steerChunk("Queued for the next turn. (2 queued)"));
+    pending.resolve({ stopReason: "end_turn" });
+
+    await expect(steer).resolves.toEqual({ ok: false, reason: "queued" });
+    expect(capture.all()).not.toContain("Queued for the next turn");
+  });
+
+  it("rejects the no-active-turn queue fallback and steer failures explicitly", async () => {
+    const noActiveTurn = steerClient();
+    const captureA = assistantDeltas(noActiveTurn);
+    const pendingA = steerDeferred<{ stopReason: string }>();
+    steerTransport(noActiveTurn, vi.fn(() => pendingA.promise));
+    Reflect.set(noActiveTurn, "busy", true);
+    Reflect.set(noActiveTurn, "resumedSessionId", "live-session");
+    const steerA = noActiveTurn.steerActiveTurn("correction");
+    pushSteerUpdate(noActiveTurn, steerChunk("No active turn — queued for the next turn. (1 queued)"));
+    pendingA.resolve({ stopReason: "end_turn" });
+    await expect(steerA).resolves.toEqual({ ok: false, reason: "queued" });
+    expect(captureA.all()).not.toContain("No active turn — queued");
+
+    const failed = steerClient();
+    const captureB = assistantDeltas(failed);
+    const pendingB = steerDeferred<{ stopReason: string }>();
+    steerTransport(failed, vi.fn(() => pendingB.promise));
+    Reflect.set(failed, "busy", true);
+    Reflect.set(failed, "resumedSessionId", "live-session");
+    const steerB = failed.steerActiveTurn("correction");
+    pushSteerUpdate(failed, steerChunk("⚠️ Steer failed: model rejected the guidance"));
+    pendingB.resolve({ stopReason: "end_turn" });
+    await expect(steerB).resolves.toEqual({ ok: false, reason: "steer_failed" });
+    expect(captureB.all()).not.toContain("Steer failed");
+    expect(captureB.all()).not.toContain("⚠️");
+  });
+
+  it("returns unverifiable when no marker appears even with end_turn", async () => {
+    const client = steerClient();
+    const capture = assistantDeltas(client);
+    const pending = steerDeferred<{ stopReason: string }>();
+    steerTransport(client, vi.fn(() => pending.promise));
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const steer = client.steerActiveTurn("correction");
+    pushSteerUpdate(client, steerChunk("something unrelated"));
+    pending.resolve({ stopReason: "end_turn" });
+
+    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    // Concurrent main-turn text must not be lost.
+    expect(capture.deltas).toEqual(["something unrelated"]);
+  });
+
+  it("returns unverifiable when the request times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = steerClient();
+      steerTransport(client, vi.fn(() => new Promise(() => undefined)));
+      Reflect.set(client, "busy", true);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const steer = client.steerActiveTurn("correction");
+      await vi.advanceTimersByTimeAsync(30_001);
+      await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns unverifiable when the request rejects", async () => {
+    const client = steerClient();
+    steerTransport(
+      client,
+      vi.fn(async () => {
+        throw new Error("transport blew up");
+      }),
+    );
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    await expect(client.steerActiveTurn("correction")).resolves.toEqual({
+      ok: false,
+      reason: "unverifiable",
+    });
+  });
+
+  it("returns no_active_turn when no turn is running and never sends a request", async () => {
+    const client = steerClient();
+    const request = vi.fn();
+    steerTransport(client, request);
+
+    await expect(client.steerActiveTurn("correction")).resolves.toEqual({
+      ok: false,
+      reason: "no_active_turn",
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("rejects a second steer while one is in flight", async () => {
+    const client = steerClient();
+    const pending = steerDeferred<{ stopReason: string }>();
+    const request = vi.fn(() => pending.promise);
+    steerTransport(client, request);
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const first = client.steerActiveTurn("first correction");
+    await expect(client.steerActiveTurn("second correction")).resolves.toEqual({
+      ok: false,
+      reason: "steer_in_flight",
+    });
+    expect(request).toHaveBeenCalledOnce();
+
+    pending.resolve({ stopReason: "end_turn" });
+    await expect(first).resolves.toEqual({ ok: false, reason: "unverifiable" });
+  });
+
+  it("keeps sendPrompt's busy guard while steer uses its own bounded path", async () => {
+    const client = steerClient();
+    const pending = steerDeferred<{ stopReason: string }>();
+    steerTransport(client, vi.fn(() => pending.promise));
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    await expect(client.sendPrompt("blocked")).rejects.toThrow(
+      "Hermes is already processing a prompt",
+    );
+
+    const steer = client.steerActiveTurn("correction");
+    pending.resolve({ stopReason: "end_turn" });
+    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    expect(client.isBusy).toBe(true);
+  });
+
+  it("never leaks queue copy into any emitted event", async () => {
+    const events: string[] = [];
+    const client = steerClient((event) => {
+      events.push(JSON.stringify(event));
+    });
+    const pending = steerDeferred<{ stopReason: string }>();
+    steerTransport(client, vi.fn(() => pending.promise));
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const steer = client.steerActiveTurn("correction");
+    pushSteerUpdate(client, steerChunk("Queued for the next turn. (0 queued)"));
+    pending.resolve({ stopReason: "end_turn" });
+    await steer;
+
+    expect(events.join("")).not.toContain("Queued for the next turn");
+  });
+});
