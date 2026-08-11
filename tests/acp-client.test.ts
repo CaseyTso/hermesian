@@ -1469,6 +1469,183 @@ describe("HermesAcpClient steer", () => {
     pushSteerUpdate(client, steerChunk("The model then finished its answer."));
     expect(capture.deltas).toEqual(["The model then finished its answer."]);
   });
+
+  describe("steer receipt window and single-flight slot lifecycle", () => {
+  it("emits marker-shaped main-stream chunks as assistant text when no steer ever ran", () => {
+    const events: Array<{ type: string; text?: string }> = [];
+    const client = steerClient((event) => {
+      events.push(event as { type: string; text?: string });
+    });
+    pushSteerUpdate(client, steerChunk(STEER_SUCCESS_MARKER));
+    pushSteerUpdate(client, steerChunk("⚠️ Steer failed: never happened here"));
+    expect(events).toContainEqual({
+      type: "assistant-delta",
+      text: STEER_SUCCESS_MARKER,
+    });
+    expect(events).toContainEqual({
+      type: "assistant-delta",
+      text: "⚠️ Steer failed: never happened here",
+    });
+  });
+
+  it("suppresses count-less receipts inside the steer window but keeps late prose", async () => {
+    const client = steerClient();
+    const capture = assistantDeltas(client);
+    const pending = steerDeferred<{ stopReason: string }>();
+    steerTransport(client, vi.fn(() => pending.promise));
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    const steer = client.steerActiveTurn("correction");
+    pending.reject(new Error("transport blew up"));
+    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+
+    // Count-less queue variants and the real failure receipt stay suppressed
+    // while the steer window is still open; ordinary prose still streams.
+    pushSteerUpdate(client, steerChunk("Queued for the next turn"));
+    pushSteerUpdate(client, steerChunk("No active turn — queued"));
+    pushSteerUpdate(client, steerChunk("⚠️ Steer failed: boom"));
+    pushSteerUpdate(client, steerChunk("The model then finished its answer."));
+    expect(capture.deltas).toEqual(["The model then finished its answer."]);
+  });
+
+  it("keeps the single-flight slot reserved after timeout until the request settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = steerClient();
+      let resolveFirst!: (value: { stopReason: string }) => void;
+      const pendingFirst = new Promise<{ stopReason: string }>((resolve) => {
+        resolveFirst = resolve;
+      });
+      const request = vi.fn(() => pendingFirst);
+      steerTransport(client, request);
+      Reflect.set(client, "busy", true);
+      Reflect.set(client, "mainTurnActive", true);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const first = client.steerActiveTurn("first correction");
+      await vi.advanceTimersByTimeAsync(30_001);
+      await expect(first).resolves.toEqual({ ok: false, reason: "unverifiable" });
+
+      // The underlying request is still unresolved: a second steer must not
+      // reach the wire even though the first call already returned.
+      await expect(client.steerActiveTurn("second correction")).resolves.toEqual({
+        ok: false,
+        reason: "steer_in_flight",
+      });
+      expect(request).toHaveBeenCalledTimes(1);
+
+      // Once the underlying request settles, the slot recovers.
+      resolveFirst({ stopReason: "end_turn" });
+      await Promise.resolve();
+      await Promise.resolve();
+      const third = client.steerActiveTurn("third correction");
+      await expect(third).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("replays captured prose exactly once across a timeout and a late settle", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = steerClient();
+      const capture = assistantDeltas(client);
+      let resolveRequest!: (value: { stopReason: string }) => void;
+      const pendingRequest = new Promise<{ stopReason: string }>((resolve) => {
+        resolveRequest = resolve;
+      });
+      const request = vi.fn(() => pendingRequest);
+      steerTransport(client, request);
+      Reflect.set(client, "busy", true);
+      Reflect.set(client, "mainTurnActive", true);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const steer = client.steerActiveTurn("correction");
+      pushSteerUpdate(client, steerChunk("prose during the steer window"));
+      await vi.advanceTimersByTimeAsync(30_001);
+      await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      expect(capture.deltas).toEqual(["prose during the steer window"]);
+
+      // The unresolved request finally settles: the slot releases and the
+      // captured prose is not replayed a second time.
+      resolveRequest({ stopReason: "end_turn" });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(capture.deltas).toEqual(["prose during the steer window"]);
+
+      // The slot recovered: a new steer can dispatch.
+      const next = client.steerActiveTurn("again");
+      expect(request).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(30_001);
+      await expect(next).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases a still-unresolved steer slot when the main turn reaches terminal", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = steerClient();
+      const request = vi.fn(() => new Promise(() => undefined));
+      steerTransport(client, request);
+      Reflect.set(client, "busy", true);
+      Reflect.set(client, "mainTurnActive", true);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const steer = client.steerActiveTurn("correction");
+      await vi.advanceTimersByTimeAsync(30_001);
+      await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      expect(request).toHaveBeenCalledTimes(1);
+
+      // sendPrompt's finally performs this exact cleanup at main-turn terminal.
+      const closeSteerWindow = Reflect.get(client, "closeSteerWindow") as () => void;
+      closeSteerWindow.call(client);
+
+      const next = client.steerActiveTurn("correction again");
+      expect(request).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(30_001);
+      await expect(next).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases a still-unresolved steer slot on disconnect", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = steerClient();
+      const request = vi.fn(() => new Promise(() => undefined));
+      steerTransport(client, request);
+      Reflect.set(client, "busy", true);
+      Reflect.set(client, "mainTurnActive", true);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const steer = client.steerActiveTurn("correction");
+      await vi.advanceTimersByTimeAsync(30_001);
+      await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      expect(request).toHaveBeenCalledTimes(1);
+
+      await client.disconnect();
+      // Disconnect cleared the slot; restore a live transport and prove a
+      // new steer can dispatch instead of reporting steer_in_flight.
+      steerTransport(client, request);
+      Reflect.set(client, "busy", true);
+      Reflect.set(client, "mainTurnActive", true);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const next = client.steerActiveTurn("correction after reconnect");
+      expect(request).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(30_001);
+      await expect(next).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  });
 });
 
 describe("classifySteerCapture per-chunk receipts", () => {
@@ -1523,6 +1700,44 @@ describe("classifySteerCapture per-chunk receipts", () => {
       ok: false,
       reason: "unverifiable",
     });
+  });
+
+  it("preserves explanatory prose that merely starts with failure/warning wording", () => {
+    for (const prose of [
+      "Steer failed is the phrase used by the old protocol.",
+      "⚠️ is a warning icon, not a steer receipt.",
+    ]) {
+      expect(classifySteerCapture(prose)).toEqual({
+        body: prose,
+        ok: false,
+        reason: "unverifiable",
+      });
+    }
+  });
+
+  it("recognizes the count-less queue receipts named by the task contract", () => {
+    for (const receipt of ["Queued for the next turn", "No active turn — queued"]) {
+      expect(classifySteerCapture(receipt)).toEqual({
+        body: "",
+        ok: false,
+        reason: "queued",
+      });
+    }
+  });
+
+  it("keeps marker-like prose that starts with a receipt prefix but continues differently", () => {
+    for (const prose of [
+      "Queued for the next turn later in the day.",
+      "No active turn — queued, then I asked again.",
+      "⚠️ Steer failed later told the story",
+      "Redirected the active turn with your correction. ⚠️ Steer failed, then the model continued.",
+    ]) {
+      expect(classifySteerCapture(prose)).toEqual({
+        body: prose,
+        ok: false,
+        reason: "unverifiable",
+      });
+    }
   });
 
   it("keeps marker-like prose that embeds a receipt shape inside a sentence", () => {

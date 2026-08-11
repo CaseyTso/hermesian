@@ -64,24 +64,28 @@ const FINITE_OPERATION_TIMEOUT_MS = 30_000;
 export const STEER_SUCCESS_MARKER = "Redirected the active turn with your correction.";
 
 /**
- * Complete queue-receipt sentences. The server emits each receipt as one
- * standalone session_update sentence: `Queued for the next turn. (N queued)`
- * or the older `No active turn — queued for the next turn. (N queued)`.
- * Classification anchors on the whole trimmed text, so a substring mention
- * inside ordinary main-stream prose is never mistaken for a receipt.
+ * Complete queue-receipt sentences, counted and count-less. The server emits
+ * each receipt as one standalone session_update sentence:
+ * `Queued for the next turn. (N queued)`, the older
+ * `No active turn — queued for the next turn. (N queued)`, or the count-less
+ * `Queued for the next turn` / `No active turn — queued` forms named by the
+ * task contract. Classification anchors on the whole trimmed text, so a
+ * substring mention inside ordinary main-stream prose is never mistaken for
+ * a receipt.
  */
 const STEER_QUEUED_RECEIPT =
-  /^(?:Queued for the next turn\.|No active turn — queued for the next turn\.) \(\d+ queued\)$/;
+  /^(?:Queued for the next turn\. \(\d+ queued\)|No active turn — queued for the next turn\. \(\d+ queued\)|Queued for the next turn|No active turn — queued)$/;
 
 /**
- * Complete failure-receipt shape: `⚠️ Steer failed: <detail>`, a
- * sentence-start `Steer failed …`, or a leading `⚠️`, optionally preceded by
- * the success sentence in a merged chunk. Anchored at the start of the whole
- * trimmed text so mid-sentence mentions ("The ⚠️ icon warns", "I won't say
- * Steer failed") are preserved as ordinary prose.
+ * Complete failure-receipt shape: `⚠️ Steer failed: <detail>` (the verified
+ * server emission), or the same sentence merged behind the success sentence
+ * in a single chunk. Anchored as a whole trimmed sentence with the leading
+ * warning icon required, so explanatory prose that merely starts with
+ * failure/warning wording ("Steer failed is the phrase …", "⚠️ is a warning
+ * icon …") is preserved verbatim.
  */
 const STEER_FAILURE_RECEIPT =
-  /^(?:Redirected the active turn with your correction\.\s*)?(?:⚠️\s*Steer failed|Steer failed|⚠️)/;
+  /^(?:Redirected the active turn with your correction\.\s*)?⚠️\s*Steer failed(?:[:：].*)?$/;
 
 export interface SteerCaptureClassification {
   /** Non-marker captured text that must still be replayed as assistant-delta. */
@@ -311,6 +315,15 @@ export class HermesAcpClient {
    * captures text and is not consulted by handleSessionUpdate.
    */
   private steerPending = false;
+  /**
+   * Late-receipt suppression window. Opened when a steer request is actually
+   * dispatched, closed at main-turn terminal (sendPrompt finally) and on
+   * disconnect / connection close. While open, a complete
+   * success/queue/failure receipt that arrives after the steer itself settled
+   * is suppressed; with no steer history the window is closed and
+   * marker-shaped text is ordinary main-stream prose.
+   */
+  private steerReceiptWindow = false;
   private sessionOperation:
     | { kind: "history" | "model" | "new-session"; token: symbol }
     | undefined;
@@ -426,6 +439,7 @@ export class HermesAcpClient {
     this.mainTurnCommit?.fire();
     this.mainTurnCommit = undefined;
     this.imagePromptSupported = false;
+    this.closeSteerWindow();
     // Drop transport ownership so late awaits fail assertLifecycleOwned even
     // if signal.aborted was not observed on the captured connection object.
     if (this.connection === connection) {
@@ -970,6 +984,10 @@ export class HermesAcpClient {
       this.mainTurnCommit?.fire();
       this.mainTurnCommit = undefined;
       this.busy = false;
+      // Main turn reached terminal: a steer slot still held by an unresolved
+      // request must not outlive the turn, and the late-receipt window
+      // closes with it.
+      this.closeSteerWindow();
     }
   }
 
@@ -1041,36 +1059,87 @@ export class HermesAcpClient {
         this.steerPending = false;
       }
     }
-    const steer = { captured: [] as string[] };
+    const steer = { captured: [] as string[], replayed: false };
     this.pendingSteer = steer;
-    let classification: SteerCaptureClassification = aggregateSteerCapture([]);
     try {
       const sessionId = this.sessionId;
       if (!this.context || !sessionId) {
-        classification = aggregateSteerCapture([]);
+        // Nothing went on the wire — release the slot immediately.
+        this.pendingSteer = undefined;
         return { ok: false, reason: "unverifiable" };
       }
-      await withTimeout(
-        this.context.request(acp.methods.agent.session.prompt, {
-          prompt: [{ type: "text", text }],
-          sessionId,
-        }),
-        FINITE_OPERATION_TIMEOUT_MS,
-        "Hermes ACP steer",
+      const request = this.context.request(acp.methods.agent.session.prompt, {
+        prompt: [{ type: "text", text }],
+        sessionId,
+      });
+      this.steerReceiptWindow = true;
+      // The settle handler owns the single-flight slot: it releases
+      // pendingSteer and replays captured prose exactly once when the
+      // underlying request eventually settles (resolve or reject). The
+      // bounded withTimeout below only decides this call's return value —
+      // after a timeout the slot stays reserved until settle / main-turn
+      // terminal / disconnect releases it.
+      void request.then(
+        () => this.onSteerRequestSettled(steer),
+        () => this.onSteerRequestSettled(steer),
       );
-      classification = aggregateSteerCapture(steer.captured);
-      return classification.ok
-        ? { ok: true }
-        : { ok: false, reason: classification.reason ?? "unverifiable" };
+      let classification: SteerCaptureClassification = aggregateSteerCapture([]);
+      try {
+        await withTimeout(
+          request,
+          FINITE_OPERATION_TIMEOUT_MS,
+          "Hermes ACP steer",
+        );
+        classification = aggregateSteerCapture(steer.captured);
+        // The settle handler already replayed captured prose on this path —
+        // never replay again here.
+        return classification.ok
+          ? { ok: true }
+          : { ok: false, reason: classification.reason ?? "unverifiable" };
+      } catch {
+        // Timeout / transport failure: bounded return, but the unresolved
+        // request must keep the single-flight slot reserved. Captured
+        // main-turn prose is replayed now, exactly once — the settle handler
+        // skips replay once `replayed` is set.
+        classification = aggregateSteerCapture(steer.captured);
+        if (!steer.replayed) {
+          steer.replayed = true;
+          this.replaySteerCapture(classification);
+        }
+        return { ok: false, reason: "unverifiable" };
+      }
     } catch {
-      // Timeout / transport failure: cannot verify the outcome. Concurrent
-      // main-turn text captured during the window is still replayed below.
-      classification = aggregateSteerCapture(steer.captured);
-      return { ok: false, reason: "unverifiable" };
-    } finally {
+      // Synchronous dispatch failure: nothing went on the wire.
       this.pendingSteer = undefined;
-      this.replaySteerCapture(classification);
+      return { ok: false, reason: "unverifiable" };
     }
+  }
+
+  /**
+   * Settle handler for an in-flight steer request (success path included).
+   * Releases the single-flight slot and replays captured prose exactly once.
+   * On the bounded timeout path the method already replayed and set
+   * `replayed`, so a late settle only releases the slot.
+   */
+  private onSteerRequestSettled(steer: { captured: string[]; replayed: boolean }): void {
+    if (this.pendingSteer === steer) {
+      this.pendingSteer = undefined;
+    }
+    if (!steer.replayed) {
+      steer.replayed = true;
+      this.replaySteerCapture(aggregateSteerCapture(steer.captured));
+    }
+  }
+
+  /**
+   * Close the steer lifecycle at a main-turn terminal / disconnect /
+   * connection close: release any single-flight slot still held by an
+   * unresolved steer request and close the late-receipt window so the next
+   * turn starts clean.
+   */
+  private closeSteerWindow(): void {
+    this.pendingSteer = undefined;
+    this.steerReceiptWindow = false;
   }
 
   private replaySteerCapture(classification: SteerCaptureClassification): void {
@@ -1092,6 +1161,7 @@ export class HermesAcpClient {
     // its bounded timeout), but clear the reservation eagerly so no phantom
     // steer_in_flight can survive a disconnect.
     this.steerPending = false;
+    this.closeSteerWindow();
     this.imagePromptSupported = false;
     this.sessionOperation = undefined;
     this.catalogGeneration += 1;
@@ -1147,18 +1217,22 @@ export class HermesAcpClient {
             this.pendingSteer.captured.push(update.content.text);
             return;
           }
-          // No steer in flight: a receipt that arrives late (the steer
-          // request timed out or the transport rejected while the server
-          // still emitted it) must never render as assistant text. Only an
-          // exact, complete receipt is suppressed; ordinary prose passes
-          // through verbatim.
-          const classification = classifySteerCapture(update.content.text);
-          if (
-            classification.ok ||
-            classification.reason === "queued" ||
-            classification.reason === "steer_failed"
-          ) {
-            return;
+          // No steer in flight, but the late-receipt window may still be
+          // open for a steer that settled while its request (or the main
+          // turn) is still live: a complete late success/queue/failure
+          // receipt must never render as assistant text. Ordinary prose
+          // passes through verbatim. Outside the window (no steer ever ran)
+          // every chunk — even one shaped exactly like a marker — is
+          // ordinary main-stream text.
+          if (this.steerReceiptWindow) {
+            const classification = classifySteerCapture(update.content.text);
+            if (
+              classification.ok ||
+              classification.reason === "queued" ||
+              classification.reason === "steer_failed"
+            ) {
+              return;
+            }
           }
           this.emit({ type: "assistant-delta", text: update.content.text });
         }
