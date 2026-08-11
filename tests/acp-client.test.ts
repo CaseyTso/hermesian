@@ -1266,6 +1266,64 @@ describe("HermesAcpClient steer", () => {
       vi.useRealTimers();
     }
   });
+
+  it("reserves the steer slot while waiting on a connecting main prompt", async () => {
+    const calls: string[] = [];
+    let resolveConnect!: () => void;
+    const pendingConnect = new Promise<void>((resolve) => {
+      resolveConnect = resolve;
+    });
+    const client = steerClient();
+    const request = vi.fn(
+      async (...args: unknown[]) => {
+        const params = args[1] as { prompt: Array<{ text: string }> };
+        calls.push(params.prompt[0].text);
+        return { stopReason: "end_turn" };
+      },
+    );
+    steerTransport(client, request);
+    Reflect.set(client, "resumedSessionId", "live-session");
+    Reflect.set(client, "connect", vi.fn(() => pendingConnect));
+
+    const main = client.sendPrompt("main prompt");
+    const first = client.steerActiveTurn("first correction");
+
+    // Second steer while the first is still parked on the commit wait: the
+    // reservation must reject it immediately, without touching the wire.
+    await expect(client.steerActiveTurn("second correction")).resolves.toEqual({
+      ok: false,
+      reason: "steer_in_flight",
+    });
+    expect(request).not.toHaveBeenCalled();
+
+    resolveConnect();
+    await Promise.all([main, first]);
+
+    expect(calls).toEqual(["main prompt", "first correction"]);
+  });
+
+  it("clears the steer reservation when the main-turn commit fails", async () => {
+    const client = steerClient();
+    const request = vi.fn();
+    steerTransport(client, request);
+    Reflect.set(client, "connect", vi.fn(async () => {
+      throw new Error("connect blew up");
+    }));
+
+    const main = client.sendPrompt("main prompt");
+    const steer = client.steerActiveTurn("correction");
+
+    await expect(steer).resolves.toEqual({ ok: false, reason: "no_active_turn" });
+    await expect(main).rejects.toThrow("connect blew up");
+    expect(request).not.toHaveBeenCalled();
+
+    // The reservation was released by the failed wait: an idle steer reports
+    // no_active_turn, not a phantom steer_in_flight.
+    await expect(client.steerActiveTurn("aftermath")).resolves.toEqual({
+      ok: false,
+      reason: "no_active_turn",
+    });
+  });
 });
 
 describe("classifySteerCapture per-chunk receipts", () => {

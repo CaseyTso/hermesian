@@ -311,6 +311,15 @@ export class HermesAcpClient {
     | undefined;
   /** In-flight steer capture; at most one steer runs at a time. */
   private pendingSteer: { captured: string[] } | undefined;
+  /**
+   * Concurrency reservation held while a steer is waiting on the main-turn
+   * commit signal (main prompt still connecting/dispatching). Set before the
+   * bounded wait so a second steer cannot slip past the gate in the same
+   * window, cleared in finally once the wait settles — committed or not,
+   * withTimeout failure included. Purely a gate placeholder: it never
+   * captures text and is not consulted by handleSessionUpdate.
+   */
+  private steerPending = false;
   private sessionOperation:
     | { kind: "history" | "model" | "new-session"; token: symbol }
     | undefined;
@@ -992,7 +1001,7 @@ export class HermesAcpClient {
    * still running, so the sendPrompt busy guard stays intact.
    */
   async steerActiveTurn(text: string): Promise<SteerResult> {
-    if (this.pendingSteer) {
+    if (this.pendingSteer || this.steerPending) {
       return { ok: false, reason: "steer_in_flight" };
     }
     if (!text.trim()) {
@@ -1006,23 +1015,30 @@ export class HermesAcpClient {
       // the commit signal — never dispatch ahead of the main prompt. The
       // signal latches whether ownership existed at fire time, so a main
       // prompt that never committed (connect failure) releases the waiter as
-      // no_active_turn instead of hanging.
-      const commit = this.mainTurnCommit;
-      if (!commit) {
-        return { ok: false, reason: "no_active_turn" };
-      }
-      let committed: boolean;
+      // no_active_turn instead of hanging. While waiting, this steer holds
+      // the steerPending reservation so a concurrent steer call cannot pass
+      // the gate; it is released in finally once the wait settles.
+      this.steerPending = true;
       try {
-        committed = await withTimeout(
-          commit.promise,
-          FINITE_OPERATION_TIMEOUT_MS,
-          "Hermes ACP main-turn commit",
-        );
-      } catch {
-        return { ok: false, reason: "no_active_turn" };
-      }
-      if (!committed) {
-        return { ok: false, reason: "no_active_turn" };
+        const commit = this.mainTurnCommit;
+        if (!commit) {
+          return { ok: false, reason: "no_active_turn" };
+        }
+        let committed: boolean;
+        try {
+          committed = await withTimeout(
+            commit.promise,
+            FINITE_OPERATION_TIMEOUT_MS,
+            "Hermes ACP main-turn commit",
+          );
+        } catch {
+          return { ok: false, reason: "no_active_turn" };
+        }
+        if (!committed) {
+          return { ok: false, reason: "no_active_turn" };
+        }
+      } finally {
+        this.steerPending = false;
       }
     }
     const steer = { captured: [] as string[] };
@@ -1072,6 +1088,10 @@ export class HermesAcpClient {
     this.mainTurnActive = false;
     this.mainTurnCommit?.fire();
     this.mainTurnCommit = undefined;
+    // A steer parked on the commit wait is released by the fire above (or by
+    // its bounded timeout), but clear the reservation eagerly so no phantom
+    // steer_in_flight can survive a disconnect.
+    this.steerPending = false;
     this.imagePromptSupported = false;
     this.sessionOperation = undefined;
     this.catalogGeneration += 1;
