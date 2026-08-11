@@ -305,7 +305,9 @@ export class HermesAcpClient {
     | { fire: () => void; promise: Promise<boolean> }
     | undefined;
   /** In-flight steer capture; at most one steer runs at a time. */
-  private pendingSteer: { captured: string[] } | undefined;
+  private pendingSteer:
+    | { captured: string[]; replayed: boolean }
+    | undefined;
   /**
    * Concurrency reservation held while a steer is waiting on the main-turn
    * commit signal (main prompt still connecting/dispatching). Set before the
@@ -1099,13 +1101,19 @@ export class HermesAcpClient {
       } catch {
         // Timeout / transport failure: bounded return, but the unresolved
         // request must keep the single-flight slot reserved. Captured
-        // main-turn prose is replayed now, exactly once — the settle handler
-        // skips replay once `replayed` is set.
+        // main-turn prose is replayed now, exactly once.
         classification = aggregateSteerCapture(steer.captured);
         if (!steer.replayed) {
           steer.replayed = true;
           this.replaySteerCapture(classification);
         }
+        // Start a fresh capture epoch: the main turn keeps streaming into
+        // `captured` while the unresolved request still holds the slot.
+        // Replaying now must not silence that later prose forever — resetting
+        // the flag and the buffer lets closeSteerWindow (main-turn terminal)
+        // or a late settle replay the post-timeout prose exactly once.
+        steer.captured = [];
+        steer.replayed = false;
         return { ok: false, reason: "unverifiable" };
       }
     } catch {
@@ -1135,11 +1143,20 @@ export class HermesAcpClient {
    * Close the steer lifecycle at a main-turn terminal / disconnect /
    * connection close: release any single-flight slot still held by an
    * unresolved steer request and close the late-receipt window so the next
-   * turn starts clean.
+   * turn starts clean. Captured main-turn prose that was never replayed
+   * (e.g. streamed after a timed-out steer whose request never settles) is
+   * classified and replayed exactly once before the window closes.
    */
   private closeSteerWindow(): void {
+    const steer = this.pendingSteer;
     this.pendingSteer = undefined;
     this.steerReceiptWindow = false;
+    // The settle handler guards on `pendingSteer === steer` plus `replayed`,
+    // so a late settle can never double-replay what we emit here.
+    if (steer && !steer.replayed) {
+      steer.replayed = true;
+      this.replaySteerCapture(aggregateSteerCapture(steer.captured));
+    }
   }
 
   private replaySteerCapture(classification: SteerCaptureClassification): void {

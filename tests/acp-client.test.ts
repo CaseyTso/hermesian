@@ -1645,6 +1645,44 @@ describe("HermesAcpClient steer", () => {
       vi.useRealTimers();
     }
   });
+
+  it("replays post-timeout captured prose at main-turn terminal, exactly once", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = steerClient();
+      const capture = assistantDeltas(client);
+      const request = vi.fn(() => new Promise(() => undefined));
+      steerTransport(client, request);
+      Reflect.set(client, "busy", true);
+      Reflect.set(client, "mainTurnActive", true);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const steer = client.steerActiveTurn("correction");
+      pushSteerUpdate(client, steerChunk("early prose "));
+      await vi.advanceTimersByTimeAsync(30_001);
+      await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      // Prose captured before the timeout is replayed at the bounded timeout.
+      expect(capture.deltas).toEqual(["early prose "]);
+
+      // The unresolved request keeps the slot (and the capture buffer) alive:
+      // prose streamed after the timeout is still captured, not emitted.
+      pushSteerUpdate(client, steerChunk("late prose "));
+      pushSteerUpdate(client, steerChunk("Queued for the next turn. (2 queued)"));
+      pushSteerUpdate(client, steerChunk("keeps flowing"));
+      expect(capture.deltas).toEqual(["early prose "]);
+
+      // Main-turn terminal: sendPrompt's finally performs this exact cleanup.
+      const closeSteerWindow = Reflect.get(client, "closeSteerWindow") as () => void;
+      closeSteerWindow.call(client);
+
+      // The window's captured prose is replayed exactly once as
+      // assistant-delta; receipt tails are classified and never rendered.
+      expect(capture.deltas).toEqual(["early prose ", "late prose keeps flowing"]);
+      expect(capture.all()).not.toContain("Queued for the next turn");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   });
 });
 
