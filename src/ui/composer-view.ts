@@ -11,6 +11,12 @@ import {
   renderInlineDraft,
   type InlineEditorRenderOptions,
 } from "../composer-inline-editor";
+import {
+  STOPPING_LABEL,
+  dictationButtonLabel,
+  type ComposerPrimaryMode,
+  type DictationUiPhase,
+} from "../composer-actions";
 
 export interface ComposerElements {
   addSelectionButtonEl: HTMLButtonElement;
@@ -21,6 +27,8 @@ export interface ComposerElements {
   contextUsageEl: HTMLElement;
   currentFileBarEl: HTMLButtonElement;
   currentFileLabelEl: HTMLElement;
+  dictationButtonEl: HTMLButtonElement;
+  hintEl: HTMLElement;
   imageAttachmentBarEl: HTMLElement;
   modelButtonEl: HTMLButtonElement;
   modelLabelEl: HTMLElement;
@@ -33,6 +41,8 @@ export interface ComposerElements {
   slashTokenEl: HTMLElement;
   slashTokenIconEl: HTMLElement;
   slashTokenLabelEl: HTMLElement;
+  statusEl: HTMLElement;
+  steerButtonEl: HTMLButtonElement;
   stopButtonEl: HTMLButtonElement;
 }
 
@@ -41,12 +51,27 @@ export interface ComposerState {
   disabled: boolean;
   /** Current draft model (full text + inline reference placements). */
   draft: ComposerInlineDraft;
+  /** Dictation microphone phase. */
+  dictationPhase?: DictationUiPhase;
+  /** Whether dictation can start/stop (composer editable). */
+  dictationEnabled?: boolean;
+  /** Ephemeral hint/error near the primary actions (steer reject, STT error). */
+  hint?: string;
   /** Placeholder shown when the editor is empty. */
   placeholder: string;
+  /**
+   * Primary action matrix. Prefer this over the legacy stopVisible boolean;
+   * when omitted, stopVisible falls back to the pre-steer Send/Stop toggle.
+   */
+  primaryMode?: ComposerPrimaryMode;
   /** Whether the Send button is enabled. */
   sendEnabled: boolean;
-  /** Whether the Stop button should be shown instead of Send. */
+  /** Whether the Steer button is enabled (in-flight steers disable it). */
+  steerEnabled?: boolean;
+  /** @deprecated Prefer primaryMode. Kept for older call sites/tests. */
   stopVisible: boolean;
+  /** Whether Stop is clickable (false while Stopping…). */
+  stopEnabled?: boolean;
 }
 
 export interface ComposerCallbacks {
@@ -58,10 +83,14 @@ export interface ComposerCallbacks {
    * host model, and ordinary input has to carry that live token forward.
    */
   getDraft(): ComposerInlineDraft;
-  /** Called on Enter (without Shift) or Send button click. */
+  /** Called on Enter (without Shift) or Send / Steer button click. */
   onSend(): void;
   /** Called on Stop button click. */
   onStop(): void;
+  /** Called on Steer button click (running turn, pure-text draft). */
+  onSteer?(): void;
+  /** Called on microphone button click (start/stop single recording). */
+  onDictation?(): void;
   /** Called on paste events (image handling and text pastes). */
   onPaste(event: ClipboardEvent): void;
   /** Keydown forwarded from the editor — host drives slash menu + adapter. */
@@ -74,6 +103,13 @@ export interface ComposerCallbacks {
   onReferenceRemove?(index: number): void;
   /** Optional icon renderer (host injects Obsidian's setIcon). */
   renderIcon?(iconEl: HTMLElement, kind: ReferenceTokenKind): void;
+}
+
+function resolvePrimaryMode(state: ComposerState): ComposerPrimaryMode {
+  if (state.primaryMode) {
+    return state.primaryMode;
+  }
+  return state.stopVisible ? "stop" : "send";
 }
 
 export function createComposerView(
@@ -193,6 +229,17 @@ export function createComposerView(
   const addSelectionIcon = addSelectionButtonEl.createSpan();
   addSelectionIcon.empty();
 
+  const dictationButtonEl = controlRow.createEl("button", {
+    attr: {
+      "aria-label": dictationButtonLabel("idle"),
+      title: dictationButtonLabel("idle"),
+      type: "button",
+    },
+    cls: "clickable-icon hermesian-dictation",
+  });
+  const dictationIcon = dictationButtonEl.createSpan();
+  dictationIcon.empty();
+
   const sendButtonEl = controlRow.createEl("button", {
     attr: {
       "aria-label": "Send message",
@@ -203,6 +250,17 @@ export function createComposerView(
   });
   const sendIcon = sendButtonEl.createSpan();
   sendIcon.empty();
+
+  const steerButtonEl = controlRow.createEl("button", {
+    attr: {
+      "aria-label": "Steer active turn",
+      title: "Steer active turn",
+      type: "button",
+    },
+    cls: "clickable-icon hermesian-primary-action is-steer",
+  });
+  const steerIcon = steerButtonEl.createSpan();
+  steerIcon.empty();
 
   const stopButtonEl = controlRow.createEl("button", {
     attr: {
@@ -215,8 +273,31 @@ export function createComposerView(
   const stopIcon = stopButtonEl.createSpan();
   stopIcon.empty();
 
+  const statusEl = composerFooter.createDiv({
+    attr: { "aria-live": "polite", role: "status" },
+    cls: "hermesian-composer-status",
+  });
+  statusEl.hide();
+
+  const hintEl = composerFooter.createDiv({
+    attr: { "aria-live": "polite", role: "status" },
+    cls: "hermesian-composer-hint",
+  });
+  hintEl.hide();
+
   // Apply initial visibility
-  applyComposerState({ sendButtonEl, stopButtonEl, composerEl }, state);
+  applyComposerState(
+    {
+      composerEl,
+      dictationButtonEl,
+      hintEl,
+      sendButtonEl,
+      statusEl,
+      steerButtonEl,
+      stopButtonEl,
+    },
+    state,
+  );
 
   // --- Event wiring ---
   composerEl.addEventListener("input", () => {
@@ -251,13 +332,27 @@ export function createComposerView(
   });
 
   sendButtonEl.addEventListener("click", () => {
-    if (state.sendEnabled) {
+    if (!sendButtonEl.disabled && sendButtonEl.style.display !== "none") {
       callbacks.onSend();
     }
   });
 
+  steerButtonEl.addEventListener("click", () => {
+    if (!steerButtonEl.disabled && steerButtonEl.style.display !== "none") {
+      callbacks.onSteer?.();
+    }
+  });
+
   stopButtonEl.addEventListener("click", () => {
-    callbacks.onStop();
+    if (!stopButtonEl.disabled && stopButtonEl.style.display !== "none") {
+      callbacks.onStop();
+    }
+  });
+
+  dictationButtonEl.addEventListener("click", () => {
+    if (!dictationButtonEl.disabled) {
+      callbacks.onDictation?.();
+    }
   });
 
   const context = composerFooter.createDiv({ cls: "hermesian-context" });
@@ -279,6 +374,8 @@ export function createComposerView(
     contextUsageEl,
     currentFileBarEl,
     currentFileLabelEl,
+    dictationButtonEl,
+    hintEl,
     imageAttachmentBarEl,
     modelButtonEl,
     modelLabelEl,
@@ -291,26 +388,131 @@ export function createComposerView(
     slashTokenEl,
     slashTokenIconEl,
     slashTokenLabelEl,
+    statusEl,
+    steerButtonEl,
     stopButtonEl,
   };
 }
 
 export function applyComposerState(
-  elements: Pick<ComposerElements, "composerEl" | "sendButtonEl" | "stopButtonEl">,
+  elements: {
+    composerEl: HTMLElement;
+    sendButtonEl: HTMLButtonElement;
+    stopButtonEl: HTMLButtonElement;
+    steerButtonEl?: HTMLButtonElement;
+    dictationButtonEl?: HTMLButtonElement;
+    statusEl?: HTMLElement;
+    hintEl?: HTMLElement;
+  },
   state: ComposerState,
 ): void {
   elements.composerEl.contentEditable = state.disabled ? "false" : "true";
-  elements.sendButtonEl.disabled = !state.sendEnabled;
+  elements.composerEl.setAttribute(
+    "data-placeholder",
+    state.placeholder || elements.composerEl.getAttribute("data-placeholder") || "",
+  );
 
-  if (state.stopVisible) {
+  const mode = resolvePrimaryMode(state);
+  const stopEnabled = state.stopEnabled !== false && mode !== "stopping";
+  const steerEnabled = state.steerEnabled !== false && mode === "stop-steer";
+  const dictationPhase = state.dictationPhase ?? "idle";
+  const dictationEnabled =
+    state.dictationEnabled !== false && !state.disabled && dictationPhase !== "transcribing";
+
+  elements.sendButtonEl.disabled = !state.sendEnabled || mode !== "send";
+
+  // Visibility matrix
+  const showSend = mode === "send";
+  const showStop = mode === "stop" || mode === "stop-steer" || mode === "stopping";
+  const showSteer = mode === "stop-steer";
+
+  if (showSend) {
+    elements.sendButtonEl.show();
+  } else {
     elements.sendButtonEl.hide();
+  }
+  if (showStop) {
     elements.stopButtonEl.show();
   } else {
     elements.stopButtonEl.hide();
-    elements.sendButtonEl.show();
-    if (!state.disabled) {
-      elements.composerEl.focus();
+  }
+  if (elements.steerButtonEl) {
+    if (showSteer) {
+      elements.steerButtonEl.show();
+    } else {
+      elements.steerButtonEl.hide();
     }
+    elements.steerButtonEl.disabled = !steerEnabled;
+  }
+
+  elements.stopButtonEl.disabled = !stopEnabled;
+  if (mode === "stopping") {
+    elements.stopButtonEl.setAttribute("aria-label", STOPPING_LABEL);
+    elements.stopButtonEl.setAttribute("title", STOPPING_LABEL);
+    elements.stopButtonEl.classList.add("is-stopping");
+  } else {
+    elements.stopButtonEl.setAttribute("aria-label", "Stop response");
+    elements.stopButtonEl.setAttribute("title", "Stop response");
+    elements.stopButtonEl.classList.remove("is-stopping");
+  }
+
+  if (elements.dictationButtonEl) {
+    const label = dictationButtonLabel(dictationPhase);
+    elements.dictationButtonEl.disabled = !dictationEnabled;
+    elements.dictationButtonEl.setAttribute("aria-label", label);
+    elements.dictationButtonEl.setAttribute("title", label);
+    elements.dictationButtonEl.setAttribute(
+      "aria-pressed",
+      dictationPhase === "listening" ? "true" : "false",
+    );
+    elements.dictationButtonEl.classList.toggle(
+      "is-listening",
+      dictationPhase === "listening",
+    );
+    elements.dictationButtonEl.classList.toggle(
+      "is-transcribing",
+      dictationPhase === "transcribing",
+    );
+  }
+
+  if (elements.statusEl) {
+    if (mode === "stopping") {
+      elements.statusEl.textContent = STOPPING_LABEL;
+      elements.statusEl.show();
+      elements.statusEl.classList.add("is-stopping");
+    } else if (dictationPhase === "listening") {
+      elements.statusEl.textContent = "Listening…";
+      elements.statusEl.show();
+      elements.statusEl.classList.remove("is-stopping");
+      elements.statusEl.classList.add("is-listening");
+    } else if (dictationPhase === "transcribing") {
+      elements.statusEl.textContent = "Transcribing…";
+      elements.statusEl.show();
+      elements.statusEl.classList.remove("is-stopping", "is-listening");
+    } else {
+      elements.statusEl.textContent = "";
+      elements.statusEl.hide();
+      elements.statusEl.classList.remove("is-stopping", "is-listening");
+    }
+  }
+
+  if (elements.hintEl) {
+    const hint = state.hint?.trim() ?? "";
+    if (hint) {
+      elements.hintEl.textContent = hint;
+      elements.hintEl.show();
+      elements.hintEl.classList.toggle("is-error", /fail|error|could not|denied/i.test(hint));
+    } else {
+      elements.hintEl.textContent = "";
+      elements.hintEl.hide();
+      elements.hintEl.classList.remove("is-error");
+    }
+  }
+
+  // Only auto-focus when returning to an editable send surface — never steal
+  // focus while Stopping or while the user is reading a permission card.
+  if (showSend && !state.disabled && mode === "send") {
+    // Host decides focus; do not force here on every paint.
   }
 }
 

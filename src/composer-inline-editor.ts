@@ -615,3 +615,31 @@ export function handleInlineEditorInput(
   const read = readInlineDraftFromDom(editorEl);
   return { token: draft.token, text: read.text, references: read.references };
 }
+
+/**
+ * Insert plain text at the current caret/selection without auto-sending.
+ * Used by dictation: transcript replaces the selection (or inserts at caret)
+ * and the caret lands after the inserted text so the user can keep editing.
+ */
+export function insertTextAtCaret(
+  editorEl: HTMLElement,
+  draft: ComposerInlineDraft,
+  text: string,
+  options: InlineEditorRenderOptions = {},
+): { draft: ComposerInlineDraft; caret: number } {
+  const inserted = normalizeNewlines(text);
+  const selection = getSelectionOffsets(editorEl);
+  const position = expandSelectionOverCapsules(
+    draft,
+    selection?.start ?? draft.text.length,
+    selection?.end ?? draft.text.length,
+  );
+  const updated = applyInlineDraftEdit(draft, {
+    start: position.start,
+    end: position.end,
+    inserted,
+  });
+  const caret = position.start + inserted.length;
+  renderInlineDraft(editorEl, updated, options, caret);
+  return { draft: updated, caret };
+}

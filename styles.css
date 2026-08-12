@@ -1290,6 +1290,55 @@
   width: 13px;
 }
 
+.hermesian-view .hermesian-primary-action.is-steer {
+  background: color-mix(in srgb, var(--hermesian-accent) 14%, transparent);
+  color: var(--hermesian-accent);
+}
+
+.hermesian-view .hermesian-primary-action.is-steer:not(:disabled):hover {
+  background: color-mix(in srgb, var(--hermesian-accent) 22%, transparent);
+  color: var(--hermesian-accent);
+}
+
+.hermesian-view .hermesian-primary-action.is-stopping,
+.hermesian-view .hermesian-primary-action.is-stop:disabled {
+  opacity: 0.7;
+}
+
+.hermesian-dictation {
+  flex: 0 0 30px;
+  height: 30px;
+  width: 30px;
+}
+
+.hermesian-dictation.is-listening {
+  background: color-mix(in srgb, var(--text-error) 14%, transparent);
+  color: var(--text-error);
+  border-radius: 50%;
+}
+
+.hermesian-dictation.is-transcribing {
+  opacity: 0.7;
+}
+
+.hermesian-composer-status,
+.hermesian-composer-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+  min-height: 0;
+  padding: 0 2px;
+}
+
+.hermesian-composer-status.is-listening,
+.hermesian-composer-status.is-stopping {
+  color: var(--text-error);
+}
+
+.hermesian-composer-hint.is-error {
+  color: var(--text-error);
+}
+
 @media (max-width: 480px) {
   .hermesian-message {
     max-width: 94%;

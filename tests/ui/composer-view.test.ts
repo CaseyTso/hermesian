@@ -94,6 +94,8 @@ function setup(state?: Partial<ComposerState>) {
     onPaste: vi.fn(),
     onSend: vi.fn(),
     onStop: vi.fn(),
+    onSteer: vi.fn(),
+    onDictation: vi.fn(),
     onKeydown: vi.fn(),
     onCopy: vi.fn(),
     onCut: vi.fn(),
@@ -181,9 +183,25 @@ describe("composer callbacks", () => {
   });
 
   it("calls onStop on Stop button click", () => {
-    const { elements, callbacks } = setup({ stopVisible: true });
+    const { elements, callbacks } = setup({ stopVisible: true, primaryMode: "stop" });
     elements.stopButtonEl.click();
     expect(callbacks.onStop).toHaveBeenCalledOnce();
+  });
+
+  it("calls onSteer on Steer button click when visible", () => {
+    const { elements, callbacks } = setup({
+      primaryMode: "stop-steer",
+      stopVisible: true,
+      steerEnabled: true,
+    });
+    elements.steerButtonEl.click();
+    expect(callbacks.onSteer).toHaveBeenCalledOnce();
+  });
+
+  it("calls onDictation on microphone button click", () => {
+    const { elements, callbacks } = setup();
+    elements.dictationButtonEl.click();
+    expect(callbacks.onDictation).toHaveBeenCalledOnce();
   });
 
   it("calls onPaste on paste event (image handling stays host-side)", () => {
@@ -248,6 +266,75 @@ describe("applyComposerState", () => {
     // Switch back to send
     applyComposerState(elements, defaultState({ stopVisible: false }));
     expect(elements.sendButtonEl.style.display).not.toBe("none");
+  });
+
+  it("shows Stop + Steer together for steerable active turns", () => {
+    applyComposerState(
+      elements,
+      defaultState({
+        primaryMode: "stop-steer",
+        stopVisible: true,
+        steerEnabled: true,
+        sendEnabled: false,
+      }),
+    );
+    expect(elements.sendButtonEl.style.display).toBe("none");
+    expect(elements.stopButtonEl.style.display).not.toBe("none");
+    expect(elements.steerButtonEl.style.display).not.toBe("none");
+    expect(elements.steerButtonEl.disabled).toBe(false);
+  });
+
+  it("disables Steer while a steer is in flight", () => {
+    applyComposerState(
+      elements,
+      defaultState({
+        primaryMode: "stop-steer",
+        stopVisible: true,
+        steerEnabled: false,
+      }),
+    );
+    expect(elements.steerButtonEl.disabled).toBe(true);
+  });
+
+  it("shows Stopping… and disables Stop during stop-and-send", () => {
+    applyComposerState(
+      elements,
+      defaultState({
+        primaryMode: "stopping",
+        stopVisible: true,
+        stopEnabled: false,
+      }),
+    );
+    expect(elements.stopButtonEl.style.display).not.toBe("none");
+    expect(elements.stopButtonEl.disabled).toBe(true);
+    expect(elements.stopButtonEl.getAttribute("aria-label")).toBe("Stopping…");
+    expect(elements.statusEl.textContent).toBe("Stopping…");
+    expect(elements.steerButtonEl.style.display).toBe("none");
+  });
+
+  it("exposes listening dictation state with accessible pressed label", () => {
+    applyComposerState(
+      elements,
+      defaultState({
+        dictationPhase: "listening",
+        dictationEnabled: true,
+      }),
+    );
+    expect(elements.dictationButtonEl.getAttribute("aria-pressed")).toBe("true");
+    expect(elements.dictationButtonEl.getAttribute("aria-label")).toBe("Stop dictation");
+    expect(elements.dictationButtonEl.classList.contains("is-listening")).toBe(true);
+    expect(elements.statusEl.textContent).toBe("Listening…");
+  });
+
+  it("surfaces composer hints for steer reject / STT errors", () => {
+    applyComposerState(
+      elements,
+      defaultState({
+        hint: "Steer only accepts plain text. Draft kept.",
+      }),
+    );
+    expect(elements.hintEl.style.display).not.toBe("none");
+    expect(elements.hintEl.textContent).toContain("Steer only accepts plain text");
   });
 });
 

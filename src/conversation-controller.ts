@@ -1,9 +1,12 @@
 import type { HermesSessionState, HermesHistoryItem } from "./types";
 import {
   ConversationOperationCoordinator,
+  deriveConversationControlAvailability,
   deriveConversationControls,
+  type ConversationControlAvailability,
   type ConversationControls,
   type ConversationRuntimeState,
+  type SteerableDraftFacts,
   type TabOperationState,
 } from "./conversation-runtime";
 import {
@@ -281,6 +284,26 @@ export class ConversationController<TClient extends ConversationClient> {
 
   getSnapshot(): ConversationControllerSnapshot {
     return this.snapshot;
+  }
+
+  /**
+   * Active-tab control availability with optional live draft facts. The view
+   * owns the composer draft; the controller owns the derivation so control
+   * policy stays outside View/Plugin.
+   */
+  getActiveControlAvailability(
+    draft?: SteerableDraftFacts,
+  ): ConversationControlAvailability {
+    return deriveConversationControlAvailability(
+      {
+        activeTabId: this.snapshot.workspace?.activeTabId,
+        globalOperation: this.snapshot.globalOperation,
+        initializing: this.snapshot.initializing,
+        tabs: this.snapshot.tabOperations,
+      },
+      this.snapshot.workspace?.activeTabId,
+      draft,
+    );
   }
 
   subscribe(

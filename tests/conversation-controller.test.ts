@@ -190,6 +190,7 @@ describe("ConversationController boundary", () => {
     expect(viewSource.includes("deriveConversationControlAvailability")).toBe(false);
     expect(viewSource.includes("conversationRuntimeState(")).toBe(false);
     expect(viewSource.includes("getSnapshot().controls")).toBe(true);
+    expect(viewSource.includes("getActiveControlAvailability")).toBe(true);
     expect(viewSource.includes("controlAvailability()")).toBe(true);
     expect(pluginSource.includes("hasBusyClient")).toBe(false);
     expect(pluginSource.includes("getAggregateConversationControls")).toBe(true);

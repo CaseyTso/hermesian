@@ -30,6 +30,7 @@ import {
 import {
   type ConversationAggregateControlAvailability,
   type ConversationControlAvailability,
+  type SteerableDraftFacts,
 } from "./conversation-runtime";
 import { linkifyExternalUrls } from "./external-links";
 import { HERMESIAN_ICON_ID } from "./hermes-icon";
@@ -94,6 +95,7 @@ import {
   handleInlineEditorKeydown,
   handleInlineEditorPaste,
   inlineCutPayload,
+  insertTextAtCaret,
   renderInlineDraft,
   setCaretOffset,
   type InlineEditorRenderOptions,
@@ -108,6 +110,25 @@ import {
 } from "./slash-menu";
 import { buildEnvelopePrompt } from "./outbound-envelope";
 import {
+  composerPrimaryMode,
+  composerStopIntent,
+  composerSubmitIntent,
+  dictationAudioTooShort,
+  focusOwnsEscape,
+  preferredMediaRecorderMimeType,
+  shouldStopOnEscape,
+  steerableDraftFactsFromComposer,
+  type DictationUiPhase,
+} from "./composer-actions";
+import {
+  DictationBridge,
+  type DictationResult,
+} from "./dictation-bridge";
+import {
+  StopAndSendCoordinator,
+  type StopAndSendPhase,
+} from "./stop-and-send";
+import {
   hermesEventEndsTurn,
   type HermesHistoryEntry,
   type HermesHistoryItem,
@@ -117,8 +138,13 @@ import {
   type MarkdownDocumentContext,
   type ReasoningEffort,
   type SelectionContext,
+  type SteerResult,
 } from "./types";
-import { HermesAcpClient, type PermissionRequest } from "./acp-client";
+import {
+  HermesAcpClient,
+  resolveHermesExecutable,
+  type PermissionRequest,
+} from "./acp-client";
 import { ViewStartupCoordinator } from "./view-startup";
 
 export const HERMESIAN_VIEW_TYPE = "hermesian-sidebar";
@@ -135,9 +161,52 @@ const DISABLED_CONVERSATION_CONTROLS: ConversationControlAvailability =
     reasoning: false,
     restart: false,
     send: false,
+    steer: false,
     stop: false,
     tabNavigation: false,
   });
+
+function steerFailureMessage(reason: string): string {
+  switch (reason) {
+    case "queued":
+      return "Steer was queued by Hermes instead of applying to the active turn. Draft kept.";
+    case "steer_failed":
+      return "Steer failed. Draft kept.";
+    case "unverifiable":
+      return "Steer could not be verified. Draft kept.";
+    case "no_active_turn":
+      return "No active turn to steer.";
+    case "steer_in_flight":
+      return "A steer is already in progress.";
+    default:
+      return `Steer failed: ${reason}`;
+  }
+}
+
+function dictationFailureMessage(result: Extract<DictationResult, { ok: false }>): string {
+  switch (result.reason) {
+    case "unsupported_format":
+      return "Dictation format is not supported by this browser.";
+    case "file_too_large":
+      return "Recording is too large to transcribe.";
+    case "empty_audio":
+      return "Recording was empty — nothing to transcribe.";
+    case "python_unavailable":
+      return "Hermes venv python is unavailable for dictation.";
+    case "spawn_failed":
+      return "Could not start dictation transcription.";
+    case "timeout":
+      return "Dictation transcription timed out.";
+    case "invalid_output":
+      return "Dictation returned invalid output.";
+    case "transcription_failed":
+      return result.detail?.trim()
+        ? `Dictation failed: ${result.detail}`
+        : "Dictation transcription failed.";
+    default:
+      return "Dictation failed.";
+  }
+}
 
 interface PendingPermission {
   card: HTMLElement;
@@ -215,6 +284,10 @@ export class HermesianSidebarView extends ItemView {
   private reasoningPicker: HermesReasoningPickerPopover | null = null;
   private selectionBarEl!: HTMLElement;
   private sendButtonEl!: HTMLButtonElement;
+  private steerButtonEl!: HTMLButtonElement;
+  private dictationButtonEl!: HTMLButtonElement;
+  private composerHintEl!: HTMLElement;
+  private composerStatusEl!: HTMLElement;
   private slashMenuEl!: HTMLElement;
   private slashTokenEl!: HTMLElement;
   private slashTokenIconEl!: HTMLElement;
@@ -231,6 +304,17 @@ export class HermesianSidebarView extends ItemView {
   private statusEl!: HTMLElement;
   private startup: ViewStartupCoordinator | undefined;
   private startupStatusClickBound = false;
+  /** Ephemeral composer hint (steer reject, STT error). Cleared on next draft change. */
+  private composerHint: string | undefined;
+  /** True while a pure-text steer request is outstanding (disables Steer). */
+  private steerInFlight = false;
+  private dictationPhase: DictationUiPhase = "idle";
+  private mediaRecorder: MediaRecorder | undefined;
+  private mediaStream: MediaStream | undefined;
+  private mediaChunks: BlobPart[] = [];
+  private dictationBridge: DictationBridge | undefined;
+  private stopAndSend: StopAndSendCoordinator | undefined;
+  private escapeKeyBound = false;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -256,7 +340,9 @@ export class HermesianSidebarView extends ItemView {
     this.updateControls(true, false);
     this.plugin.attachView(this);
     this.bindStartupStatusRetry();
+    this.bindEscapeToStop();
     this.ensureConversationController();
+    this.ensureStopAndSendCoordinator();
     this.startup = new ViewStartupCoordinator({
       isLayoutReady: () => this.app.workspace.layoutReady,
       whenLayoutReady: (callback) => {
@@ -281,6 +367,7 @@ export class HermesianSidebarView extends ItemView {
     this.reasoningPicker = null;
     this.startup?.close();
     this.startup = undefined;
+    this.teardownDictationRecording();
     this.captureActiveConversationRuntime();
     await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
     for (const [permissionId, permission] of this.permissions) {
@@ -530,20 +617,28 @@ export class HermesianSidebarView extends ItemView {
       getDraft: () => this.composerDraft,
       onDraftChange: (draft: ComposerInlineDraft) => {
         this.composerDraft = draft;
+        if (this.composerHint) {
+          this.composerHint = undefined;
+        }
         this.renderSlashMenu(true);
         this.captureActiveConversationRuntime();
+        // Live re-derive Stop/Steer visibility while typing during an Active Turn.
+        this.updateControls(false);
       },
       onPaste: (event: ClipboardEvent) => {
         void this.handleComposerPaste(event);
       },
       onSend: () => {
-        void this.sendMessage();
+        void this.handleComposerSubmit();
+      },
+      onSteer: () => {
+        void this.handleComposerSubmit();
       },
       onStop: () => {
-        const activeTab = this.activeConversationTab();
-        if (activeTab) {
-          void this.plugin.getClient(activeTab.id).cancel();
-        }
+        void this.handleComposerStop();
+      },
+      onDictation: () => {
+        void this.handleDictationToggle();
       },
       onKeydown: (event: KeyboardEvent) => {
         if (this.handleSlashMenuKeydown(event)) {
@@ -561,10 +656,12 @@ export class HermesianSidebarView extends ItemView {
         event.preventDefault();
         if (result.draft) {
           this.composerDraft = result.draft;
+          this.composerHint = undefined;
           this.captureActiveConversationRuntime();
+          this.updateControls(false);
         }
         if (result.sendRequested) {
-          void this.sendMessage();
+          void this.handleComposerSubmit();
         } else if (result.slashClearRequested) {
           this.setComposerSlashToken(null);
           this.captureActiveConversationRuntime();
@@ -593,6 +690,7 @@ export class HermesianSidebarView extends ItemView {
         event.clipboardData?.setData("text/plain", result.payload ?? "");
         this.composerDraft = result.draft!;
         this.captureActiveConversationRuntime();
+        this.updateControls(false);
       },
       onReferenceRemove: (index: number) => {
         this.removeComposerReference(index);
@@ -608,6 +706,9 @@ export class HermesianSidebarView extends ItemView {
       placeholder: "Ask Hermes…  ↵ to send · Shift+↵ for new line",
       sendEnabled: false,
       stopVisible: false,
+      primaryMode: "send",
+      dictationPhase: "idle",
+      dictationEnabled: false,
     };
 
     const composerElements = createComposerView(
@@ -629,7 +730,11 @@ export class HermesianSidebarView extends ItemView {
     this.reasoningButtonEl = composerElements.reasoningButtonEl;
     this.reasoningLabelEl = composerElements.reasoningLabelEl;
     this.sendButtonEl = composerElements.sendButtonEl;
+    this.steerButtonEl = composerElements.steerButtonEl;
     this.stopButtonEl = composerElements.stopButtonEl;
+    this.dictationButtonEl = composerElements.dictationButtonEl;
+    this.composerHintEl = composerElements.hintEl;
+    this.composerStatusEl = composerElements.statusEl;
     this.contextProgressEl = composerElements.contextProgressEl;
     this.contextUsageEl = composerElements.contextUsageEl;
 
@@ -639,7 +744,9 @@ export class HermesianSidebarView extends ItemView {
     setIcon(composerElements.modelButtonEl.querySelector(".hermesian-model-chevron")!, "chevron-down");
     setIcon(composerElements.reasoningButtonEl.querySelector(".hermesian-reasoning-icon")!, "brain");
     setIcon(composerElements.addSelectionButtonEl.querySelector("span")!, "paperclip");
+    setIcon(composerElements.dictationButtonEl.querySelector("span")!, "mic");
     setIcon(composerElements.sendButtonEl.querySelector("span")!, "arrow-right");
+    setIcon(composerElements.steerButtonEl.querySelector("span")!, "corner-down-left");
     setIcon(composerElements.stopButtonEl.querySelector("span")!, "square");
     this.setComposerSlashToken(null);
     this.renderComposerInlineDraft();
@@ -885,8 +992,23 @@ export class HermesianSidebarView extends ItemView {
     );
   }
 
+  private liveSteerableDraftFacts(): SteerableDraftFacts {
+    const activeTabId = this.conversationWorkspace?.activeTabId;
+    return steerableDraftFactsFromComposer({
+      draft: this.composerDraft,
+      hasPendingImages: activeTabId
+        ? (this.pendingImages.get(activeTabId)?.length ?? 0) > 0
+        : false,
+      hasPendingSelection: Boolean(this.pendingSelection),
+    });
+  }
+
   private controlAvailability() {
-    return this.controller?.getSnapshot().controls.active ?? DISABLED_CONVERSATION_CONTROLS;
+    if (!this.controller) {
+      return DISABLED_CONVERSATION_CONTROLS;
+    }
+    // Live draft facts stay on the view; derivation stays on the controller.
+    return this.controller.getActiveControlAvailability(this.liveSteerableDraftFacts());
   }
 
   private tabControlAvailability(tabId: string) {
@@ -894,6 +1016,52 @@ export class HermesianSidebarView extends ItemView {
       this.controller?.getSnapshot().controls.byTab.get(tabId) ??
       DISABLED_CONVERSATION_CONTROLS
     );
+  }
+
+  private stopAndSendPhase(): StopAndSendPhase {
+    return this.stopAndSend?.getState().phase ?? "idle";
+  }
+
+  private isStopping(): boolean {
+    const phase = this.stopAndSendPhase();
+    return phase === "stopping" || phase === "waiting";
+  }
+
+  private ensureStopAndSendCoordinator(): void {
+    if (this.stopAndSend) {
+      return;
+    }
+    this.stopAndSend = new StopAndSendCoordinator(async (draft) => {
+      // Barrier already waited for main-turn terminal; restore the snapshot
+      // into the composer and send it as a normal new turn exactly once.
+      this.applyComposerCanonicalDraft(draft);
+      this.composerHint = undefined;
+      this.updateControls(false);
+      try {
+        await this.sendMessage({ fromStopAndSend: true });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const snapshot = this.stopAndSend?.getState().snapshot;
+        if (snapshot?.draft) {
+          this.applyComposerCanonicalDraft(snapshot.draft);
+        }
+        this.composerHint = message;
+        this.updateControls(false);
+        new Notice(`Hermesian stop-and-send failed: ${message}`);
+        throw error instanceof Error ? error : new Error(message);
+      }
+    });
+  }
+
+  private ensureDictationBridge(): DictationBridge {
+    if (!this.dictationBridge) {
+      this.dictationBridge = new DictationBridge({
+        debugLogging: this.plugin.settings.debugLogging,
+        hermesExecutable: resolveHermesExecutable(this.plugin.settings.hermesExecutable),
+        profile: this.plugin.settings.profile,
+      });
+    }
+    return this.dictationBridge;
   }
 
   private async ensureClientForTab(
@@ -1849,10 +2017,11 @@ export class HermesianSidebarView extends ItemView {
     });
   }
 
-  private async sendMessage(): Promise<void> {
+  private async sendMessage(options: { fromStopAndSend?: boolean } = {}): Promise<void> {
     const activeTab = this.activeConversationTab();
     if (
       !activeTab ||
+      (!options.fromStopAndSend && this.isStopping()) ||
       !this.controlAvailability().send ||
       this.isTabBusy(activeTab.id) ||
       this.isTabLoading(activeTab.id) ||
@@ -2018,6 +2187,9 @@ export class HermesianSidebarView extends ItemView {
       }
       this.editScopes.set(activeTab.id, undefined);
       await this.finishFailedTurn(activeTab.id);
+      if (options.fromStopAndSend) {
+        throw error instanceof Error ? error : new Error(this.messageFor(error));
+      }
     } finally {
       if (runtime.completionPromise) {
         await runtime.completionPromise;
@@ -2029,6 +2201,481 @@ export class HermesianSidebarView extends ItemView {
         this.updateControls(false);
       }
     }
+  }
+
+  private async handleComposerSubmit(): Promise<void> {
+    if (this.isStopping()) {
+      return;
+    }
+    const availability = this.controlAvailability();
+    const facts = this.liveSteerableDraftFacts();
+    const intent = composerSubmitIntent({
+      stopAvailable: availability.stop === true,
+      steerAvailable: availability.steer === true && !this.steerInFlight,
+      facts,
+      stopping: this.isStopping(),
+      sendAvailable: availability.send === true,
+    });
+    switch (intent.kind) {
+      case "send":
+        await this.sendMessage();
+        return;
+      case "steer":
+        await this.steerActiveTurnFromComposer();
+        return;
+      case "reject-rich":
+        this.composerHint = intent.reason;
+        this.updateControls(false);
+        new Notice(intent.reason);
+        return;
+      case "noop":
+        return;
+    }
+  }
+
+  private async steerActiveTurnFromComposer(): Promise<void> {
+    const activeTab = this.activeConversationTab();
+    if (!activeTab || this.steerInFlight || !this.controlAvailability().steer) {
+      return;
+    }
+    const text = this.composerDraft.text.trim();
+    if (!text) {
+      return;
+    }
+    const client = this.plugin.getClient(activeTab.id);
+    this.steerInFlight = true;
+    this.composerHint = undefined;
+    this.updateControls(false);
+    let result: SteerResult;
+    try {
+      result = await client.steerActiveTurn(text);
+    } catch (error) {
+      this.steerInFlight = false;
+      this.composerHint = this.messageFor(error);
+      this.updateControls(false);
+      new Notice(`Hermesian steer failed: ${this.messageFor(error)}`);
+      return;
+    }
+    this.steerInFlight = false;
+    if (result.ok) {
+      // Clear pure-text draft only after a verified steer success.
+      this.composerDraft = {
+        token: this.composerDraft.token,
+        text: "",
+        references: this.composerDraft.references,
+      };
+      this.renderComposerInlineDraft();
+      this.captureActiveConversationRuntime();
+      this.composerHint = undefined;
+      this.updateControls(false);
+      this.composerEl.focus();
+      return;
+    }
+    this.composerHint = steerFailureMessage(result.reason);
+    this.updateControls(false);
+    new Notice(this.composerHint);
+  }
+
+  private async handleComposerStop(): Promise<void> {
+    const activeTab = this.activeConversationTab();
+    if (!activeTab) {
+      return;
+    }
+    const availability = this.controlAvailability();
+    const intent = composerStopIntent({
+      stopAvailable: availability.stop === true,
+      stopping: this.isStopping(),
+      draft: this.getComposerCanonicalDraft(),
+    });
+    if (intent.kind === "noop") {
+      return;
+    }
+
+    const client = this.plugin.getClient(activeTab.id);
+    const runtime = this.turnRuntime(activeTab.id);
+
+    if (intent.kind === "cancel") {
+      try {
+        await client.cancel();
+      } catch (error) {
+        new Notice(`Hermesian could not stop: ${this.messageFor(error)}`);
+      }
+      return;
+    }
+
+    // stop-and-send: snapshot the full send payload, clear composer for more
+    // typing, show Stopping…, then wait on the main-turn completion barrier.
+    this.ensureStopAndSendCoordinator();
+    const snapshotDraft = intent.draft;
+    const barrier = this.createStopAndSendBarrier(activeTab.id, runtime);
+
+    this.stopAndSend!.beginStop(snapshotDraft, barrier);
+    // If the barrier rejects (cancel never reached terminal), restore the
+    // snapshot so the user does not lose the draft.
+    void barrier.then(
+      () => undefined,
+      () => {
+        const state = this.stopAndSend?.getState();
+        if (state?.phase === "idle" && state.snapshot?.draft) {
+          this.applyComposerCanonicalDraft(state.snapshot.draft);
+          this.composerHint = state.lastError ?? "Stop failed before the turn ended.";
+          this.updateControls(false);
+          new Notice(`Hermesian: ${this.composerHint}`);
+        }
+      },
+    );
+    // Clear composer immediately so the user can keep typing the next idea.
+    this.composerDraft = { token: null, text: "", references: [] };
+    this.renderComposerInlineDraft();
+    // Keep pending selection/images out of the cleared surface; the snapshotted
+    // text is what stop-and-send will resend. Selection/images stay discarded
+    // for the follow-up draft (user can re-attach).
+    this.pendingSelection = undefined;
+    this.renderSelectionBar();
+    this.pendingImages.delete(activeTab.id);
+    this.renderImageAttachmentBar();
+    this.hideSlashMenu();
+    this.composerHint = undefined;
+    this.captureActiveConversationRuntime();
+    this.updateControls(false);
+
+    try {
+      await client.cancel();
+    } catch (error) {
+      // cancel failure is reported via the barrier rejection path when the
+      // turn never reaches terminal; surface a Notice for immediate feedback.
+      new Notice(`Hermesian could not stop: ${this.messageFor(error)}`);
+    }
+  }
+
+  /**
+   * Barrier for stop-and-send: resolves only when the main turn's
+   * completionPromise settles (or the turn is already idle). No timers.
+   */
+  private createStopAndSendBarrier(
+    tabId: string,
+    runtime: { busy: boolean; completionPromise?: Promise<void> },
+  ): Promise<void> {
+    const isIdle = (): boolean =>
+      !this.isTabBusy(tabId) && !this.turnRuntime(tabId).busy;
+
+    const waitUntilIdle = (): Promise<void> => {
+      if (isIdle()) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        const tick = () => {
+          if (isIdle()) {
+            resolve();
+            return;
+          }
+          // Yield to the microtask queue and re-check live runtime flags.
+          // This is not a wall-clock timer; it only advances when the event
+          // loop runs after ACP/runtime state changes.
+          Promise.resolve().then(tick);
+        };
+        Promise.resolve().then(tick);
+      });
+    };
+
+    if (runtime.completionPromise) {
+      return runtime.completionPromise.then(() => waitUntilIdle());
+    }
+    if (isIdle()) {
+      return Promise.resolve();
+    }
+    // completionPromise is created by TurnManager.complete on turn-stop.
+    // Wait for it to appear, then wait for idle — still no wall-clock guess.
+    return new Promise<void>((resolve, reject) => {
+      const tick = () => {
+        const current = this.turnRuntime(tabId);
+        if (current.completionPromise) {
+          current.completionPromise.then(
+            () => {
+              waitUntilIdle().then(resolve, reject);
+            },
+            (error) => {
+              reject(error instanceof Error ? error : new Error(String(error)));
+            },
+          );
+          return;
+        }
+        if (isIdle()) {
+          resolve();
+          return;
+        }
+        Promise.resolve().then(tick);
+      };
+      Promise.resolve().then(tick);
+    });
+  }
+
+  private bindEscapeToStop(): void {
+    if (this.escapeKeyBound) {
+      return;
+    }
+    this.escapeKeyBound = true;
+    this.registerDomEvent(this.containerEl.ownerDocument, "keydown", (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) {
+        return;
+      }
+      // Only handle Esc when the Hermesian leaf owns the interaction surface.
+      if (!this.containerEl.contains(event.target as Node) && this.app.workspace.getActiveViewOfType(HermesianSidebarView) !== this) {
+        // Allow Esc from the message list / non-interactive chrome inside our leaf
+        // even when focus is on the document body after clicking the transcript.
+        if (!this.containerEl.contains(this.containerEl.ownerDocument.activeElement)) {
+          return;
+        }
+      }
+      const availability = this.controlAvailability();
+      if (
+        !shouldStopOnEscape({
+          stopAvailable: availability.stop === true,
+          stopping: this.isStopping(),
+          focusOwnsEscape: focusOwnsEscape(event.target),
+        })
+      ) {
+        return;
+      }
+      // Extra guard: never Stop while a local popover/menu is open.
+      if (
+        this.slashMenuItems.length > 0 ||
+        this.modelPicker ||
+        this.reasoningPicker ||
+        this.permissions.size > 0
+      ) {
+        return;
+      }
+      event.preventDefault();
+      void this.handleComposerStop();
+    });
+  }
+
+  private async handleDictationToggle(): Promise<void> {
+    if (this.dictationPhase === "transcribing") {
+      return;
+    }
+    if (this.dictationPhase === "listening") {
+      await this.stopDictationRecording();
+      return;
+    }
+    if (!this.controlAvailability().composer) {
+      return;
+    }
+    await this.startDictationRecording();
+  }
+
+  private async startDictationRecording(): Promise<void> {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      this.composerHint = "Microphone is not available in this environment.";
+      this.updateControls(false);
+      new Notice(this.composerHint);
+      return;
+    }
+    if (typeof MediaRecorder === "undefined") {
+      this.composerHint = "MediaRecorder is not available in this environment.";
+      this.updateControls(false);
+      new Notice(this.composerHint);
+      return;
+    }
+    try {
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (error) {
+      this.composerHint =
+        error instanceof DOMException && error.name === "NotAllowedError"
+          ? "Microphone permission denied."
+          : `Could not open microphone: ${this.messageFor(error)}`;
+      this.updateControls(false);
+      new Notice(this.composerHint);
+      return;
+    }
+
+    const mimeType = preferredMediaRecorderMimeType();
+    try {
+      this.mediaRecorder = mimeType
+        ? new MediaRecorder(this.mediaStream, { mimeType })
+        : new MediaRecorder(this.mediaStream);
+    } catch (error) {
+      this.teardownDictationRecording();
+      this.composerHint = `Could not start recording: ${this.messageFor(error)}`;
+      this.updateControls(false);
+      new Notice(this.composerHint);
+      return;
+    }
+
+    this.mediaChunks = [];
+    this.mediaRecorder.addEventListener("dataavailable", (event: BlobEvent) => {
+      if (event.data && event.data.size > 0) {
+        this.mediaChunks.push(event.data);
+      }
+    });
+    this.mediaRecorder.addEventListener("error", () => {
+      this.composerHint = "Recording failed.";
+      this.teardownDictationRecording();
+      this.dictationPhase = "idle";
+      this.updateControls(false);
+    });
+    this.mediaRecorder.start();
+    this.dictationPhase = "listening";
+    this.composerHint = undefined;
+    this.updateControls(false);
+  }
+
+  private async stopDictationRecording(): Promise<void> {
+    const recorder = this.mediaRecorder;
+    if (!recorder || this.dictationPhase !== "listening") {
+      return;
+    }
+    const mimeType = recorder.mimeType || preferredMediaRecorderMimeType() || "audio/webm";
+    const blob = await new Promise<Blob>((resolve) => {
+      recorder.addEventListener(
+        "stop",
+        () => {
+          resolve(new Blob(this.mediaChunks, { type: mimeType }));
+        },
+        { once: true },
+      );
+      try {
+        recorder.stop();
+      } catch {
+        resolve(new Blob(this.mediaChunks, { type: mimeType }));
+      }
+    });
+    this.teardownDictationRecording();
+
+    if (dictationAudioTooShort(blob.size)) {
+      this.dictationPhase = "idle";
+      this.composerHint = "Recording was too short — nothing to transcribe.";
+      this.updateControls(false);
+      new Notice(this.composerHint);
+      return;
+    }
+
+    this.dictationPhase = "transcribing";
+    this.updateControls(false);
+
+    let buffer: Uint8Array;
+    try {
+      buffer = new Uint8Array(await blob.arrayBuffer());
+    } catch (error) {
+      this.dictationPhase = "idle";
+      this.composerHint = `Could not read recording: ${this.messageFor(error)}`;
+      this.updateControls(false);
+      new Notice(this.composerHint);
+      return;
+    }
+
+    const result = await this.ensureDictationBridge().transcribe(buffer, mimeType);
+    this.dictationPhase = "idle";
+    if (!result.ok) {
+      this.composerHint = dictationFailureMessage(result);
+      this.updateControls(false);
+      new Notice(this.composerHint);
+      this.composerEl.focus();
+      return;
+    }
+    if ("empty" in result && result.empty) {
+      this.composerHint = "No speech detected.";
+      this.updateControls(false);
+      this.composerEl.focus();
+      return;
+    }
+    const transcript = result.transcript.trim();
+    if (!transcript) {
+      this.composerHint = "No speech detected.";
+      this.updateControls(false);
+      this.composerEl.focus();
+      return;
+    }
+
+    const inserted = insertTextAtCaret(
+      this.composerEl,
+      this.composerDraft,
+      // Prefer a leading space when inserting mid-sentence.
+      this.shouldPrefixDictationSpace() ? ` ${transcript}` : transcript,
+      this.inlineRenderOptions(),
+    );
+    this.composerDraft = inserted.draft;
+    this.composerHint = undefined;
+    this.captureActiveConversationRuntime();
+    this.updateControls(false);
+    this.composerEl.focus();
+  }
+
+  private shouldPrefixDictationSpace(): boolean {
+    const caret = getCaretOffset(this.composerEl);
+    if (caret === null || caret <= 0) {
+      return false;
+    }
+    const before = this.composerDraft.text.slice(caret - 1, caret);
+    return before !== "" && before !== " " && before !== "\n";
+  }
+
+  private teardownDictationRecording(): void {
+    try {
+      if (this.mediaRecorder && this.mediaRecorder.state !== "inactive") {
+        this.mediaRecorder.stop();
+      }
+    } catch {
+      // ignore
+    }
+    this.mediaRecorder = undefined;
+    this.mediaChunks = [];
+    if (this.mediaStream) {
+      for (const track of this.mediaStream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
+      }
+    }
+    this.mediaStream = undefined;
+    if (this.dictationPhase === "listening") {
+      this.dictationPhase = "idle";
+    }
+  }
+
+  private updateControls(_busy: boolean, _showStop = _busy): void {
+    const availability = this.controlAvailability();
+    if (!availability.composer) {
+      this.hideSlashMenu();
+    }
+    const stopping = this.isStopping();
+    const primaryMode = composerPrimaryMode({
+      stopping,
+      stopAvailable: availability.stop === true,
+      steerAvailable: availability.steer === true && !this.steerInFlight,
+    });
+    applyComposerState(
+      {
+        composerEl: this.composerEl,
+        sendButtonEl: this.sendButtonEl,
+        stopButtonEl: this.stopButtonEl,
+        steerButtonEl: this.steerButtonEl,
+        dictationButtonEl: this.dictationButtonEl,
+        statusEl: this.composerStatusEl,
+        hintEl: this.composerHintEl,
+      },
+      {
+        disabled: !availability.composer,
+        draft: this.composerDraft,
+        placeholder: this.composerPlaceholder(),
+        sendEnabled: availability.send && !stopping,
+        stopVisible: primaryMode !== "send",
+        primaryMode,
+        stopEnabled: availability.stop === true && !stopping,
+        steerEnabled: availability.steer === true && !this.steerInFlight && !stopping,
+        dictationPhase: this.dictationPhase,
+        dictationEnabled: availability.composer === true,
+        hint: this.composerHint,
+      },
+    );
+    this.renderAddConversationControl();
+    this.historyButtonEl.disabled = !availability.history;
+    this.reasoningButtonEl.disabled = !availability.reasoning;
+    this.renderConversationTabs();
+    this.renderSessionState(this.activeSessionState());
   }
 
   async startNewSession(): Promise<void> {
@@ -2339,32 +2986,6 @@ export class HermesianSidebarView extends ItemView {
     if (reason !== "end_turn") {
       this.appendSystemMessage(`Turn stopped: ${reason}`, false, tabId);
     }
-  }
-
-  private updateControls(_busy: boolean, _showStop = _busy): void {
-    const availability = this.controlAvailability();
-    if (!availability.composer) {
-      this.hideSlashMenu();
-    }
-    applyComposerState(
-      {
-        composerEl: this.composerEl,
-        sendButtonEl: this.sendButtonEl,
-        stopButtonEl: this.stopButtonEl,
-      },
-      {
-        disabled: !availability.composer,
-        draft: this.composerDraft,
-        placeholder: this.composerPlaceholder(),
-        sendEnabled: availability.send,
-        stopVisible: availability.stop,
-      },
-    );
-    this.renderAddConversationControl();
-    this.historyButtonEl.disabled = !availability.history;
-    this.reasoningButtonEl.disabled = !availability.reasoning;
-    this.renderConversationTabs();
-    this.renderSessionState(this.activeSessionState());
   }
 
   private getComposerCanonicalDraft(): string {

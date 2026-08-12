@@ -12,6 +12,7 @@ import {
   handleInlineEditorKeydown,
   handleInlineEditorInput,
   inlineCutPayload,
+  insertTextAtCaret,
   normalizeNewlines,
   readInlineDraftFromDom,
   renderInlineDraft,
@@ -658,3 +659,27 @@ describe("handleInlineEditorInput", () => {
     expect(editorEl.firstChild).toBe(nodeBefore);
   });
 });
+
+describe("insertTextAtCaret", () => {
+  it("inserts transcript at the caret without auto-sending", () => {
+    const { editorEl } = setup();
+    const original = draft({ text: "hello" });
+    renderInlineDraft(editorEl, original);
+    setCaretOffset(editorEl, 5);
+    const result = insertTextAtCaret(editorEl, original, " world");
+    expect(result.draft.text).toBe("hello world");
+    expect(result.caret).toBe(11);
+    expect(getCaretOffset(editorEl)).toBe(11);
+  });
+
+  it("replaces the current selection with the transcript", () => {
+    const { editorEl } = setup();
+    const original = draft({ text: "please rewrite this" });
+    renderInlineDraft(editorEl, original);
+    setSelectionOffsets(editorEl, 7, 14); // "rewrite"
+    const result = insertTextAtCaret(editorEl, original, "edit");
+    expect(result.draft.text).toBe("please edit this");
+    expect(result.caret).toBe(11);
+  });
+});
+
