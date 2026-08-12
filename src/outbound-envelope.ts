@@ -25,3 +25,21 @@ export function buildEnvelopePrompt(
   }
   return `${OBSIDIAN_IDENTITY_CONTEXT}\n\n${prompt}\n\n${OBSIDIAN_OUTPUT_RULES}`;
 }
+
+/**
+ * Inverse of buildEnvelopePrompt for display-only paths (resume/load history).
+ *
+ * Only strips when the text is exactly the envelope product: the identity
+ * constant, a blank line, the user prompt, a blank line, then the output-rules
+ * constant. Content that merely looks similar (wrong body, missing close tags,
+ * only one block, native slash text) is left untouched so real user input is
+ * never deleted by accident.
+ */
+export function stripEnvelopeFromPrompt(text: string): string {
+  const identityPrefix = `${OBSIDIAN_IDENTITY_CONTEXT}\n\n`;
+  const rulesSuffix = `\n\n${OBSIDIAN_OUTPUT_RULES}`;
+  if (!text.startsWith(identityPrefix) || !text.endsWith(rulesSuffix)) {
+    return text;
+  }
+  return text.slice(identityPrefix.length, text.length - rulesSuffix.length);
+}
