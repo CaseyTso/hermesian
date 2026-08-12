@@ -16,6 +16,7 @@ import {
   referenceTokenDisplayLabel,
   removeInlineReference,
   restoreComposerInlineDraft,
+  resolvePickedFilePath,
   restoreComposerReferenceDraft,
   serializeComposerInlineDraft,
   serializeComposerReferenceDraft,
@@ -1068,5 +1069,46 @@ describe("composerInlineDraftIsSlashCommand", () => {
         draft({ text: `/请总结 ${URL_A}`, references: [] }),
       ),
     ).toBe(true);
+  });
+});
+
+describe("resolvePickedFilePath", () => {
+  /** Simulate a picker File; `path` is the legacy Electron File.path. */
+  function pickerFile(path: string | undefined): File & { path?: string } {
+    const file = new File([""], "x.txt") as File & { path?: string };
+    if (path !== undefined) {
+      file.path = path;
+    }
+    return file;
+  }
+
+  it("prefers the injected resolver (webUtils is authoritative), ignoring File.path", () => {
+    const file = pickerFile("/Users/me/legacy-path.txt");
+    const resolver = () => "/Users/me/Documents/note.md";
+    expect(resolvePickedFilePath(file, resolver)).toBe(
+      "/Users/me/Documents/note.md",
+    );
+  });
+
+  it("falls back to File.path when the resolver returns null (Electron <29 / no webUtils)", () => {
+    const file = pickerFile("/Users/me/Documents/note.md");
+    expect(resolvePickedFilePath(file, () => null)).toBe(
+      "/Users/me/Documents/note.md",
+    );
+  });
+
+  it("falls back to File.path when no resolver is injected (legacy Electron / plain env)", () => {
+    const file = pickerFile("/Users/me/Documents/note.md");
+    expect(resolvePickedFilePath(file)).toBe("/Users/me/Documents/note.md");
+  });
+
+  it("returns null when the resolver yields an empty string and there is no File.path", () => {
+    const file = pickerFile(undefined);
+    expect(resolvePickedFilePath(file, () => "")).toBeNull();
+  });
+
+  it("returns null in browser mode (no resolver, no File.path)", () => {
+    const file = pickerFile(undefined);
+    expect(resolvePickedFilePath(file)).toBeNull();
   });
 });

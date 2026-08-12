@@ -585,11 +585,11 @@
   border-radius: var(--hermesian-radius-md);
   box-shadow: 0 6px 18px rgb(0 0 0 / 0.12);
   box-sizing: border-box;
+  bottom: calc(100% + 4px);
   left: 0;
   min-width: 180px;
   padding: 4px;
   position: absolute;
-  top: calc(100% + 4px);
   z-index: 1000;
 }
 

@@ -86,6 +86,7 @@ import {
   derivePickedFolderPath,
   insertInlineReference,
   removeInlineReference,
+  resolvePickedFilePath,
   restoreComposerInlineDraft,
   serializeComposerInlineDraft,
   type ComposerInlineDraft,
@@ -252,6 +253,28 @@ function readFileAsDataUrl(file: File): Promise<string> {
     });
     reader.readAsDataURL(file);
   });
+}
+
+/**
+ * Lazy Electron `webUtils.getPathForFile` resolver. Electron >= 32 removes
+ * the legacy `File.path` (deprecated since 29); `webUtils` is the official
+ * replacement. `require("electron")` must stay lazy and guarded: mobile/
+ * browser builds have no electron module, and an eager import would crash
+ * plugin load there. Returns null when electron/webUtils is unavailable.
+ */
+function electronWebUtilsResolver(file: File): string | null {
+  try {
+    // Structural cast only — electron typings are not installed and must not
+    // be (electron is an esbuild external); runtime semantics are identical
+    // to `require("electron") as typeof import("electron")`.
+    const electron = require("electron") as
+      | { webUtils?: { getPathForFile?: (file: File) => string } }
+      | undefined;
+    const resolved = electron?.webUtils?.getPathForFile?.(file);
+    return typeof resolved === "string" && resolved.length > 0 ? resolved : null;
+  } catch {
+    return null;
+  }
 }
 
 export class HermesianSidebarView extends ItemView {
@@ -2694,10 +2717,12 @@ export class HermesianSidebarView extends ItemView {
   /**
    * Insert an absolute path chosen from the file/folder picker as an inline
    * reference capsule at the caret captured when the dialog opened (fallback:
-   * end of draft). Electron exposes the full absolute path on `File.path`;
-   * silently skip when it is unavailable (e.g. browser mode). Folder picks
-   * yield the folder itself by stripping the `webkitRelativePath` suffix from
-   * the first file's path.
+   * end of draft). The absolute path is resolved via Electron's
+   * `webUtils.getPathForFile` (authoritative; `File.path` is gone since
+   * Electron 32), falling back to the legacy `File.path` when webUtils is
+   * unavailable, and silently skipped when neither exists (browser mode).
+   * Folder picks yield the folder itself by stripping the
+   * `webkitRelativePath` suffix from the first file's path.
    */
   private insertPickedFileReference(
     input: HTMLInputElement,
@@ -2717,7 +2742,7 @@ export class HermesianSidebarView extends ItemView {
     if (!file) {
       return;
     }
-    const filePath = (file as File & { path?: string }).path;
+    const filePath = resolvePickedFilePath(file, electronWebUtilsResolver);
     if (!filePath) {
       input.value = "";
       return;

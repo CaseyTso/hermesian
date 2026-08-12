@@ -40,6 +40,41 @@ const PATH_PATTERN = /^\/[^\n\r]+$/;
  * Windows backslashes (and any other separator) are preserved untouched.
  * Returns null when there is no relative path or the derivation is empty.
  */
+/**
+ * Resolve a picked File to its absolute path on disk. Electron >= 29 (stable
+ * since 32) removes the legacy non-standard `File.path`, so renderer code
+ * must ask `webUtils.getPathForFile(file)` instead. The injected resolver is
+ * the Electron `webUtils` channel; it is optional so pure environments
+ * (browser, mobile, tests) can call this function without `require("electron")`.
+ */
+export type PickedFilePathResolver = (file: File) => string | null;
+
+/**
+ * Single decision point for a picker File's absolute path:
+ *
+ * 1. The injected resolver (Electron `webUtils.getPathForFile`) is
+ *    authoritative — when it returns a non-empty string, that wins even if
+ *    the legacy `File.path` disagrees.
+ * 2. Without a resolver result, fall back to the legacy `File.path` (old
+ *    Electron, or a plain environment that still has it).
+ * 3. Neither available → null (browser/mobile mode: silently skip insert).
+ */
+export function resolvePickedFilePath(
+  file: File,
+  resolver?: PickedFilePathResolver,
+): string | null {
+  if (resolver) {
+    const resolved = resolver(file);
+    if (typeof resolved === "string" && resolved.length > 0) {
+      return resolved;
+    }
+  }
+  const legacyPath = (file as File & { path?: string }).path;
+  return typeof legacyPath === "string" && legacyPath.length > 0
+    ? legacyPath
+    : null;
+}
+
 export function derivePickedFolderPath(
   filePath: string,
   webkitRelativePath: string,
