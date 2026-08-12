@@ -1037,32 +1037,32 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
     this.stopAndSend = new StopAndSendCoordinator(async (draft) => {
-          // Barrier already waited for main-turn terminal. Capture any text typed
-          // while Stopping…, load the snapshot only long enough for sendMessage to
-          // consume it into the outbound prompt, then restore continued draft
-          // immediately after that clear — never wait for the whole next turn.
-          const continuedDraft = this.getComposerCanonicalDraft();
-          this.applyComposerCanonicalDraft(draft);
-          this.composerHint = undefined;
-          this.updateControls(false);
-          try {
-            await this.sendMessage({
-              fromStopAndSend: true,
-              restoreComposerAfterDispatch: continuedDraftAfterStopAndSend(continuedDraft),
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            const snapshot = this.stopAndSend?.getState().snapshot;
-            if (snapshot?.draft) {
-              this.applyComposerCanonicalDraft(snapshot.draft);
-            }
-            this.composerHint = message;
-            this.updateControls(false);
-            new Notice(`Hermesian stop-and-send failed: ${message}`);
-            throw error instanceof Error ? error : new Error(message);
-          }
+      // Barrier already waited for main-turn terminal. Capture any text typed
+      // while Stopping…, load the snapshot only long enough for sendMessage to
+      // consume it into the outbound prompt, then restore continued draft
+      // immediately after that clear — never wait for the whole next turn.
+      const continuedDraft = this.getComposerCanonicalDraft();
+      this.applyComposerCanonicalDraft(draft);
+      this.composerHint = undefined;
+      this.updateControls(false);
+      try {
+        await this.sendMessage({
+          fromStopAndSend: true,
+          restoreComposerAfterDispatch: continuedDraftAfterStopAndSend(continuedDraft),
         });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const snapshot = this.stopAndSend?.getState().snapshot;
+        if (snapshot?.draft) {
+          this.applyComposerCanonicalDraft(snapshot.draft);
+        }
+        this.composerHint = message;
+        this.updateControls(false);
+        new Notice(`Hermesian stop-and-send failed: ${message}`);
+        throw error instanceof Error ? error : new Error(message);
       }
+    });
+  }
 
   private ensureDictationBridge(): DictationBridge {
     if (!this.dictationBridge) {

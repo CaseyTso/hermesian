@@ -312,27 +312,38 @@ describe("stop-and-send send guards + continued draft", () => {
       releaseTurn = resolve;
     });
     const observed: string[] = [];
+    let sawDuringFlight: string | undefined;
 
     const handoff = runStopAndSendComposerHandoff({
       continuedDraft: "next idea",
       snapshotDraft: "snapshot at stop",
       turnInFlight,
-      onComposerChange: (value) => observed.push(value),
+      onComposerChange: (value) => {
+        observed.push(value);
+        // Capture the first non-empty restore while turn is still pending.
+        if (value === "next idea" && sawDuringFlight === undefined) {
+          sawDuringFlight = value;
+        }
+      },
     });
 
-    // While sendPrompt is still pending, composer must already show next idea.
+    // Yield so the handoff can run through restore before the turn settles.
     await Promise.resolve();
+    await Promise.resolve();
+
+    // While sendPrompt is still pending, composer must already show next idea.
+    // Order: load snapshot → clear for outbound → restore continued draft.
     expect(observed).toEqual(["snapshot at stop", "", "next idea"]);
+    expect(sawDuringFlight).toBe("next idea");
+    // handoff must still be in-flight (turn not released) — proves restore
+    // is not gated on turn completion.
+    let settled = false;
+    void handoff.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
 
-    // User types more during the in-flight follow-up turn.
-    const during = await Promise.race([
-      handoff.then((result) => result.composerDuringTurn),
-      Promise.resolve("next idea"),
-    ]);
-    expect(during).toBe("next idea");
-
-    // Simulate live typing after restore (View would mutate composerDraft).
-    // The handoff helper must not re-apply barrier-time draft on settle.
     releaseTurn();
     const result = await handoff;
     expect(result.composerDuringTurn).toBe("next idea");
@@ -346,28 +357,27 @@ describe("stop-and-send send guards + continued draft", () => {
     });
     let liveComposer = "next idea";
 
-    const handoffPromise = (async () => {
-      // Mirror View: restore at dispatch, then await turn, never re-restore.
-      const result = await runStopAndSendComposerHandoff({
-        continuedDraft: liveComposer,
-        snapshotDraft: "snapshot",
-        turnInFlight,
-        onComposerChange: (value) => {
-          liveComposer = value;
-        },
-      });
-      return result;
-    })();
+    const handoffPromise = runStopAndSendComposerHandoff({
+      continuedDraft: liveComposer,
+      snapshotDraft: "snapshot",
+      turnInFlight,
+      onComposerChange: (value) => {
+        liveComposer = value;
+      },
+    });
 
     await Promise.resolve();
+    await Promise.resolve();
+    // Mid-flight: continued draft is already back in the composer.
     expect(liveComposer).toBe("next idea");
-    // More typing during the new turn.
+    // More typing during the new turn (after restore, before settle).
     liveComposer = "next idea plus more";
     releaseTurn();
     const result = await handoffPromise;
     expect(result.composerDuringTurn).toBe("next idea");
     // turn-complete must not clobber the extra typing with barrier-time draft.
     expect(liveComposer).toBe("next idea plus more");
+    expect(result.composerAfterTurn).toBe("next idea");
   });
 
   it("marks send-failed and retains snapshot when fromStopAndSend guards throw", async () => {
