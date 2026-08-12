@@ -109,7 +109,7 @@ import {
   type ComposerSlashToken,
   type SlashMenuItem,
 } from "./slash-menu";
-import { buildEnvelopePrompt } from "./outbound-envelope";
+import { buildEnvelopePrompt, stripEnvelopeFromPrompt } from "./outbound-envelope";
 import {
   composerPrimaryMode,
   composerStopIntent,
@@ -2771,7 +2771,13 @@ export class HermesianSidebarView extends ItemView {
         cls: "hermesian-message-context",
       });
     }
-    message.createDiv({ text, cls: "hermesian-message-content" });
+    // Display-layer safety net: any user text that is exactly an outbound
+    // envelope product (resume/load history replay, future paths) renders as
+    // the bare prompt. Idempotent for already-stripped or ordinary text.
+    message.createDiv({
+      text: stripEnvelopeFromPrompt(text),
+      cls: "hermesian-message-content",
+    });
     if (images.length > 0) {
       const gallery = message.createDiv({ cls: "hermesian-message-images" });
       for (const image of images) {

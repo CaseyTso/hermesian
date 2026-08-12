@@ -7,3 +7,6 @@ coverage/
 .vscode/
 .hermes/
 *.zip
+
+# git worktrees (never commit)
+.worktrees/

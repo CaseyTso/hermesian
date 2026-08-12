@@ -195,6 +195,9 @@ describe("ConversationController boundary", () => {
     expect(pluginSource.includes("hasBusyClient")).toBe(false);
     expect(pluginSource.includes("getAggregateConversationControls")).toBe(true);
     expect(pluginSource.includes("canApplyConnectionSettings")).toBe(true);
+    // Display-layer safety net: every user bubble render goes through
+    // stripEnvelopeFromPrompt so no resume/history path can leak the envelope.
+    expect(viewSource.includes("stripEnvelopeFromPrompt")).toBe(true);
   });
 
   it("registers the model picker click handler only once", () => {

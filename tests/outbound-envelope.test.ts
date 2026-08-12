@@ -97,4 +97,11 @@ describe("stripEnvelopeFromPrompt", () => {
     expect(stripEnvelopeFromPrompt("hello world")).toBe("hello world");
     expect(stripEnvelopeFromPrompt("这里没有信封")).toBe("这里没有信封");
   });
+
+  it("is idempotent: stripping an already-stripped result changes nothing", () => {
+    const userText = "总结这篇笔记";
+    const once = stripEnvelopeFromPrompt(buildEnvelopePrompt(userText, false));
+    expect(once).toBe(userText);
+    expect(stripEnvelopeFromPrompt(once)).toBe(userText);
+  });
 });
