@@ -8,6 +8,8 @@
  * Native control commands (e.g. /new, /model) pass through unchanged.
  */
 
+import { stripOutboundPromptToRequest } from "./selection-context";
+
 export const OBSIDIAN_IDENTITY_CONTEXT = `<hermesian_identity>
 你在 Obsidian 右侧边栏运行，可加载 obsidian skill 操作 vault 笔记。
 </hermesian_identity>`;
@@ -42,4 +44,44 @@ export function stripEnvelopeFromPrompt(text: string): string {
     return text;
   }
   return text.slice(identityPrefix.length, text.length - rulesSuffix.length);
+}
+
+/**
+ * Display-only unwrap for any persisted user message shape: full envelope
+ * (identity head + rules tail), head-only, tail-only, or bare context wrapper
+ * (selection/document/active-note/note-changed). Everything exact-build
+ * related is removed and only the bare user request remains; unrecognized
+ * text (plain messages, slash commands, steer corrections, user-typed
+ * lookalikes) passes through untouched.
+ */
+export function stripUserPromptForDisplay(text: string): string {
+  // Full envelope: both head and tail must be exact constants.
+  const full = stripEnvelopeFromPrompt(text);
+  if (full !== text) {
+    return stripOutboundPromptToRequest(full);
+  }
+  // Tail-only shape (context wrapper + rules, no identity head): drop the
+  // rules block, then unwrap the context wrapper.
+  const rulesTail = `\n\n${OBSIDIAN_OUTPUT_RULES}`;
+  if (text.endsWith(rulesTail)) {
+    const withoutTail = text.slice(0, text.length - rulesTail.length);
+    const unwrapped = stripOutboundPromptToRequest(withoutTail);
+    if (unwrapped !== withoutTail) {
+      return unwrapped;
+    }
+    return text;
+  }
+  // Head-only shape (identity + context wrapper, no rules tail): drop the
+  // identity head, then unwrap the context wrapper.
+  const identityHead = `${OBSIDIAN_IDENTITY_CONTEXT}\n\n`;
+  if (text.startsWith(identityHead)) {
+    const withoutHead = text.slice(identityHead.length);
+    const unwrapped = stripOutboundPromptToRequest(withoutHead);
+    if (unwrapped !== withoutHead) {
+      return unwrapped;
+    }
+    return text;
+  }
+  // Bare context wrapper (no envelope pieces at all).
+  return stripOutboundPromptToRequest(text);
 }

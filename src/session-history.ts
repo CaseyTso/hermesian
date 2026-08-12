@@ -1,4 +1,4 @@
-import { stripEnvelopeFromPrompt } from "./outbound-envelope";
+import { stripUserPromptForDisplay } from "./outbound-envelope";
 import type { HermesHistoryEntry, HermesHistoryItem, ReasoningEffort } from "./types";
 
 export const REASONING_EFFORTS: ReasoningEffort[] = [
@@ -71,11 +71,12 @@ export function historyItemsFromUpdates(updates: unknown[]): HermesHistoryItem[]
           : kind === "agent_message_chunk"
             ? "assistant"
             : "thought";
-      // Resume/load stores the full outbound envelope on user messages; strip
-      // only exact buildEnvelopePrompt products so the UI shows bare user text.
-      // Assistant/thought chunks are never enveloped and must stay intact.
+      // Resume/load stores the full outbound prompt (context wrapper inside
+      // the identity/rules envelope) on user messages; strip both layers so
+      // the UI shows bare user text. Assistant/thought chunks are never
+      // wrapped and must stay intact.
       const text =
-        itemKind === "user" ? stripEnvelopeFromPrompt(content.text) : content.text;
+        itemKind === "user" ? stripUserPromptForDisplay(content.text) : content.text;
       if (itemKind === "user" && !text) {
         // Empty after strip (defensive): do not render an empty user bubble.
         continue;

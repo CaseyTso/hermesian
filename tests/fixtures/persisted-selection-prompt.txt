@@ -1,0 +1,29 @@
+你正在协助用户编辑 Obsidian Markdown 知识库。
+
+文件：Research/示例笔记.md
+绝对路径：/vault/Research/示例笔记.md
+选区：第 1–2 行
+文档快照 SHA-256：0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+<document>
+# 示例笔记
+
+这是用于测试剥离逻辑的示例正文，不含真实用户数据。
+
+## 第二节
+
+示例内容占位。
+</document>
+
+<selection>
+示例选区文字
+</selection>
+
+用户请求：这部分改一改，调整示例表述
+
+<document> 是当前 Markdown 文件的完整上下文，但只能修改选区（<selection> 对应内容）；选区之前和之后的任何字符都必须保持不变。
+如需改写，请只使用 patch(mode="replace") 精确替换选区，不要使用 terminal 或整文件重写；客户端会拒绝越出选区的 diff，并在写入前展示允许范围内的 diff。
+
+<hermesian_output_rules>
+When referring to a note in the current Obsidian Vault, use an Obsidian wikilink such as [[folder/note|note]]. Preserve heading (#) and block (^) suffixes when relevant. Do not wrap wikilinks in backticks or code blocks.
+</hermesian_output_rules>

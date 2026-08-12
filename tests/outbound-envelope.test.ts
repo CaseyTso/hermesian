@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import {
   OBSIDIAN_IDENTITY_CONTEXT,
   OBSIDIAN_OUTPUT_RULES,
   buildEnvelopePrompt,
   stripEnvelopeFromPrompt,
+  stripUserPromptForDisplay,
 } from "../src/outbound-envelope";
 
 describe("buildEnvelopePrompt", () => {
@@ -103,5 +106,77 @@ describe("stripEnvelopeFromPrompt", () => {
     const once = stripEnvelopeFromPrompt(buildEnvelopePrompt(userText, false));
     expect(once).toBe(userText);
     expect(stripEnvelopeFromPrompt(once)).toBe(userText);
+  });
+});
+
+describe("stripUserPromptForDisplay", () => {
+  it("round-trips the full envelope back to the bare user text", () => {
+    const userText = "总结这篇笔记";
+    expect(stripUserPromptForDisplay(buildEnvelopePrompt(userText, false))).toBe(userText);
+  });
+
+  it("unwraps a tail-only persisted message (context wrapper + output rules)", () => {
+    const wrapped = `你正在通过 Hermesian 协助用户使用 Obsidian。
+
+<obsidian_context>
+active_note: Research/note.md
+document_included: false
+</obsidian_context>
+
+用户请求：看看这篇笔记
+
+${OBSIDIAN_OUTPUT_RULES}`;
+    expect(stripUserPromptForDisplay(wrapped)).toBe("看看这篇笔记");
+  });
+
+  it("unwraps a head-only persisted message (identity + context wrapper)", () => {
+    const wrapped = `${OBSIDIAN_IDENTITY_CONTEXT}
+
+你正在通过 Hermesian 协助用户使用 Obsidian。
+
+<obsidian_context>
+active_note: Research/note.md
+document_included: false
+</obsidian_context>
+
+用户请求：看看这篇笔记`;
+    expect(stripUserPromptForDisplay(wrapped)).toBe("看看这篇笔记");
+  });
+
+  it("leaves plain text, slash commands and steer corrections untouched", () => {
+    expect(stripUserPromptForDisplay("hello world")).toBe("hello world");
+    expect(stripUserPromptForDisplay("/new")).toBe("/new");
+    expect(stripUserPromptForDisplay("看这篇笔记的minerU原文")).toBe("看这篇笔记的minerU原文");
+  });
+
+  it("keeps a user-typed lookalike wrapper intact (not a build product)", () => {
+    const lookalike = "你正在协助用户编辑 Obsidian Markdown 知识库。\n\n自己写的内容，没有用户请求标记";
+    expect(stripUserPromptForDisplay(lookalike)).toBe(lookalike);
+  });
+
+  it("strips a persisted tail-only history text shape (envelope-less + rules tail fixture)", () => {
+    // Fixtures carry a trailing newline from the filesystem; persisted DB
+    // text does not, so normalize before asserting.
+    const real = readFileSync(
+      resolve(process.cwd(), "tests/fixtures/persisted-selection-prompt.txt"),
+      "utf8",
+    ).replace(/\n$/, "");
+    const stripped = stripUserPromptForDisplay(real);
+    expect(stripped).not.toContain("你正在协助用户编辑");
+    expect(stripped).not.toContain("<document>");
+    expect(stripped).not.toContain("<hermesian_output_rules>");
+    expect(stripped.length).toBeGreaterThan(0);
+    expect(stripped).not.toContain("用户请求：");
+  });
+
+  it("strips a persisted full-envelope history text shape (fixture)", () => {
+    const real = readFileSync(
+      resolve(process.cwd(), "tests/fixtures/persisted-figure2-message.txt"),
+      "utf8",
+    ).replace(/\n$/, "");
+    const stripped = stripUserPromptForDisplay(real);
+    expect(stripped).not.toContain("<hermesian_identity>");
+    expect(stripped).not.toContain("<hermesian_output_rules>");
+    expect(stripped).toContain("Figure2");
   });
 });

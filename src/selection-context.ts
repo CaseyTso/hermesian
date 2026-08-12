@@ -193,6 +193,73 @@ export function buildActiveNotePrompt(
 
 export type NoteContextInjectionKind = "full" | "changed" | "none";
 
+/**
+ * Display-only inverse of the four outbound context wrappers built above
+ * (selection / document / active-note / note-changed). Resume/load history
+ * stores the full wrapped prompt; rendering must show only the bare user
+ * request. Only exact build products are unwrapped — anything that does not
+ * start with one of the fixed prefixes (plain text, slash commands, steer
+ * corrections, user-typed lookalikes) is returned untouched.
+ */
+const OUTBOUND_PREFIXES = [
+  "你正在协助用户编辑 Obsidian Markdown 知识库。\n\n",
+  "你正在协助用户理解当前 Obsidian Markdown 知识库笔记。\n\n",
+  "你正在通过 Hermesian 协助用户使用 Obsidian。\n\n",
+] as const;
+
+const NOTE_CHANGED_EXPLANATION =
+  "\n\n当前笔记内容在本会话中已经发送过，本轮因笔记已发生变化不再重复发送全文；如需最新内容，请加载 obsidian skill 自行读取当前 active_note。";
+
+function stripOutboundBlock(name: string, text: string): string {
+  const open = `<${name}>\n`;
+  const close = `\n</${name}>`;
+  let out = text;
+  let start = out.indexOf(open);
+  while (start !== -1) {
+    const end = out.indexOf(close, start);
+    if (end === -1) {
+      break;
+    }
+    out = out.slice(0, start) + out.slice(end + close.length);
+    start = out.indexOf(open);
+  }
+  return out;
+}
+
+export function stripOutboundPromptToRequest(text: string): string {
+  const prefix = OUTBOUND_PREFIXES.find((candidate) => text.startsWith(candidate));
+  if (!prefix) {
+    return text;
+  }
+  let rest = text.slice(prefix.length);
+  // Remove tagged blocks first so note/selection content cannot contain the
+  // request marker or confuse the extraction.
+  rest = stripOutboundBlock("document", rest);
+  rest = stripOutboundBlock("selection", rest);
+  rest = stripOutboundBlock("obsidian_context", rest);
+  if (rest.includes(NOTE_CHANGED_EXPLANATION)) {
+    rest = rest.replace(NOTE_CHANGED_EXPLANATION, "");
+  }
+  // The injected marker is the first paragraph-level occurrence after the
+  // blocks are gone; everything after it is the user request plus fixed tails.
+  const markerIndex = rest.indexOf("\n用户请求：");
+  if (markerIndex === -1) {
+    return text;
+  }
+  let request = rest.slice(markerIndex + "\n用户请求：".length);
+  // Fixed edit-scope/read-only trailers may have drifted slightly in older
+  // persisted messages; cut at the recognizable paragraph marker instead of
+  // requiring an exact constant match.
+  const trailerMarker = "\n\n<document> 是当前 Markdown 文件的完整上下文";
+  const trailerIndex = request.indexOf(trailerMarker);
+  if (trailerIndex !== -1) {
+    request = request.slice(0, trailerIndex);
+  }
+  // Only strip trailing newlines (separators that may remain after unwrap),
+  // never trailing spaces that belong to the user's request text.
+  return request.replace(/\n+$/, "");
+}
+
 export interface NoteContextFingerprint {
   filePath: string;
   documentHash: string;
