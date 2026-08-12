@@ -420,6 +420,23 @@ describe("TurnManager", () => {
       expect(turns.isBusy("tab-A")).toBe(false);
       expect(turns.ensure("tab-A").completionPromise).toBeUndefined();
     });
+
+    it("resolves a late waiter if complete already finished (no hang)", async () => {
+      const { turns } = setupTurn();
+      turns.ensure("tab-A").busy = true;
+      await turns.complete("tab-A", async () => undefined);
+      // Complete finished with zero waiters; a subsequent wait must still resolve
+      // immediately via the idle check (or TOCTOU re-check), never hang.
+      await expect(turns.waitUntilIdle("tab-A")).resolves.toBeUndefined();
+    });
+
+    it("rejects parked waiters when the tab runtime is deleted", async () => {
+      const { turns } = setupTurn();
+      turns.ensure("tab-A").busy = true;
+      const idle = turns.waitUntilIdle("tab-A");
+      turns.delete("tab-A");
+      await expect(idle).rejects.toThrow(/Turn runtime deleted/);
+    });
   });
 });
 

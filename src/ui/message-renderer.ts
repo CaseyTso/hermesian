@@ -152,6 +152,9 @@ export class TurnManager {
       const waiters = this.#idleWaiters.get(tabId) ?? [];
       waiters.push({ reject, resolve });
       this.#idleWaiters.set(tabId, waiters);
+      // Close the TOCTOU window: complete() may have finished between the
+      // busy check above and this park. Re-check without polling.
+      this.#resolveIdleWaiters(tabId);
     });
   }
 

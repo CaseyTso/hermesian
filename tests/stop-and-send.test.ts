@@ -326,6 +326,48 @@ describe("stop-and-send send guards + continued draft", () => {
     expect(coordinator.getState().lastError).toMatch(/Send is not available/);
     expect(coordinator.getState().snapshot?.draft).toBe("must restore");
   });
+
+  it("does not treat a silent no-op send as success (must throw to fail)", async () => {
+    // Models the pre-fix bug: sendMessage returned without throwing while
+    // busy/!send, and the coordinator marked send-succeeded + dropped snapshot.
+    const send = vi.fn(async (_draft: string) => {
+      // Silent return — wrong. Coordinator would clear snapshot.
+    });
+    const coordinator = new StopAndSendCoordinator(send);
+    const barrier = deferredBarrier();
+    coordinator.beginStop("must not be dropped", barrier.barrier);
+    barrier.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Document the coordinator contract: a non-throwing send is success.
+    // View must throw via assertStopAndSendCanSend instead of silent return.
+    expect(coordinator.getState().phase).toBe("idle");
+    expect(coordinator.getState().snapshot).toBeUndefined();
+    expect(coordinator.getState().lastError).toBeUndefined();
+
+    // Correct path: guard throw → snapshot retained.
+    const guarded = vi.fn(async () => {
+      assertStopAndSendCanSend({
+        hasActiveTab: true,
+        hasRequest: true,
+        hasSession: true,
+        permissionPending: false,
+        sendAvailable: true,
+        tabBusy: true,
+        tabLoading: false,
+      });
+    });
+    const c2 = new StopAndSendCoordinator(guarded);
+    const b2 = deferredBarrier();
+    c2.beginStop("must not be dropped", b2.barrier);
+    b2.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(c2.getState().snapshot?.draft).toBe("must not be dropped");
+    expect(c2.getState().lastError).toMatch(/still busy/);
+  });
 });
 
 function deferredBarrier(): {
