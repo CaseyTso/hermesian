@@ -127,6 +127,7 @@ import {
 import {
   assertStopAndSendCanSend,
   continuedDraftAfterStopAndSend,
+  isStopAndSendUiBlocking,
   StopAndSendCoordinator,
   type StopAndSendPhase,
 } from "./stop-and-send";
@@ -1028,19 +1029,18 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private isStopping(): boolean {
-    const phase = this.stopAndSendPhase();
-    return phase === "stopping" || phase === "waiting";
+    return isStopAndSendUiBlocking(this.stopAndSendPhase());
   }
 
   private ensureStopAndSendCoordinator(): void {
     if (this.stopAndSend) {
       return;
     }
-    this.stopAndSend = new StopAndSendCoordinator(async (draft) => {
+    this.stopAndSend = new StopAndSendCoordinator(async (draft, hooks) => {
       // Barrier already waited for main-turn terminal. Capture any text typed
       // while Stopping…, load the snapshot only long enough for sendMessage to
-      // consume it into the outbound prompt, then restore continued draft
-      // immediately after that clear — never wait for the whole next turn.
+      // consume it into the outbound prompt, then restore continued draft and
+      // leave Stopping… at dispatch — never hold waiting for the whole next turn.
       const continuedDraft = this.getComposerCanonicalDraft();
       this.applyComposerCanonicalDraft(draft);
       this.composerHint = undefined;
@@ -1049,9 +1049,12 @@ export class HermesianSidebarView extends ItemView {
         await this.sendMessage({
           fromStopAndSend: true,
           restoreComposerAfterDispatch: continuedDraftAfterStopAndSend(continuedDraft),
+          onStopAndSendDispatched: hooks.onDispatched,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        // Pre-dispatch failure: coordinator still has snapshot for restore.
+        // Post-dispatch failure: snapshot already cleared; normal send path owns UX.
         const snapshot = this.stopAndSend?.getState().snapshot;
         if (snapshot?.draft) {
           this.applyComposerCanonicalDraft(snapshot.draft);
@@ -2033,6 +2036,11 @@ export class HermesianSidebarView extends ItemView {
       fromStopAndSend?: boolean;
       /** Restore this composer text right after outbound dispatch, before the turn awaits. */
       restoreComposerAfterDispatch?: string;
+      /**
+       * Stop-and-send: fire once the snapshot is on the outbound wire so the
+       * coordinator can leave Stopping… before await sendPrompt.
+       */
+      onStopAndSendDispatched?: () => void;
     } = {},
   ): Promise<void> {
     const activeTab = this.activeConversationTab();
@@ -2203,10 +2211,13 @@ export class HermesianSidebarView extends ItemView {
     // Stop-and-send: snapshot is already on the outbound prompt and the user
     // message row. Restore continued typing NOW — before await sendPrompt —
     // so the composer stays available for the whole follow-up turn and later
-    // keystrokes are not wiped when the turn settles.
+    // keystrokes are not wiped when the turn settles. Also leave Stopping…
+    // here: the snapshot is a normal new turn; holding waiting would disable
+    // Stop/Esc for the entire follow-up agent turn.
     if (options.restoreComposerAfterDispatch !== undefined) {
       this.applyComposerCanonicalDraft(options.restoreComposerAfterDispatch);
     }
+    options.onStopAndSendDispatched?.();
     this.updateControls(false);
 
     try {

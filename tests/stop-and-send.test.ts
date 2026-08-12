@@ -4,10 +4,14 @@ import {
   assertStopAndSendCanSend,
   continuedDraftAfterStopAndSend,
   initialStopAndSendState,
+  isStopAndSendUiBlocking,
   reduceStopAndSend,
   runStopAndSendComposerHandoff,
+  runStopAndSendCycleHandoff,
+  shouldCompleteStopAndSendCycleAt,
   shouldRestoreContinuedDraftAt,
   StopAndSendCoordinator,
+  type StopAndSendSendFn,
   type StopAndSendState,
 } from "../src/stop-and-send";
 
@@ -110,8 +114,11 @@ describe("stop-and-send coordinator", () => {
     return { barrier, reject, resolve };
   }
 
+  /** Unit-test send that settles immediately without long-lived turn. */
+  const instantSend: StopAndSendSendFn = async () => undefined;
+
   it("sends the snapshot exactly once when the barrier resolves", async () => {
-    const send = vi.fn(async () => undefined);
+    const send = vi.fn(instantSend);
     const coordinator = new StopAndSendCoordinator(send);
     const barrier = deferredBarrier();
 
@@ -124,14 +131,14 @@ describe("stop-and-send coordinator", () => {
     await Promise.resolve();
 
     expect(send).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledWith("message at stop time");
+    expect(send.mock.calls[0][0]).toBe("message at stop time");
     expect(coordinator.getState().phase).toBe("idle");
   });
 
   it("does not send until the barrier resolves, with no timer guessing", async () => {
     vi.useFakeTimers();
     try {
-      const send = vi.fn(async () => undefined);
+      const send = vi.fn(instantSend);
       const coordinator = new StopAndSendCoordinator(send);
       const barrier = deferredBarrier();
 
@@ -154,7 +161,7 @@ describe("stop-and-send coordinator", () => {
   });
 
   it("restores the snapshot and reports the error when the barrier rejects", async () => {
-    const send = vi.fn(async () => undefined);
+    const send = vi.fn(instantSend);
     const coordinator = new StopAndSendCoordinator(send);
     const barrier = deferredBarrier();
 
@@ -171,7 +178,7 @@ describe("stop-and-send coordinator", () => {
   });
 
   it("reports a send failure without retrying or emitting queue copy", async () => {
-    const send = vi.fn<(draft: string) => Promise<void>>(async () => {
+    const send = vi.fn<StopAndSendSendFn>(async () => {
       throw new Error("new turn failed");
     });
     const coordinator = new StopAndSendCoordinator(send);
@@ -191,7 +198,7 @@ describe("stop-and-send coordinator", () => {
   });
 
   it("keeps new input during stopping as a separate draft, never touching the snapshot", async () => {
-    const send = vi.fn(async () => undefined);
+    const send = vi.fn(instantSend);
     const coordinator = new StopAndSendCoordinator(send);
     const barrier = deferredBarrier();
 
@@ -206,11 +213,11 @@ describe("stop-and-send coordinator", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(send).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledWith("snapshot draft");
+    expect(send.mock.calls[0][0]).toBe("snapshot draft");
   });
 
   it("ignores begin-stop while a stop-and-send cycle is already waiting", async () => {
-    const send = vi.fn(async () => undefined);
+    const send = vi.fn(instantSend);
     const coordinator = new StopAndSendCoordinator(send);
     const barrier = deferredBarrier();
 
@@ -224,12 +231,94 @@ describe("stop-and-send coordinator", () => {
     await Promise.resolve();
 
     expect(send).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledWith("first");
+    expect(send.mock.calls[0][0]).toBe("first");
     expect(coordinator.getState().phase).toBe("idle");
   });
 
+  it("leaves Stopping… at onDispatched while sendPrompt is still pending", async () => {
+    let releaseTurn!: () => void;
+    const turnInFlight = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const phases: string[] = [];
+    const send: StopAndSendSendFn = async (_draft, hooks) => {
+      // Model View: restore continued draft, then fire onDispatched, then await.
+      hooks.onDispatched();
+      phases.push(coordinator.getState().phase);
+      await turnInFlight;
+    };
+    const coordinator = new StopAndSendCoordinator(send);
+    const barrier = deferredBarrier();
+
+    coordinator.beginStop("snapshot at stop", barrier.barrier);
+    expect(isStopAndSendUiBlocking(coordinator.getState().phase)).toBe(true);
+
+    barrier.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // While follow-up sendPrompt is still pending, cycle must already be idle.
+    expect(coordinator.getState().phase).toBe("idle");
+    expect(isStopAndSendUiBlocking(coordinator.getState().phase)).toBe(false);
+    expect(phases).toEqual(["idle"]);
+    expect(coordinator.getState().snapshot).toBeUndefined();
+
+    // Esc/Stop can target the new in-flight turn (not blocked by stop-and-send).
+    expect(shouldCompleteStopAndSendCycleAt("dispatch-started")).toBe(true);
+    expect(shouldCompleteStopAndSendCycleAt("turn-complete")).toBe(false);
+
+    releaseTurn();
+    await Promise.resolve();
+    expect(coordinator.getState().phase).toBe("idle");
+  });
+
+  it("retains snapshot on pre-dispatch failure but not after onDispatched", async () => {
+    // Pre-dispatch throw → send-failed + snapshot retained.
+    const pre = vi.fn<StopAndSendSendFn>(async () => {
+      throw new Error("guards failed");
+    });
+    const c1 = new StopAndSendCoordinator(pre);
+    const b1 = deferredBarrier();
+    c1.beginStop("must restore", b1.barrier);
+    b1.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(c1.getState().phase).toBe("idle");
+    expect(c1.getState().lastError).toBe("guards failed");
+    expect(c1.getState().snapshot?.draft).toBe("must restore");
+
+    // Post-dispatch throw → normal turn error; cycle already idle, no restore.
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const post = vi.fn<StopAndSendSendFn>(async (_draft, hooks) => {
+      hooks.onDispatched();
+      await pending;
+      throw new Error("agent turn failed after dispatch");
+    });
+    const c2 = new StopAndSendCoordinator(post);
+    const b2 = deferredBarrier();
+    c2.beginStop("already on wire", b2.barrier);
+    b2.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(c2.getState().phase).toBe("idle");
+    expect(c2.getState().snapshot).toBeUndefined();
+    expect(c2.getState().lastError).toBeUndefined();
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Still idle with no lastError from coordinator — post-dispatch owns UX.
+    expect(c2.getState().phase).toBe("idle");
+    expect(c2.getState().lastError).toBeUndefined();
+  });
+
   it("exposes a serializable state that never contains queue copy", () => {
-    const coordinator = new StopAndSendCoordinator(vi.fn(async () => undefined));
+    const coordinator = new StopAndSendCoordinator(vi.fn(instantSend));
     const state: StopAndSendState = coordinator.getState();
     expect(JSON.stringify(state)).not.toContain("Queued for the next turn");
     expect(JSON.stringify(state)).not.toContain("/steer");
@@ -283,11 +372,12 @@ describe("stop-and-send send guards + continued draft", () => {
     // Models the view wiring: capture continued draft, send snapshot, restore.
     let liveComposer = "next idea";
     const sent: string[] = [];
-    const coordinator = new StopAndSendCoordinator(async (snapshotDraft) => {
+    const coordinator = new StopAndSendCoordinator(async (snapshotDraft, hooks) => {
       const continued = liveComposer;
       liveComposer = snapshotDraft; // temporary load for send
       sent.push(liveComposer);
       liveComposer = continuedDraftAfterStopAndSend(continued);
+      hooks.onDispatched();
     });
     const barrier = deferredBarrier();
     coordinator.beginStop("snapshot at stop", barrier.barrier);
@@ -380,8 +470,99 @@ describe("stop-and-send send guards + continued draft", () => {
     expect(result.composerAfterTurn).toBe("next idea");
   });
 
+  it("leaves Stopping… / waiting at dispatch while follow-up sendPrompt is still pending", async () => {
+    expect(isStopAndSendUiBlocking("stopping")).toBe(true);
+    expect(isStopAndSendUiBlocking("waiting")).toBe(true);
+    expect(isStopAndSendUiBlocking("idle")).toBe(false);
+    expect(shouldCompleteStopAndSendCycleAt("dispatch-started")).toBe(true);
+    expect(shouldCompleteStopAndSendCycleAt("turn-complete")).toBe(false);
+
+    let releaseTurn!: () => void;
+    const turnInFlight = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    let liveComposer = "next idea";
+    const phases: string[] = [];
+
+    const coordinator = new StopAndSendCoordinator(async (snapshotDraft, hooks) => {
+      // Mirror View sendMessage: load snapshot, clear, restore, dispatch mark,
+      // THEN await sendPrompt — coordinator must already be idle mid-flight.
+      liveComposer = snapshotDraft;
+      liveComposer = "";
+      liveComposer = continuedDraftAfterStopAndSend("next idea");
+      hooks.onDispatched();
+      phases.push(coordinator.getState().phase);
+      expect(isStopAndSendUiBlocking(coordinator.getState().phase)).toBe(false);
+      expect(liveComposer).toBe("next idea");
+      await turnInFlight;
+    });
+
+    const barrier = deferredBarrier();
+    coordinator.beginStop("snapshot at stop", barrier.barrier);
+    expect(isStopAndSendUiBlocking(coordinator.getState().phase)).toBe(true);
+    liveComposer = "next idea";
+    barrier.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // While the follow-up turn is still pending, cycle is idle (normal running UI).
+    expect(phases).toEqual(["idle"]);
+    expect(coordinator.getState().phase).toBe("idle");
+    expect(isStopAndSendUiBlocking(coordinator.getState().phase)).toBe(false);
+    expect(coordinator.getState().snapshot).toBeUndefined();
+    expect(liveComposer).toBe("next idea");
+    // A new Stop can start (beginStop no longer no-ops on waiting).
+    expect(() => coordinator.beginStop("can stop new turn", Promise.resolve())).not.toThrow();
+
+    releaseTurn();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(coordinator.getState().phase).toBe("idle");
+  });
+
+  it("pure cycle handoff leaves Stopping UI at dispatch-started only", async () => {
+    let releaseTurn!: () => void;
+    const turnInFlight = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    let midPhase: string | undefined;
+    let midStopping: boolean | undefined;
+
+    const handoff = runStopAndSendCycleHandoff({
+      continuedDraft: "next idea",
+      snapshotDraft: "snapshot",
+      turnInFlight,
+      onPhase: (phase) => {
+        if (phase === "idle" && midPhase === undefined) {
+          midPhase = phase;
+          midStopping = isStopAndSendUiBlocking(phase);
+        }
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(midPhase).toBe("idle");
+    expect(midStopping).toBe(false);
+
+    let settled = false;
+    void handoff.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    releaseTurn();
+    const result = await handoff;
+    expect(result.phaseDuringTurn).toBe("idle");
+    expect(result.stoppingDuringTurn).toBe(false);
+    expect(result.composerDuringTurn).toBe("next idea");
+    expect(result.phaseAfterTurn).toBe("idle");
+  });
+
   it("marks send-failed and retains snapshot when fromStopAndSend guards throw", async () => {
-    const send = vi.fn(async () => {
+    const send = vi.fn<StopAndSendSendFn>(async () => {
       assertStopAndSendCanSend({
         hasActiveTab: true,
         hasRequest: true,
@@ -409,7 +590,7 @@ describe("stop-and-send send guards + continued draft", () => {
   it("does not treat a silent no-op send as success (must throw to fail)", async () => {
     // Models the pre-fix bug: sendMessage returned without throwing while
     // busy/!send, and the coordinator marked send-succeeded + dropped snapshot.
-    const send = vi.fn(async (_draft: string) => {
+    const send = vi.fn<StopAndSendSendFn>(async (_draft) => {
       // Silent return — wrong. Coordinator would clear snapshot.
     });
     const coordinator = new StopAndSendCoordinator(send);
@@ -426,7 +607,7 @@ describe("stop-and-send send guards + continued draft", () => {
     expect(coordinator.getState().lastError).toBeUndefined();
 
     // Correct path: guard throw → snapshot retained.
-    const guarded = vi.fn(async () => {
+    const guarded = vi.fn<StopAndSendSendFn>(async () => {
       assertStopAndSendCanSend({
         hasActiveTab: true,
         hasRequest: true,
@@ -446,6 +627,37 @@ describe("stop-and-send send guards + continued draft", () => {
     await Promise.resolve();
     expect(c2.getState().snapshot?.draft).toBe("must not be dropped");
     expect(c2.getState().lastError).toMatch(/still busy/);
+  });
+
+  it("does not restore snapshot on post-dispatch send failure (normal turn owns error)", async () => {
+    let releaseTurn!: () => void;
+    const turnInFlight = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const coordinator = new StopAndSendCoordinator(async (_draft, hooks) => {
+      hooks.onDispatched();
+      await turnInFlight;
+      throw new Error("follow-up turn failed after dispatch");
+    });
+    const barrier = deferredBarrier();
+    coordinator.beginStop("already on wire", barrier.barrier);
+    barrier.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Already idle + snapshot cleared at dispatch.
+    expect(coordinator.getState().phase).toBe("idle");
+    expect(coordinator.getState().snapshot).toBeUndefined();
+    expect(isStopAndSendUiBlocking(coordinator.getState().phase)).toBe(false);
+
+    releaseTurn();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Post-dispatch failure must not re-enter send-failed / re-arm snapshot.
+    expect(coordinator.getState().phase).toBe("idle");
+    expect(coordinator.getState().snapshot).toBeUndefined();
+    expect(coordinator.getState().lastError).toBeUndefined();
   });
 });
 

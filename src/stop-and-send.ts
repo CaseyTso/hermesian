@@ -6,6 +6,12 @@
  * injected promise (the view resolves it at the sendPrompt-complete / runtime
  * busy=false transition point). There is deliberately no timer: guessing when
  * a turn ended with setTimeout would race the real completion.
+ *
+ * After the barrier, the snapshot is dispatched as a normal new turn. The
+ * coordinator leaves `waiting` (Stopping… UI) at **dispatch** — when the
+ * snapshot is on the outbound wire — not after that follow-up turn's full
+ * sendPrompt settle. Holding `waiting` for the whole next turn would disable
+ * Stop/Esc for the entire agent response.
  */
 
 export type StopAndSendPhase = "idle" | "stopping" | "waiting";
@@ -102,6 +108,34 @@ export function shouldRestoreContinuedDraftAt(
   return point === "dispatch-started";
 }
 
+/** Phase at which the stop-and-send cycle leaves Stopping… / waiting UI. */
+export type StopAndSendCycleCompletePoint = "dispatch-started" | "turn-complete";
+
+/**
+ * Pure timing contract: the coordinator must mark send-succeeded (leave
+ * Stopping…) when the snapshot is dispatched as a normal new turn — not when
+ * that follow-up turn's sendPrompt later settles.
+ */
+export function shouldCompleteStopAndSendCycleAt(
+  point: StopAndSendCycleCompletePoint,
+): boolean {
+  return point === "dispatch-started";
+}
+
+/**
+ * Whether the stop-and-send cycle still owns the Stopping… UI (and blocks a
+ * second Stop / Esc stop). Only true during cancel/barrier and pre-dispatch
+ * waiting — once the snapshot is on the wire as a normal turn, this is false.
+ */
+export function isStopAndSendUiBlocking(phase: StopAndSendPhase): boolean {
+  return phase === "stopping" || phase === "waiting";
+}
+
+/** Alias used by pure handoff models / tests. */
+export function isStopAndSendUiStopping(phase: StopAndSendPhase): boolean {
+  return isStopAndSendUiBlocking(phase);
+}
+
 /**
  * Models the View send path for stop-and-send: load snapshot → clear for
  * outbound → restore continued draft before the in-flight turn promise settles.
@@ -138,6 +172,67 @@ export async function runStopAndSendComposerHandoff(options: {
     emit();
   }
   return { composerAfterTurn: composer, composerDuringTurn };
+}
+
+/**
+ * Models barrier → dispatch → idle while sendPrompt is still pending.
+ * Regression guard: UI must not stay Stopping… for the whole follow-up turn.
+ */
+export async function runStopAndSendCycleHandoff(options: {
+  continuedDraft: string;
+  snapshotDraft: string;
+  /** Resolves when the follow-up sendPrompt ends. */
+  turnInFlight: Promise<void>;
+  onPhase?: (phase: StopAndSendPhase, composer: string) => void;
+}): Promise<{
+  composerDuringTurn: string;
+  phaseDuringTurn: StopAndSendPhase;
+  stoppingDuringTurn: boolean;
+  phaseAfterTurn: StopAndSendPhase;
+}> {
+  let phase: StopAndSendPhase = "idle";
+  let composer = options.continuedDraft;
+  const emit = () => options.onPhase?.(phase, composer);
+
+  // Stop clicked: capture snapshot, clear composer, show Stopping…
+  phase = "stopping";
+  composer = "";
+  emit();
+  // User keeps typing the next idea while the main turn cancels.
+  composer = options.continuedDraft;
+  emit();
+  // Main-turn barrier resolved → waiting to dispatch snapshot.
+  phase = "waiting";
+  emit();
+  // Dispatch: load snapshot → clear for outbound → restore continued draft.
+  composer = options.snapshotDraft;
+  emit();
+  composer = "";
+  emit();
+  if (shouldRestoreContinuedDraftAt("dispatch-started")) {
+    composer = continuedDraftAfterStopAndSend(options.continuedDraft);
+    emit();
+  }
+  // Cycle completes at dispatch — follow-up turn is a normal in-flight turn.
+  if (shouldCompleteStopAndSendCycleAt("dispatch-started")) {
+    phase = "idle";
+    emit();
+  }
+  const phaseDuringTurn = phase;
+  const stoppingDuringTurn = isStopAndSendUiStopping(phase);
+  const composerDuringTurn = composer;
+
+  await options.turnInFlight;
+  if (shouldCompleteStopAndSendCycleAt("turn-complete")) {
+    phase = "idle";
+    emit();
+  }
+  return {
+    composerDuringTurn,
+    phaseDuringTurn,
+    stoppingDuringTurn,
+    phaseAfterTurn: phase,
+  };
 }
 
 /**
@@ -192,14 +287,32 @@ export function reduceStopAndSend(
   }
 }
 
+/** Called by the send path once the snapshot is on the outbound wire. */
+export interface StopAndSendDispatchHooks {
+  onDispatched: () => void;
+}
+
+/**
+ * Send callback for stop-and-send. Must call `hooks.onDispatched` once the
+ * snapshot is on the outbound wire (user row + continued draft restored),
+ * then may keep awaiting the follow-up sendPrompt without holding Stopping….
+ */
+export type StopAndSendSendFn = (
+  draft: string,
+  hooks: StopAndSendDispatchHooks,
+) => Promise<void>;
+
 /**
  * Coordinator wiring the pure state machine to the injected send callback and
  * barrier promise. The barrier is the ONLY trigger for the send — no timers.
+ *
+ * Cycle completion (`send-succeeded`) happens at `hooks.onDispatched`, not
+ * when the send promise settles after the full follow-up turn.
  */
 export class StopAndSendCoordinator {
   private state: StopAndSendState = initialStopAndSendState;
 
-  constructor(private readonly send: (draft: string) => Promise<void>) {}
+  constructor(private readonly send: StopAndSendSendFn) {}
 
   getState(): StopAndSendState {
     return this.state;
@@ -233,14 +346,32 @@ export class StopAndSendCoordinator {
     if (!snapshot || this.state.phase !== "waiting") {
       return;
     }
+    let dispatched = false;
     try {
-      await this.send(snapshot.draft);
-      this.state = reduceStopAndSend(this.state, { type: "send-succeeded" });
-    } catch (error) {
-      this.state = reduceStopAndSend(this.state, {
-        error: errorMessage(error),
-        type: "send-failed",
+      await this.send(snapshot.draft, {
+        onDispatched: () => {
+          if (this.state.phase !== "waiting") {
+            return;
+          }
+          dispatched = true;
+          // Leave Stopping… as soon as the snapshot is a normal new turn.
+          this.state = reduceStopAndSend(this.state, { type: "send-succeeded" });
+        },
       });
+      // Simple send paths that resolve without calling onDispatched still
+      // complete the cycle (unit tests / no long-lived turn).
+      if (this.state.phase === "waiting") {
+        this.state = reduceStopAndSend(this.state, { type: "send-succeeded" });
+      }
+    } catch (error) {
+      // Only pre-dispatch failures keep the snapshot for restore. After
+      // onDispatched, the follow-up turn owns normal error UX.
+      if (this.state.phase === "waiting" && !dispatched) {
+        this.state = reduceStopAndSend(this.state, {
+          error: errorMessage(error),
+          type: "send-failed",
+        });
+      }
     }
   }
 }
