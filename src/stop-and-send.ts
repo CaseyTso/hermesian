@@ -40,6 +40,53 @@ function errorMessage(error: unknown): string {
 }
 
 /**
+ * Guards for the stop-and-send follow-up send. Callers must throw on failure
+ * so the coordinator records `send-failed` and restores the snapshot — a
+ * silent no-op would mark success and drop the draft.
+ */
+export interface StopAndSendSendGuards {
+  hasActiveTab: boolean;
+  hasRequest: boolean;
+  hasSession: boolean;
+  permissionPending: boolean;
+  sendAvailable: boolean;
+  tabBusy: boolean;
+  tabLoading: boolean;
+}
+
+export function assertStopAndSendCanSend(guards: StopAndSendSendGuards): void {
+  if (!guards.hasActiveTab) {
+    throw new Error("No active conversation for stop-and-send.");
+  }
+  if (!guards.sendAvailable) {
+    throw new Error("Send is not available for stop-and-send.");
+  }
+  if (guards.tabBusy) {
+    throw new Error("Conversation is still busy; stop-and-send cannot start the next turn.");
+  }
+  if (guards.tabLoading) {
+    throw new Error("Conversation is still loading; stop-and-send cannot start the next turn.");
+  }
+  if (guards.permissionPending) {
+    throw new Error("A permission prompt is still pending; stop-and-send cannot start the next turn.");
+  }
+  if (!guards.hasSession) {
+    throw new Error("This conversation is still starting.");
+  }
+  if (!guards.hasRequest) {
+    throw new Error("Stop-and-send snapshot is empty.");
+  }
+}
+
+/**
+ * After a successful stop-and-send, restore any text the user typed into the
+ * cleared composer while Stopping… — the snapshot was sent, not that live draft.
+ */
+export function continuedDraftAfterStopAndSend(liveDraftAtSendTime: string): string {
+  return liveDraftAtSendTime;
+}
+
+/**
  * Pure state transitions. The snapshot is captured once (the first begin-stop
  * of a cycle wins); barrier signals outside a cycle are ignored.
  */

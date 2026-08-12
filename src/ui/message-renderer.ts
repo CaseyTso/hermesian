@@ -95,9 +95,16 @@ export interface TurnCallbacks {
   onTurnComplete(tabId: string): void;
 }
 
+type IdleWaiter = {
+  reject: (error: unknown) => void;
+  resolve: () => void;
+};
+
 export class TurnManager {
   readonly #renderer: MessageRenderer;
   readonly #runtimes = new Map<string, TurnRuntime>();
+  /** One-shot waiters parked until a busy tab becomes idle via real completion. */
+  readonly #idleWaiters = new Map<string, IdleWaiter[]>();
   #callbacks?: TurnCallbacks;
 
   constructor(renderer: MessageRenderer, callbacks?: TurnCallbacks) {
@@ -126,6 +133,41 @@ export class TurnManager {
   /** Returns true if a turn is actively streaming for this tab. */
   isBusy(tabId: string): boolean {
     return this.#runtimes.get(tabId)?.busy === true;
+  }
+
+  /**
+   * Resolves when the tab's main turn is idle: not busy and no in-flight
+   * completionPromise. Subscribes to real TurnManager.complete transitions —
+   * never microtask-polls or wall-clock guesses.
+   */
+  waitUntilIdle(tabId: string): Promise<void> {
+    const runtime = this.ensure(tabId);
+    if (!runtime.busy && !runtime.completionPromise) {
+      return Promise.resolve();
+    }
+    // Park until complete() clears busy + completionPromise and wakes waiters.
+    // Do not attach .then to completionPromise here: a settled promise would
+    // re-enter waitUntilIdle while completionPromise is still assigned and loop.
+    return new Promise<void>((resolve, reject) => {
+      const waiters = this.#idleWaiters.get(tabId) ?? [];
+      waiters.push({ reject, resolve });
+      this.#idleWaiters.set(tabId, waiters);
+    });
+  }
+
+  #resolveIdleWaiters(tabId: string): void {
+    const runtime = this.#runtimes.get(tabId);
+    if (runtime?.busy || runtime?.completionPromise) {
+      return;
+    }
+    const waiters = this.#idleWaiters.get(tabId);
+    if (!waiters?.length) {
+      return;
+    }
+    this.#idleWaiters.delete(tabId);
+    for (const waiter of waiters) {
+      waiter.resolve();
+    }
   }
 
   /** Creates the turn DOM scaffold if it doesn't exist. Returns the activity container. */
@@ -213,6 +255,9 @@ export class TurnManager {
       if (runtime.completionPromise === completion) {
         runtime.completionPromise = undefined;
       }
+      // Wake waitUntilIdle parkers only after busy is false and the promise
+      // slot is cleared — real terminal completion, no polling.
+      this.#resolveIdleWaiters(tabId);
     });
     return completion;
   }

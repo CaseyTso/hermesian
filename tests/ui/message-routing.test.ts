@@ -365,6 +365,62 @@ describe("TurnManager", () => {
       expect(turns.isBusy("tab-A")).toBe(true);
     });
   });
+
+  describe("waitUntilIdle", () => {
+    it("resolves immediately when the tab is already idle", async () => {
+      const { turns } = setupTurn();
+      await expect(turns.waitUntilIdle("tab-A")).resolves.toBeUndefined();
+    });
+
+    it("parks without microtask spin until complete() finishes, allowing macrotasks", async () => {
+      const { turns } = setupTurn();
+      const runtime = turns.ensure("tab-A");
+      runtime.busy = true;
+
+      let idle = false;
+      const barrier = turns.waitUntilIdle("tab-A").then(() => {
+        idle = true;
+      });
+
+      // Macrotask that would be starved by Promise.resolve().then(tick) spin.
+      let macroSaw = false;
+      await new Promise<void>((resolve) => {
+        setTimeout(() => {
+          macroSaw = true;
+          resolve();
+        }, 0);
+      });
+      expect(macroSaw).toBe(true);
+      expect(idle).toBe(false);
+      expect(turns.isBusy("tab-A")).toBe(true);
+
+      await turns.complete("tab-A", async () => undefined);
+      await barrier;
+      expect(idle).toBe(true);
+      expect(turns.isBusy("tab-A")).toBe(false);
+    });
+
+    it("attaches to an in-flight completionPromise without polling", async () => {
+      const { turns } = setupTurn();
+      turns.ensure("tab-A").busy = true;
+
+      let releaseFinalize!: () => void;
+      const hold = new Promise<void>((resolve) => {
+        releaseFinalize = resolve;
+      });
+      const completion = turns.complete("tab-A", async () => {
+        await hold;
+      });
+      expect(turns.ensure("tab-A").completionPromise).toBe(completion);
+
+      const idle = turns.waitUntilIdle("tab-A");
+      releaseFinalize();
+      await completion;
+      await idle;
+      expect(turns.isBusy("tab-A")).toBe(false);
+      expect(turns.ensure("tab-A").completionPromise).toBeUndefined();
+    });
+  });
 });
 
 // ── Owner-scoping for Markdown/History rendering ───────────────

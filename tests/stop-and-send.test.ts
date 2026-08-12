@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  assertStopAndSendCanSend,
+  continuedDraftAfterStopAndSend,
   initialStopAndSendState,
   reduceStopAndSend,
   StopAndSendCoordinator,
@@ -231,3 +233,111 @@ describe("stop-and-send coordinator", () => {
     expect(JSON.stringify(state)).not.toContain("/steer");
   });
 });
+
+describe("stop-and-send send guards + continued draft", () => {
+  it("throws when send is unavailable so the coordinator can restore the snapshot", () => {
+    expect(() =>
+      assertStopAndSendCanSend({
+        hasActiveTab: true,
+        hasRequest: true,
+        hasSession: true,
+        permissionPending: false,
+        sendAvailable: false,
+        tabBusy: false,
+        tabLoading: false,
+      }),
+    ).toThrow(/Send is not available/);
+  });
+
+  it("throws when the tab is still busy instead of silent no-op success", () => {
+    expect(() =>
+      assertStopAndSendCanSend({
+        hasActiveTab: true,
+        hasRequest: true,
+        hasSession: true,
+        permissionPending: false,
+        sendAvailable: true,
+        tabBusy: true,
+        tabLoading: false,
+      }),
+    ).toThrow(/still busy/);
+  });
+
+  it("allows a ready stop-and-send follow-up send", () => {
+    expect(() =>
+      assertStopAndSendCanSend({
+        hasActiveTab: true,
+        hasRequest: true,
+        hasSession: true,
+        permissionPending: false,
+        sendAvailable: true,
+        tabBusy: false,
+        tabLoading: false,
+      }),
+    ).not.toThrow();
+  });
+
+  it("preserves the live continued draft typed while Stopping… after snapshot send", async () => {
+    // Models the view wiring: capture continued draft, send snapshot, restore.
+    let liveComposer = "next idea";
+    const sent: string[] = [];
+    const coordinator = new StopAndSendCoordinator(async (snapshotDraft) => {
+      const continued = liveComposer;
+      liveComposer = snapshotDraft; // temporary load for send
+      sent.push(liveComposer);
+      liveComposer = continuedDraftAfterStopAndSend(continued);
+    });
+    const barrier = deferredBarrier();
+    coordinator.beginStop("snapshot at stop", barrier.barrier);
+    // User keeps typing while Stopping…
+    liveComposer = "next idea";
+    barrier.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sent).toEqual(["snapshot at stop"]);
+    expect(liveComposer).toBe("next idea");
+    expect(coordinator.getState().phase).toBe("idle");
+  });
+
+  it("marks send-failed and retains snapshot when fromStopAndSend guards throw", async () => {
+    const send = vi.fn(async () => {
+      assertStopAndSendCanSend({
+        hasActiveTab: true,
+        hasRequest: true,
+        hasSession: true,
+        permissionPending: false,
+        sendAvailable: false,
+        tabBusy: false,
+        tabLoading: false,
+      });
+    });
+    const coordinator = new StopAndSendCoordinator(send);
+    const barrier = deferredBarrier();
+    coordinator.beginStop("must restore", barrier.barrier);
+    barrier.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(coordinator.getState().phase).toBe("idle");
+    expect(coordinator.getState().lastError).toMatch(/Send is not available/);
+    expect(coordinator.getState().snapshot?.draft).toBe("must restore");
+  });
+});
+
+function deferredBarrier(): {
+  barrier: Promise<void>;
+  reject: (reason?: unknown) => void;
+  resolve: () => void;
+} {
+  let resolve!: () => void;
+  let reject!: (reason?: unknown) => void;
+  const barrier = new Promise<void>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { barrier, reject, resolve };
+}

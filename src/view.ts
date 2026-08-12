@@ -125,6 +125,8 @@ import {
   type DictationResult,
 } from "./dictation-bridge";
 import {
+  assertStopAndSendCanSend,
+  continuedDraftAfterStopAndSend,
   StopAndSendCoordinator,
   type StopAndSendPhase,
 } from "./stop-and-send";
@@ -1032,13 +1034,19 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
     this.stopAndSend = new StopAndSendCoordinator(async (draft) => {
-      // Barrier already waited for main-turn terminal; restore the snapshot
-      // into the composer and send it as a normal new turn exactly once.
+      // Barrier already waited for main-turn terminal. Preserve any text the
+      // user typed while Stopping…, load the snapshot only for the send, then
+      // restore the continued draft after a successful send.
+      const continuedDraft = this.getComposerCanonicalDraft();
       this.applyComposerCanonicalDraft(draft);
       this.composerHint = undefined;
       this.updateControls(false);
       try {
         await this.sendMessage({ fromStopAndSend: true });
+        const keepTyping = continuedDraftAfterStopAndSend(continuedDraft);
+        this.applyComposerCanonicalDraft(keepTyping);
+        this.composerHint = undefined;
+        this.updateControls(false);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const snapshot = this.stopAndSend?.getState().snapshot;
@@ -2019,9 +2027,21 @@ export class HermesianSidebarView extends ItemView {
 
   private async sendMessage(options: { fromStopAndSend?: boolean } = {}): Promise<void> {
     const activeTab = this.activeConversationTab();
-    if (
+    if (options.fromStopAndSend) {
+      // Stop-and-send must never silent-return: coordinator would mark success
+      // and drop the snapshot. Throw so send-failed restores + surfaces error.
+      assertStopAndSendCanSend({
+        hasActiveTab: Boolean(activeTab),
+        hasRequest: this.getComposerCanonicalDraft().trim().length > 0,
+        hasSession: Boolean(activeTab?.sessionId),
+        permissionPending: activeTab ? this.hasPendingPermission(activeTab.id) : false,
+        sendAvailable: this.controlAvailability().send === true,
+        tabBusy: activeTab ? this.isTabBusy(activeTab.id) : false,
+        tabLoading: activeTab ? this.isTabLoading(activeTab.id) : false,
+      });
+    } else if (
       !activeTab ||
-      (!options.fromStopAndSend && this.isStopping()) ||
+      this.isStopping() ||
       !this.controlAvailability().send ||
       this.isTabBusy(activeTab.id) ||
       this.isTabLoading(activeTab.id) ||
@@ -2029,7 +2049,13 @@ export class HermesianSidebarView extends ItemView {
     ) {
       return;
     }
+    if (!activeTab) {
+      return;
+    }
     if (!activeTab.sessionId) {
+      if (options.fromStopAndSend) {
+        throw new Error("This conversation is still starting.");
+      }
       new Notice("This conversation is still starting.");
       return;
     }
@@ -2038,6 +2064,9 @@ export class HermesianSidebarView extends ItemView {
       try {
         await this.ensureClientForTab(activeTab.id);
       } catch (error) {
+        if (options.fromStopAndSend) {
+          throw error instanceof Error ? error : new Error(this.messageFor(error));
+        }
         new Notice(`Hermesian could not prepare this conversation: ${this.messageFor(error)}`);
         return;
       }
@@ -2050,6 +2079,9 @@ export class HermesianSidebarView extends ItemView {
       ) ||
       client.sessionId !== activeTab.sessionId
     ) {
+      if (options.fromStopAndSend) {
+        throw new Error("Conversation session is no longer active for stop-and-send.");
+      }
       return;
     }
     const rawRequest = this.getComposerCanonicalDraft().trim();
@@ -2063,6 +2095,9 @@ export class HermesianSidebarView extends ItemView {
       ? []
       : this.pendingImages.get(activeTab.id) ?? [];
     if (pendingImages.length > 0 && !client.supportsImagePrompts) {
+      if (options.fromStopAndSend) {
+        throw new Error("The connected Hermes agent does not support image prompts.");
+      }
       new Notice("The connected Hermes agent does not support image prompts.");
       return;
     }
@@ -2074,6 +2109,9 @@ export class HermesianSidebarView extends ItemView {
           ? "Please analyze the pasted image and respond to my request."
         : "");
     if (!request) {
+      if (options.fromStopAndSend) {
+        throw new Error("Stop-and-send snapshot is empty.");
+      }
       return;
     }
 
@@ -2349,65 +2387,15 @@ export class HermesianSidebarView extends ItemView {
   }
 
   /**
-   * Barrier for stop-and-send: resolves only when the main turn's
-   * completionPromise settles (or the turn is already idle). No timers.
+   * Barrier for stop-and-send: resolves only when TurnManager reports the
+   * main turn idle via real complete()/waitUntilIdle subscription. No timers
+   * and no microtask polling that would starve ACP cancel / turn-stop I/O.
    */
   private createStopAndSendBarrier(
     tabId: string,
-    runtime: { busy: boolean; completionPromise?: Promise<void> },
+    _runtime: { busy: boolean; completionPromise?: Promise<void> },
   ): Promise<void> {
-    const isIdle = (): boolean =>
-      !this.isTabBusy(tabId) && !this.turnRuntime(tabId).busy;
-
-    const waitUntilIdle = (): Promise<void> => {
-      if (isIdle()) {
-        return Promise.resolve();
-      }
-      return new Promise((resolve) => {
-        const tick = () => {
-          if (isIdle()) {
-            resolve();
-            return;
-          }
-          // Yield to the microtask queue and re-check live runtime flags.
-          // This is not a wall-clock timer; it only advances when the event
-          // loop runs after ACP/runtime state changes.
-          Promise.resolve().then(tick);
-        };
-        Promise.resolve().then(tick);
-      });
-    };
-
-    if (runtime.completionPromise) {
-      return runtime.completionPromise.then(() => waitUntilIdle());
-    }
-    if (isIdle()) {
-      return Promise.resolve();
-    }
-    // completionPromise is created by TurnManager.complete on turn-stop.
-    // Wait for it to appear, then wait for idle — still no wall-clock guess.
-    return new Promise<void>((resolve, reject) => {
-      const tick = () => {
-        const current = this.turnRuntime(tabId);
-        if (current.completionPromise) {
-          current.completionPromise.then(
-            () => {
-              waitUntilIdle().then(resolve, reject);
-            },
-            (error) => {
-              reject(error instanceof Error ? error : new Error(String(error)));
-            },
-          );
-          return;
-        }
-        if (isIdle()) {
-          resolve();
-          return;
-        }
-        Promise.resolve().then(tick);
-      };
-      Promise.resolve().then(tick);
-    });
+    return this.turnManager.waitUntilIdle(tabId);
   }
 
   private bindEscapeToStop(): void {
