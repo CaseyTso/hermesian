@@ -21,6 +21,7 @@ import {
   utf16OffsetToDom,
 } from "../src/composer-inline-editor";
 import type { ComposerInlineDraft } from "../src/composer-reference-tokens";
+import { insertInlineReference } from "../src/composer-reference-tokens";
 
 const URL_A = "https://example.com/a";
 const URL_B = "https://example.com/b";
@@ -590,6 +591,53 @@ describe("handleInlineEditorKeydown", () => {
         references: [{ kind: "url", value: URL_B, start: 3 }],
       }),
     );
+  });
+});
+
+describe("newly inserted path capsule removal", () => {
+  const FOLDER = "/Users/reviewer/fixtures/Selected Folder";
+
+  function keydown(key: string): KeyboardEvent {
+    return new KeyboardEvent("keydown", {
+      key,
+      bubbles: true,
+      cancelable: true,
+    });
+  }
+
+  it("removes a freshly inserted path capsule with adjacent Backspace", () => {
+    const { editorEl } = setup();
+    const base = draft({ text: "前文后文" });
+    const withCapsule = insertInlineReference(base, 2, {
+      kind: "path",
+      value: FOLDER,
+    });
+    renderInlineDraft(editorEl, withCapsule);
+    setCaretOffset(editorEl, 2 + FOLDER.length);
+    expect(capsuleNodes(editorEl)).toHaveLength(1);
+
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown("Backspace"),
+      withCapsule,
+    );
+    expect(result.handled).toBe(true);
+    expect(result.draft).toEqual(draft({ text: "前文后文" }));
+    expect(capsuleNodes(editorEl)).toHaveLength(0);
+  });
+
+  it("removes a freshly inserted path capsule via its remove button", () => {
+    const { editorEl } = setup();
+    const onRemove = vi.fn();
+    const withCapsule = insertInlineReference(draft({ text: "前文后文" }), 2, {
+      kind: "path",
+      value: FOLDER,
+    });
+    renderInlineDraft(editorEl, withCapsule, { onRemoveReference: onRemove });
+    const capsule = capsuleNodes(editorEl)[0]!;
+    expect(capsule.classList.contains("is-path")).toBe(true);
+    capsule.querySelector("button")!.click();
+    expect(onRemove).toHaveBeenCalledWith(0);
   });
 });
 

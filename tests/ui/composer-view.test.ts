@@ -10,6 +10,7 @@ import {
   applyComposerSlashToken,
   applyComposerState,
   createComposerView,
+  type ComposerCallbacks,
   type ComposerState,
 } from "../../src/ui/composer-view";
 import type { ComposerInlineDraft } from "../../src/composer-reference-tokens";
@@ -80,7 +81,10 @@ function defaultState(overrides: Partial<ComposerState> = {}): ComposerState {
   };
 }
 
-function setup(state?: Partial<ComposerState>) {
+function setup(
+  state?: Partial<ComposerState>,
+  callbacksOverrides: Partial<ComposerCallbacks> = {},
+) {
   const parent = document.createElement("div");
   // The host keeps ONE live draft model; the editor reads it back through
   // getDraft() on every input (mirrors HermesianSidebarView.composerDraft).
@@ -88,7 +92,7 @@ function setup(state?: Partial<ComposerState>) {
   const onDraftChange = vi.fn((draft: ComposerInlineDraft) => {
     hostDraft = draft;
   });
-  const callbacks = {
+  const callbacks: ComposerCallbacks = {
     getDraft: () => hostDraft,
     onDraftChange,
     onPaste: vi.fn(),
@@ -101,9 +105,21 @@ function setup(state?: Partial<ComposerState>) {
     onCut: vi.fn(),
     onReferenceRemove: vi.fn(),
     renderIcon: vi.fn(),
+    ...callbacksOverrides,
   };
   const elements = createComposerView(parent, defaultState(state), callbacks);
-  return { parent, elements, callbacks, hostDraft: () => hostDraft };
+  return {
+    parent,
+    elements,
+    // onReferenceRemove is always provided here; surface it as a concrete
+    // function (same spy instance) so legacy chip tests can pass it to
+    // required callbacks.
+    callbacks: {
+      ...callbacks,
+      onReferenceRemove: callbacks.onReferenceRemove as (index: number) => void,
+    },
+    hostDraft: () => hostDraft,
+  };
 }
 
 describe("createComposerView", () => {
@@ -418,6 +434,109 @@ describe("applyComposerState", () => {
     );
     expect(elements.hintEl.style.display).not.toBe("none");
     expect(elements.hintEl.textContent).toContain("Steer only accepts plain text");
+  });
+});
+
+describe("file picker menu: open callback, disabled state, disposal", () => {
+  it("calls onFilePickerOpen(\"file\") BEFORE the native input opens", () => {
+    const onFilePickerOpen = vi.fn();
+    const { elements } = setup({}, { onFilePickerOpen });
+    elements.filePickerButtonEl.click();
+    const clickSpy = vi.spyOn(elements.fileInputEl, "click");
+    const options = elements.filePickerMenuEl.querySelectorAll<HTMLButtonElement>(
+      ".hermesian-file-picker-option",
+    );
+    options[0]!.click();
+    expect(onFilePickerOpen).toHaveBeenCalledWith("file");
+    expect(clickSpy).toHaveBeenCalledOnce();
+    // onFilePickerOpen must fire BEFORE input.click() so the host can
+    // capture the caret while the editor is still focused.
+    expect(onFilePickerOpen.mock.invocationCallOrder[0]).toBeLessThan(
+      clickSpy.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("calls onFilePickerOpen(\"folder\") BEFORE the folder input opens", () => {
+    const onFilePickerOpen = vi.fn();
+    const { elements } = setup({}, { onFilePickerOpen });
+    elements.filePickerButtonEl.click();
+    const clickSpy = vi.spyOn(elements.folderInputEl, "click");
+    const options = elements.filePickerMenuEl.querySelectorAll<HTMLButtonElement>(
+      ".hermesian-file-picker-option",
+    );
+    options[1]!.click();
+    expect(onFilePickerOpen).toHaveBeenCalledWith("folder");
+    expect(clickSpy).toHaveBeenCalledOnce();
+    expect(onFilePickerOpen.mock.invocationCallOrder[0]).toBeLessThan(
+      clickSpy.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("hides and disables the menu options when the composer is disabled", () => {
+    const { elements } = setup();
+    elements.filePickerButtonEl.click();
+    expect(elements.filePickerMenuEl.style.display).not.toBe("none");
+
+    applyComposerState(elements, defaultState({ disabled: true }));
+    expect(elements.filePickerMenuEl.style.display).toBe("none");
+    const options = elements.filePickerMenuEl.querySelectorAll<HTMLButtonElement>(
+      ".hermesian-file-picker-option",
+    );
+    expect(options).toHaveLength(2);
+    expect(options[0]!.disabled).toBe(true);
+    expect(options[1]!.disabled).toBe(true);
+
+    // A disabled option must not open the native dialog (clicks suppressed).
+    const fileClick = vi.spyOn(elements.fileInputEl, "click");
+    const folderClick = vi.spyOn(elements.folderInputEl, "click");
+    options[0]!.click();
+    options[1]!.click();
+    expect(fileClick).not.toHaveBeenCalled();
+    expect(folderClick).not.toHaveBeenCalled();
+
+    // Re-enabling restores the options.
+    applyComposerState(elements, defaultState({ disabled: false }));
+    const reenabled = elements.filePickerMenuEl.querySelectorAll<HTMLButtonElement>(
+      ".hermesian-file-picker-option",
+    );
+    expect(reenabled[0]!.disabled).toBe(false);
+    expect(reenabled[1]!.disabled).toBe(false);
+  });
+
+  it("dispose() detaches the outside-click listener so an open menu stays open", () => {
+    const { elements } = setup();
+    elements.filePickerButtonEl.click();
+    expect(elements.filePickerMenuEl.style.display).not.toBe("none");
+    elements.dispose?.();
+    document.body.click();
+    expect(elements.filePickerMenuEl.style.display).not.toBe("none");
+  });
+
+  it("does not accumulate outside-click listeners across create→dispose cycles", () => {
+    const parent = document.createElement("div");
+    const makeView = (): ReturnType<typeof createComposerView> => {
+      const callbacks: ComposerCallbacks = {
+        getDraft: () => emptyDraft(),
+        onDraftChange: vi.fn(),
+        onPaste: vi.fn(),
+        onSend: vi.fn(),
+        onStop: vi.fn(),
+        onKeydown: vi.fn(),
+      };
+      return createComposerView(parent, defaultState(), callbacks);
+    };
+    const first = makeView();
+    const second = makeView();
+    first.filePickerButtonEl.click();
+    expect(first.filePickerMenuEl.style.display).not.toBe("none");
+    first.dispose?.();
+
+    second.filePickerButtonEl.click();
+    expect(second.filePickerMenuEl.style.display).not.toBe("none");
+    document.body.click();
+    // Only the live instance's listener remains: second closes, first stays open.
+    expect(second.filePickerMenuEl.style.display).toBe("none");
+    expect(first.filePickerMenuEl.style.display).not.toBe("none");
   });
 });
 

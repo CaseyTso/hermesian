@@ -32,6 +32,29 @@ const URL_PATTERN = /^https?:\/\/\S+$/i;
 const PATH_PATTERN = /^\/[^\n\r]+$/;
 
 /**
+ * Derive the selected folder's own absolute path from the first file of a
+ * `webkitdirectory` pick. `webkitRelativePath` always uses `/` separators and
+ * begins with the chosen folder's name; `File.path` uses the platform
+ * separator. The folder value is `filePath` with everything after the
+ * chosen folder's name stripped — sliced by UTF-16 code-unit length so
+ * Windows backslashes (and any other separator) are preserved untouched.
+ * Returns null when there is no relative path or the derivation is empty.
+ */
+export function derivePickedFolderPath(
+  filePath: string,
+  webkitRelativePath: string,
+): string | null {
+  if (!webkitRelativePath) {
+    return null;
+  }
+  const firstSlash = webkitRelativePath.indexOf("/");
+  const rootSegment =
+    firstSlash === -1 ? webkitRelativePath : webkitRelativePath.slice(0, firstSlash);
+  const value = filePath.slice(0, -(webkitRelativePath.length - rootSegment.length));
+  return value.length > 0 ? value : null;
+}
+
+/**
  * Classify a raw paste payload. Outer whitespace (including newlines) is used
  * only for recognition; the persisted value is the trimmed original. Returns
  * null when the payload is not entirely one URL or one absolute path.

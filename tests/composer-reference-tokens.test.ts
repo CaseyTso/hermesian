@@ -1,3 +1,5 @@
+/** @vitest-environment happy-dom */
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -6,6 +8,7 @@ import {
   composerInlineDraftIsSlashCommand,
   composerInlineDraftRouting,
   composerReferenceDraftIsSlashCommand,
+  derivePickedFolderPath,
   insertInlineReference,
   isInlineReference,
   isReferenceToken,
@@ -21,6 +24,80 @@ import {
   type InlineReference,
   type ReferenceToken,
 } from "../src/composer-reference-tokens";
+import { getCaretOffset, renderInlineDraft } from "../src/composer-inline-editor";
+
+describe("derivePickedFolderPath", () => {
+  it("derives the selected folder itself (not its parent) for a nested POSIX pick", () => {
+    expect(
+      derivePickedFolderPath(
+        "/Users/reviewer/fixtures/Selected Folder/nested/file.txt",
+        "Selected Folder/nested/file.txt",
+      ),
+    ).toBe("/Users/reviewer/fixtures/Selected Folder");
+  });
+
+  it("preserves Windows backslashes in the derived folder path", () => {
+    expect(
+      derivePickedFolderPath(
+        "C:\\Users\\me\\fixtures\\Selected Folder\\nested\\file.txt",
+        "Selected Folder/nested/file.txt",
+      ),
+    ).toBe("C:\\Users\\me\\fixtures\\Selected Folder");
+  });
+
+  it("derives the folder for the first file directly under the pick root", () => {
+    expect(derivePickedFolderPath("/a/b/Folder/file.txt", "Folder/file.txt")).toBe(
+      "/a/b/Folder",
+    );
+  });
+
+  it("handles non-ASCII and space directory names by code-unit length", () => {
+    const filePath = "/数据/我的 文件夹/子/文件.txt";
+    const relative = "我的 文件夹/子/文件.txt";
+    const rootSegment = "我的 文件夹";
+    expect(derivePickedFolderPath(filePath, relative)).toBe("/数据/我的 文件夹");
+    // CJK characters are single UTF-16 code units: assert with the same
+    // length arithmetic the implementation uses — never hard-coded counts.
+    expect(derivePickedFolderPath(filePath, relative)).toBe(
+      filePath.slice(0, -(relative.length - rootSegment.length)),
+    );
+  });
+
+  it("returns null when webkitRelativePath is empty", () => {
+    expect(derivePickedFolderPath("/a/b/file.txt", "")).toBeNull();
+  });
+});
+
+describe("file-picker insertion semantics", () => {
+  const FOLDER = "/Users/reviewer/fixtures/Selected Folder";
+
+  it("inserts a picked folder path token after an existing capsule with the right start", () => {
+    const base = draft({
+      text: `前文${URL_A}后文`,
+      references: [{ kind: "url", value: URL_A, start: 2 }],
+    });
+    const insertAt = 2 + URL_A.length;
+    const out = insertInlineReference(base, insertAt, { kind: "path", value: FOLDER });
+    const token = out.references.find((reference) => reference.kind === "path")!;
+    expect(token).toEqual({ kind: "path", value: FOLDER, start: insertAt });
+    expect(out.text).toBe(`前文${URL_A}${FOLDER}后文`);
+    expect(out.references[0]).toEqual({ kind: "url", value: URL_A, start: 2 });
+  });
+
+  it("renders the inserted path token as a capsule and lands the caret right after it", () => {
+    const editorEl = document.createElement("div");
+    const base = draft({
+      text: `前文${URL_A}后文`,
+      references: [{ kind: "url", value: URL_A, start: 2 }],
+    });
+    const insertAt = 2 + URL_A.length;
+    const out = insertInlineReference(base, insertAt, { kind: "path", value: FOLDER });
+    const token = out.references.find((reference) => reference.kind === "path")!;
+    renderInlineDraft(editorEl, out, {}, token.start + token.value.length);
+    expect(editorEl.querySelectorAll(".hermesian-inline-ref")).toHaveLength(2);
+    expect(getCaretOffset(editorEl)).toBe(token.start + token.value.length);
+  });
+});
 
 describe("recognizeReferenceToken", () => {
   it("recognizes a complete http URL as a url reference", () => {

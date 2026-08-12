@@ -83,6 +83,7 @@ import {
 import {
   composerInlineDraftRouting,
   composerInlineDraftIsSlashCommand,
+  derivePickedFolderPath,
   insertInlineReference,
   removeInlineReference,
   restoreComposerInlineDraft,
@@ -298,6 +299,11 @@ export class HermesianSidebarView extends ItemView {
   private filePickerButtonEl!: HTMLButtonElement;
   private fileInputEl!: HTMLInputElement;
   private folderInputEl!: HTMLInputElement;
+  private filePickerMenuEl!: HTMLElement;
+  /** Caret captured when the file/folder dialog opens (P1-2). */
+  private pendingFilePickerCaret: number | null = null;
+  /** Detaches document-level listeners added by the composer view. */
+  private composerDispose: (() => void) | undefined;
   private composerHintEl!: HTMLElement;
   private composerStatusEl!: HTMLElement;
   private slashMenuEl!: HTMLElement;
@@ -373,6 +379,8 @@ export class HermesianSidebarView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.composerDispose?.();
+    this.composerDispose = undefined;
     this.modelPicker?.detach();
     this.modelPicker = null;
     this.reasoningPicker?.detach();
@@ -658,6 +666,9 @@ export class HermesianSidebarView extends ItemView {
       onDictation: () => {
         void this.handleDictationToggle();
       },
+      onFilePickerOpen: () => {
+        this.pendingFilePickerCaret = getCaretOffset(this.composerEl);
+      },
       onKeydown: (event: KeyboardEvent) => {
         if (this.handleSlashMenuKeydown(event)) {
           return;
@@ -754,6 +765,8 @@ export class HermesianSidebarView extends ItemView {
     this.filePickerButtonEl = composerElements.filePickerButtonEl;
     this.fileInputEl = composerElements.fileInputEl;
     this.folderInputEl = composerElements.folderInputEl;
+    this.filePickerMenuEl = composerElements.filePickerMenuEl;
+    this.composerDispose = composerElements.dispose;
     this.composerHintEl = composerElements.hintEl;
     this.composerStatusEl = composerElements.statusEl;
     this.contextProgressEl = composerElements.contextProgressEl;
@@ -2680,15 +2693,26 @@ export class HermesianSidebarView extends ItemView {
 
   /**
    * Insert an absolute path chosen from the file/folder picker as an inline
-   * reference capsule at the current caret (fallback: end of draft). Electron
-   * exposes the full absolute path on `File.path`; silently skip when it is
-   * unavailable (e.g. browser mode). Folder picks yield the folder itself by
-   * stripping the `webkitRelativePath` suffix from the first file's path.
+   * reference capsule at the caret captured when the dialog opened (fallback:
+   * end of draft). Electron exposes the full absolute path on `File.path`;
+   * silently skip when it is unavailable (e.g. browser mode). Folder picks
+   * yield the folder itself by stripping the `webkitRelativePath` suffix from
+   * the first file's path.
    */
   private insertPickedFileReference(
     input: HTMLInputElement,
     folderMode: boolean,
   ): void {
+    // Availability guard FIRST — a disabled composer must never insert.
+    if (!this.controlAvailability().composer) {
+      input.value = "";
+      return;
+    }
+    // Caret was captured in onFilePickerOpen while the editor still had
+    // focus (the native dialog steals it before the change event fires).
+    const caretOffset =
+      this.pendingFilePickerCaret ?? this.composerDraft.text.length;
+    this.pendingFilePickerCaret = null;
     const file = input.files?.[0];
     if (!file) {
       return;
@@ -2706,20 +2730,20 @@ export class HermesianSidebarView extends ItemView {
         input.value = "";
         return;
       }
-      value = filePath.slice(0, -relative.length);
-      if (!value) {
+      const derived = derivePickedFolderPath(filePath, relative);
+      if (derived === null) {
         input.value = "";
         return;
       }
+      value = derived;
     }
-    const caretOffset =
-      getCaretOffset(this.composerEl) ?? this.composerDraft.text.length;
     this.composerDraft = insertInlineReference(this.composerDraft, caretOffset, {
       kind: "path",
       value,
     });
     this.composerHint = undefined;
-    this.renderComposerInlineDraft();
+    // Focus lands explicitly right after the newly inserted capsule.
+    this.renderComposerInlineDraft(caretOffset + value.length);
     this.captureActiveConversationRuntime();
     this.updateControls(false);
     this.composerEl.focus();
@@ -2746,6 +2770,7 @@ export class HermesianSidebarView extends ItemView {
         steerButtonEl: this.steerButtonEl,
         dictationButtonEl: this.dictationButtonEl,
         filePickerButtonEl: this.filePickerButtonEl,
+        filePickerMenuEl: this.filePickerMenuEl,
         statusEl: this.composerStatusEl,
         hintEl: this.composerHintEl,
       },
@@ -3129,13 +3154,16 @@ export class HermesianSidebarView extends ItemView {
 
   /**
    * Re-render the inline capsules inside the contenteditable editor.
-   * Icons are injected by the host (Obsidian's setIcon).
+   * Icons are injected by the host (Obsidian's setIcon). When `caretOffset`
+   * is provided the caret is placed there after the re-render (used to land
+   * focus right after a newly inserted capsule).
    */
-  private renderComposerInlineDraft(): void {
+  private renderComposerInlineDraft(caretOffset?: number): void {
     renderInlineDraft(
       this.composerEl,
       this.composerDraft,
       this.inlineRenderOptions(),
+      caretOffset,
     );
   }
 

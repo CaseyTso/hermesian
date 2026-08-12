@@ -32,6 +32,8 @@ export interface ComposerElements {
   filePickerButtonEl: HTMLButtonElement;
   filePickerMenuEl: HTMLElement;
   folderInputEl: HTMLInputElement;
+  /** Detaches document-level listeners (outside-click menu close). */
+  dispose?(): void;
   hintEl: HTMLElement;
   imageAttachmentBarEl: HTMLElement;
   modelButtonEl: HTMLButtonElement;
@@ -89,6 +91,12 @@ export interface ComposerCallbacks {
   getDraft(): ComposerInlineDraft;
   /** Called on Enter (without Shift) or Send / Steer button click. */
   onSend(): void;
+  /**
+   * Called when the user opens the native file/folder dialog, BEFORE
+   * `input.click()` — the host captures the caret while the editor is still
+   * focused.
+   */
+  onFilePickerOpen?(kind: "file" | "folder"): void;
   /** Called on Stop button click. */
   onStop(): void;
   /** Called on Steer button click (running turn, pure-text draft). */
@@ -248,10 +256,12 @@ export function createComposerView(
     text: "选择文件夹…",
   });
   pickFileOptionEl.addEventListener("click", () => {
+    callbacks.onFilePickerOpen?.("file");
     fileInputEl.click();
     filePickerMenuEl.hide();
   });
   pickFolderOptionEl.addEventListener("click", () => {
+    callbacks.onFilePickerOpen?.("folder");
     folderInputEl.click();
     filePickerMenuEl.hide();
   });
@@ -262,14 +272,15 @@ export function createComposerView(
       filePickerMenuEl.hide();
     }
   });
-  filePickerMenuEl.ownerDocument.addEventListener("click", (event) => {
+  const outsideClickHandler = (event: MouseEvent): void => {
     if (
       !filePickerButtonEl.contains(event.target as Node) &&
       !filePickerMenuEl.contains(event.target as Node)
     ) {
       filePickerMenuEl.hide();
     }
-  });
+  };
+  filePickerMenuEl.ownerDocument.addEventListener("click", outsideClickHandler);
 
   const modelButtonEl = controlRow.createEl("button", {
     attr: { "aria-label": "Select Hermes model" },
@@ -365,6 +376,7 @@ export function createComposerView(
       composerEl,
       dictationButtonEl,
       filePickerButtonEl,
+      filePickerMenuEl,
       hintEl,
       sendButtonEl,
       statusEl,
@@ -450,6 +462,9 @@ export function createComposerView(
     currentFileBarEl,
     currentFileLabelEl,
     dictationButtonEl,
+    dispose: () => {
+      filePickerMenuEl.ownerDocument.removeEventListener("click", outsideClickHandler);
+    },
     fileInputEl,
     filePickerButtonEl,
     filePickerMenuEl,
@@ -481,6 +496,7 @@ export function applyComposerState(
     steerButtonEl?: HTMLButtonElement;
     dictationButtonEl?: HTMLButtonElement;
     filePickerButtonEl?: HTMLButtonElement;
+    filePickerMenuEl?: HTMLElement;
     statusEl?: HTMLElement;
     hintEl?: HTMLElement;
   },
@@ -557,6 +573,18 @@ export function applyComposerState(
 
   if (elements.filePickerButtonEl) {
     elements.filePickerButtonEl.disabled = state.disabled;
+  }
+
+  if (elements.filePickerMenuEl) {
+    if (state.disabled) {
+      elements.filePickerMenuEl.hide();
+    }
+    const options = elements.filePickerMenuEl.querySelectorAll<HTMLButtonElement>(
+      ".hermesian-file-picker-option",
+    );
+    for (const option of Array.from(options)) {
+      option.disabled = state.disabled;
+    }
   }
 
   if (elements.statusEl) {
