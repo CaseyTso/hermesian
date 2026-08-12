@@ -597,9 +597,12 @@ export class HermesianSidebarView extends ItemView {
     this.messageRenderer = new MessageRenderer(this.messagesEl);
 
     const turnCallbacks: TurnCallbacks = {
-      onTurnComplete: (_tabId: string) => {
+      onTurnComplete: (tabId: string) => {
+        // Clear controller prompt before stop-and-send waiters wake so the
+        // follow-up send does not see a stale "busy" / send-unavailable guard.
+        this.controller?.setPromptRunning(tabId, false);
         this.renderConversationTabs();
-        if (this.conversationWorkspace?.activeTabId === _tabId) {
+        if (this.conversationWorkspace?.activeTabId === tabId) {
           this.updateControls(false);
         }
       },
@@ -2395,7 +2398,11 @@ export class HermesianSidebarView extends ItemView {
     tabId: string,
     _runtime: { busy: boolean; completionPromise?: Promise<void> },
   ): Promise<void> {
-    return this.turnManager.waitUntilIdle(tabId);
+    return this.turnManager.waitUntilIdle(tabId).then(() => {
+      // Defensive: mirror onTurnComplete so follow-up send sees prompt idle
+      // even if the original sendMessage finally has not run yet.
+      this.controller?.setPromptRunning(tabId, false);
+    });
   }
 
   private bindEscapeToStop(): void {

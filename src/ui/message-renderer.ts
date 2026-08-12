@@ -238,6 +238,15 @@ export class TurnManager {
   /** Removes the runtime for a tab. */
   delete(tabId: string): void {
     this.#runtimes.delete(tabId);
+    // Tab gone: any parked stop-and-send barrier must not hang forever.
+    const waiters = this.#idleWaiters.get(tabId);
+    if (waiters?.length) {
+      this.#idleWaiters.delete(tabId);
+      const error = new Error(`Turn runtime deleted for ${tabId}`);
+      for (const waiter of waiters) {
+        waiter.reject(error);
+      }
+    }
   }
 
   /**
