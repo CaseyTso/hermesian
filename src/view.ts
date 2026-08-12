@@ -1037,32 +1037,32 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
     this.stopAndSend = new StopAndSendCoordinator(async (draft) => {
-      // Barrier already waited for main-turn terminal. Preserve any text the
-      // user typed while Stopping…, load the snapshot only for the send, then
-      // restore the continued draft after a successful send.
-      const continuedDraft = this.getComposerCanonicalDraft();
-      this.applyComposerCanonicalDraft(draft);
-      this.composerHint = undefined;
-      this.updateControls(false);
-      try {
-        await this.sendMessage({ fromStopAndSend: true });
-        const keepTyping = continuedDraftAfterStopAndSend(continuedDraft);
-        this.applyComposerCanonicalDraft(keepTyping);
-        this.composerHint = undefined;
-        this.updateControls(false);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const snapshot = this.stopAndSend?.getState().snapshot;
-        if (snapshot?.draft) {
-          this.applyComposerCanonicalDraft(snapshot.draft);
-        }
-        this.composerHint = message;
-        this.updateControls(false);
-        new Notice(`Hermesian stop-and-send failed: ${message}`);
-        throw error instanceof Error ? error : new Error(message);
+          // Barrier already waited for main-turn terminal. Capture any text typed
+          // while Stopping…, load the snapshot only long enough for sendMessage to
+          // consume it into the outbound prompt, then restore continued draft
+          // immediately after that clear — never wait for the whole next turn.
+          const continuedDraft = this.getComposerCanonicalDraft();
+          this.applyComposerCanonicalDraft(draft);
+          this.composerHint = undefined;
+          this.updateControls(false);
+          try {
+            await this.sendMessage({
+              fromStopAndSend: true,
+              restoreComposerAfterDispatch: continuedDraftAfterStopAndSend(continuedDraft),
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const snapshot = this.stopAndSend?.getState().snapshot;
+            if (snapshot?.draft) {
+              this.applyComposerCanonicalDraft(snapshot.draft);
+            }
+            this.composerHint = message;
+            this.updateControls(false);
+            new Notice(`Hermesian stop-and-send failed: ${message}`);
+            throw error instanceof Error ? error : new Error(message);
+          }
+        });
       }
-    });
-  }
 
   private ensureDictationBridge(): DictationBridge {
     if (!this.dictationBridge) {
@@ -2028,7 +2028,13 @@ export class HermesianSidebarView extends ItemView {
     });
   }
 
-  private async sendMessage(options: { fromStopAndSend?: boolean } = {}): Promise<void> {
+  private async sendMessage(
+    options: {
+      fromStopAndSend?: boolean;
+      /** Restore this composer text right after outbound dispatch, before the turn awaits. */
+      restoreComposerAfterDispatch?: string;
+    } = {},
+  ): Promise<void> {
     const activeTab = this.activeConversationTab();
     if (options.fromStopAndSend) {
       // Stop-and-send must never silent-return: coordinator would mark success
@@ -2194,6 +2200,13 @@ export class HermesianSidebarView extends ItemView {
     });
     this.loadedMessageTabIds.add(activeTab.id);
     this.renderConversationTabs();
+    // Stop-and-send: snapshot is already on the outbound prompt and the user
+    // message row. Restore continued typing NOW — before await sendPrompt —
+    // so the composer stays available for the whole follow-up turn and later
+    // keystrokes are not wiped when the turn settles.
+    if (options.restoreComposerAfterDispatch !== undefined) {
+      this.applyComposerCanonicalDraft(options.restoreComposerAfterDispatch);
+    }
     this.updateControls(false);
 
     try {

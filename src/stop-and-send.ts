@@ -79,11 +79,65 @@ export function assertStopAndSendCanSend(guards: StopAndSendSendGuards): void {
 }
 
 /**
- * After a successful stop-and-send, restore any text the user typed into the
- * cleared composer while Stopping… — the snapshot was sent, not that live draft.
+ * After a successful stop-and-send *dispatch*, restore any text the user typed
+ * into the cleared composer while Stopping… — the snapshot was sent, not that
+ * live draft. Restore must happen at dispatch start (after outbound capture),
+ * not after the follow-up turn completes, or the composer stays empty for the
+ * whole next turn and later typing can be wiped on settle.
  */
 export function continuedDraftAfterStopAndSend(liveDraftAtSendTime: string): string {
   return liveDraftAtSendTime;
+}
+
+/** Phase at which the continued draft must reappear in the live composer. */
+export type StopAndSendContinuedDraftRestorePoint = "dispatch-started" | "turn-complete";
+
+/**
+ * Pure timing contract for View wiring tests: continued draft restores when
+ * the follow-up turn is dispatched, never when that turn later completes.
+ */
+export function shouldRestoreContinuedDraftAt(
+  point: StopAndSendContinuedDraftRestorePoint,
+): boolean {
+  return point === "dispatch-started";
+}
+
+/**
+ * Models the View send path for stop-and-send: load snapshot → clear for
+ * outbound → restore continued draft before the in-flight turn promise settles.
+ * Used by regression tests so green unit tests cannot claim success while the
+ * real View still awaited full-turn completion before restore.
+ */
+export async function runStopAndSendComposerHandoff(options: {
+  continuedDraft: string;
+  snapshotDraft: string;
+  /** Resolves when the follow-up turn ends (sendPrompt terminal). */
+  turnInFlight: Promise<void>;
+  onComposerChange?: (value: string) => void;
+}): Promise<{ composerDuringTurn: string; composerAfterTurn: string }> {
+  let composer = options.continuedDraft;
+  const emit = () => options.onComposerChange?.(composer);
+
+  // 1. Temporarily load snapshot for outbound capture (View applyComposerCanonicalDraft).
+  composer = options.snapshotDraft;
+  emit();
+  // 2. sendMessage clears composer after capturing request.
+  composer = "";
+  emit();
+  // 3. Restore continued draft at dispatch-started — BEFORE awaiting the turn.
+  if (shouldRestoreContinuedDraftAt("dispatch-started")) {
+    composer = continuedDraftAfterStopAndSend(options.continuedDraft);
+    emit();
+  }
+  const composerDuringTurn = composer;
+  await options.turnInFlight;
+  // 4. Must NOT re-apply barrier-time continued draft at turn-complete (would
+  // wipe anything the user typed during the follow-up turn).
+  if (shouldRestoreContinuedDraftAt("turn-complete")) {
+    composer = continuedDraftAfterStopAndSend(options.continuedDraft);
+    emit();
+  }
+  return { composerAfterTurn: composer, composerDuringTurn };
 }
 
 /**
