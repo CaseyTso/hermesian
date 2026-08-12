@@ -146,6 +146,81 @@ describe("createComposerView", () => {
     expect(elements.stopButtonEl.style.display).not.toBe("none");
   });
 
+  it("includes a file picker button placed before the model button", () => {
+    const { elements } = setup();
+    expect(elements.filePickerButtonEl).toBeTruthy();
+    expect(elements.filePickerButtonEl.classList.contains("hermesian-file-picker")).toBe(
+      true,
+    );
+    expect(elements.filePickerButtonEl.getAttribute("aria-label")).toBe(
+      "Attach file or folder",
+    );
+    const row = elements.modelButtonEl.parentElement!;
+    const children = Array.from(row.children);
+    expect(children.indexOf(elements.filePickerButtonEl)).toBeLessThan(
+      children.indexOf(elements.modelButtonEl),
+    );
+  });
+
+  it("exposes hidden single-select file and folder inputs", () => {
+    const { elements } = setup();
+    expect(elements.fileInputEl.type).toBe("file");
+    expect(elements.fileInputEl.style.display).toBe("none");
+    expect(elements.fileInputEl.hasAttribute("multiple")).toBe(false);
+    expect(elements.folderInputEl.type).toBe("file");
+    expect(elements.folderInputEl.getAttribute("webkitdirectory")).toBe("");
+    expect(elements.folderInputEl.hasAttribute("multiple")).toBe(false);
+    expect(elements.folderInputEl.style.display).toBe("none");
+  });
+
+  it("toggles a dropdown menu with 选择文件… and 选择文件夹… options", () => {
+    const { elements } = setup();
+    expect(elements.filePickerMenuEl.style.display).toBe("none");
+    elements.filePickerButtonEl.click();
+    expect(elements.filePickerMenuEl.style.display).not.toBe("none");
+    const options = elements.filePickerMenuEl.querySelectorAll(
+      ".hermesian-file-picker-option",
+    );
+    expect(options).toHaveLength(2);
+    expect(options[0]!.textContent).toBe("选择文件…");
+    expect(options[1]!.textContent).toBe("选择文件夹…");
+    // Toggling the button again closes the menu.
+    elements.filePickerButtonEl.click();
+    expect(elements.filePickerMenuEl.style.display).toBe("none");
+  });
+
+  it("triggers the file input from the 选择文件… option and hides the menu", () => {
+    const { elements } = setup();
+    elements.filePickerButtonEl.click();
+    const clickSpy = vi.spyOn(elements.fileInputEl, "click");
+    const options = elements.filePickerMenuEl.querySelectorAll(
+      ".hermesian-file-picker-option",
+    );
+    (options[0] as HTMLButtonElement).click();
+    expect(clickSpy).toHaveBeenCalledOnce();
+    expect(elements.filePickerMenuEl.style.display).toBe("none");
+  });
+
+  it("triggers the folder input from the 选择文件夹… option and hides the menu", () => {
+    const { elements } = setup();
+    elements.filePickerButtonEl.click();
+    const clickSpy = vi.spyOn(elements.folderInputEl, "click");
+    const options = elements.filePickerMenuEl.querySelectorAll(
+      ".hermesian-file-picker-option",
+    );
+    (options[1] as HTMLButtonElement).click();
+    expect(clickSpy).toHaveBeenCalledOnce();
+    expect(elements.filePickerMenuEl.style.display).toBe("none");
+  });
+
+  it("closes the menu when clicking outside the button and menu", () => {
+    const { elements } = setup();
+    elements.filePickerButtonEl.click();
+    expect(elements.filePickerMenuEl.style.display).not.toBe("none");
+    document.body.click();
+    expect(elements.filePickerMenuEl.style.display).toBe("none");
+  });
+
   it("keeps current-file bar, input row, footer, and a hidden slash token host", () => {
     const { elements, parent } = setup();
     expect(parent.querySelector(".hermesian-current-file")).toBeTruthy();
@@ -241,6 +316,14 @@ describe("applyComposerState", () => {
 
     applyComposerState(elements, defaultState({ disabled: false }));
     expect(elements.composerEl.contentEditable).toBe("true");
+  });
+
+  it("disables the file picker button when the composer is disabled", () => {
+    applyComposerState(elements, defaultState({ disabled: true }));
+    expect(elements.filePickerButtonEl.disabled).toBe(true);
+
+    applyComposerState(elements, defaultState({ disabled: false }));
+    expect(elements.filePickerButtonEl.disabled).toBe(false);
   });
 
   it("disables Send button when sendEnabled is false", () => {

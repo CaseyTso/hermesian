@@ -83,6 +83,7 @@ import {
 import {
   composerInlineDraftRouting,
   composerInlineDraftIsSlashCommand,
+  insertInlineReference,
   removeInlineReference,
   restoreComposerInlineDraft,
   serializeComposerInlineDraft,
@@ -294,6 +295,9 @@ export class HermesianSidebarView extends ItemView {
   private sendButtonEl!: HTMLButtonElement;
   private steerButtonEl!: HTMLButtonElement;
   private dictationButtonEl!: HTMLButtonElement;
+  private filePickerButtonEl!: HTMLButtonElement;
+  private fileInputEl!: HTMLInputElement;
+  private folderInputEl!: HTMLInputElement;
   private composerHintEl!: HTMLElement;
   private composerStatusEl!: HTMLElement;
   private slashMenuEl!: HTMLElement;
@@ -747,6 +751,9 @@ export class HermesianSidebarView extends ItemView {
     this.steerButtonEl = composerElements.steerButtonEl;
     this.stopButtonEl = composerElements.stopButtonEl;
     this.dictationButtonEl = composerElements.dictationButtonEl;
+    this.filePickerButtonEl = composerElements.filePickerButtonEl;
+    this.fileInputEl = composerElements.fileInputEl;
+    this.folderInputEl = composerElements.folderInputEl;
     this.composerHintEl = composerElements.hintEl;
     this.composerStatusEl = composerElements.statusEl;
     this.contextProgressEl = composerElements.contextProgressEl;
@@ -758,6 +765,7 @@ export class HermesianSidebarView extends ItemView {
     setIcon(composerElements.modelButtonEl.querySelector(".hermesian-model-chevron")!, "chevron-down");
     setIcon(composerElements.reasoningButtonEl.querySelector(".hermesian-reasoning-icon")!, "brain");
     setIcon(composerElements.addSelectionButtonEl.querySelector("span")!, "paperclip");
+    setIcon(composerElements.filePickerButtonEl.querySelector("span")!, "file-plus");
     setIcon(composerElements.dictationButtonEl.querySelector("span")!, "mic");
     setIcon(composerElements.sendButtonEl.querySelector("span")!, "arrow-right");
     setIcon(composerElements.steerButtonEl.querySelector("span")!, "corner-down-left");
@@ -788,6 +796,13 @@ export class HermesianSidebarView extends ItemView {
     this.renderReasoningButton();
     this.reasoningButtonEl.addEventListener("click", () => {
       void this.openReasoningPicker();
+    });
+
+    this.fileInputEl.addEventListener("change", () => {
+      this.insertPickedFileReference(this.fileInputEl, false);
+    });
+    this.folderInputEl.addEventListener("change", () => {
+      this.insertPickedFileReference(this.folderInputEl, true);
     });
 
     let selectionSource: MarkdownView | undefined;
@@ -2663,6 +2678,55 @@ export class HermesianSidebarView extends ItemView {
     }
   }
 
+  /**
+   * Insert an absolute path chosen from the file/folder picker as an inline
+   * reference capsule at the current caret (fallback: end of draft). Electron
+   * exposes the full absolute path on `File.path`; silently skip when it is
+   * unavailable (e.g. browser mode). Folder picks yield the folder itself by
+   * stripping the `webkitRelativePath` suffix from the first file's path.
+   */
+  private insertPickedFileReference(
+    input: HTMLInputElement,
+    folderMode: boolean,
+  ): void {
+    const file = input.files?.[0];
+    if (!file) {
+      return;
+    }
+    const filePath = (file as File & { path?: string }).path;
+    if (!filePath) {
+      input.value = "";
+      return;
+    }
+    let value = filePath;
+    if (folderMode) {
+      const relative =
+        (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
+      if (!relative) {
+        input.value = "";
+        return;
+      }
+      value = filePath.slice(0, -relative.length);
+      if (!value) {
+        input.value = "";
+        return;
+      }
+    }
+    const caretOffset =
+      getCaretOffset(this.composerEl) ?? this.composerDraft.text.length;
+    this.composerDraft = insertInlineReference(this.composerDraft, caretOffset, {
+      kind: "path",
+      value,
+    });
+    this.composerHint = undefined;
+    this.renderComposerInlineDraft();
+    this.captureActiveConversationRuntime();
+    this.updateControls(false);
+    this.composerEl.focus();
+    // Reset so picking the same path again still fires `change`.
+    input.value = "";
+  }
+
   private updateControls(_busy: boolean, _showStop = _busy): void {
     const availability = this.controlAvailability();
     if (!availability.composer) {
@@ -2681,6 +2745,7 @@ export class HermesianSidebarView extends ItemView {
         stopButtonEl: this.stopButtonEl,
         steerButtonEl: this.steerButtonEl,
         dictationButtonEl: this.dictationButtonEl,
+        filePickerButtonEl: this.filePickerButtonEl,
         statusEl: this.composerStatusEl,
         hintEl: this.composerHintEl,
       },

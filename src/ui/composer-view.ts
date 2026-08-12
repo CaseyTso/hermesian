@@ -28,6 +28,10 @@ export interface ComposerElements {
   currentFileBarEl: HTMLButtonElement;
   currentFileLabelEl: HTMLElement;
   dictationButtonEl: HTMLButtonElement;
+  fileInputEl: HTMLInputElement;
+  filePickerButtonEl: HTMLButtonElement;
+  filePickerMenuEl: HTMLElement;
+  folderInputEl: HTMLInputElement;
   hintEl: HTMLElement;
   imageAttachmentBarEl: HTMLElement;
   modelButtonEl: HTMLButtonElement;
@@ -197,6 +201,76 @@ export function createComposerView(
   const composerFooter = composerHostEl.createDiv({ cls: "hermesian-composer-footer" });
   const controlRow = composerFooter.createDiv({ cls: "hermesian-control-row" });
 
+  const filePickerButtonEl = controlRow.createEl("button", {
+    attr: {
+      "aria-label": "Attach file or folder",
+      title: "Attach file or folder",
+      type: "button",
+    },
+    cls: "clickable-icon hermesian-file-picker",
+  });
+  const filePickerIcon = filePickerButtonEl.createSpan();
+  filePickerIcon.empty();
+
+  // Hidden native inputs: the host wires `change` and reads File.path.
+  // Single-select file input (no `multiple`), folder input with webkitdirectory.
+  const fileInputEl = composerHostEl.createEl("input", {
+    attr: {
+      "aria-hidden": "true",
+      tabindex: "-1",
+      type: "file",
+    },
+  }) as HTMLInputElement;
+  fileInputEl.style.display = "none";
+
+  const folderInputEl = composerHostEl.createEl("input", {
+    attr: {
+      "aria-hidden": "true",
+      tabindex: "-1",
+      type: "file",
+      webkitdirectory: "",
+    },
+  }) as HTMLInputElement;
+  folderInputEl.style.display = "none";
+
+  // Dropdown menu: plain div (no Obsidian Menu) toggled by the button; menu
+  // items trigger the matching hidden input and close; outside clicks close.
+  const filePickerMenuEl = controlRow.createDiv({ cls: "hermesian-file-picker-menu" });
+  filePickerMenuEl.hide();
+  const pickFileOptionEl = filePickerMenuEl.createEl("button", {
+    attr: { type: "button" },
+    cls: "hermesian-file-picker-option",
+    text: "选择文件…",
+  });
+  const pickFolderOptionEl = filePickerMenuEl.createEl("button", {
+    attr: { type: "button" },
+    cls: "hermesian-file-picker-option",
+    text: "选择文件夹…",
+  });
+  pickFileOptionEl.addEventListener("click", () => {
+    fileInputEl.click();
+    filePickerMenuEl.hide();
+  });
+  pickFolderOptionEl.addEventListener("click", () => {
+    folderInputEl.click();
+    filePickerMenuEl.hide();
+  });
+  filePickerButtonEl.addEventListener("click", () => {
+    if (filePickerMenuEl.style.display === "none") {
+      filePickerMenuEl.show();
+    } else {
+      filePickerMenuEl.hide();
+    }
+  });
+  filePickerMenuEl.ownerDocument.addEventListener("click", (event) => {
+    if (
+      !filePickerButtonEl.contains(event.target as Node) &&
+      !filePickerMenuEl.contains(event.target as Node)
+    ) {
+      filePickerMenuEl.hide();
+    }
+  });
+
   const modelButtonEl = controlRow.createEl("button", {
     attr: { "aria-label": "Select Hermes model" },
     cls: "hermesian-model-button",
@@ -290,6 +364,7 @@ export function createComposerView(
     {
       composerEl,
       dictationButtonEl,
+      filePickerButtonEl,
       hintEl,
       sendButtonEl,
       statusEl,
@@ -375,6 +450,10 @@ export function createComposerView(
     currentFileBarEl,
     currentFileLabelEl,
     dictationButtonEl,
+    fileInputEl,
+    filePickerButtonEl,
+    filePickerMenuEl,
+    folderInputEl,
     hintEl,
     imageAttachmentBarEl,
     modelButtonEl,
@@ -401,6 +480,7 @@ export function applyComposerState(
     stopButtonEl: HTMLButtonElement;
     steerButtonEl?: HTMLButtonElement;
     dictationButtonEl?: HTMLButtonElement;
+    filePickerButtonEl?: HTMLButtonElement;
     statusEl?: HTMLElement;
     hintEl?: HTMLElement;
   },
@@ -473,6 +553,10 @@ export function applyComposerState(
       "is-transcribing",
       dictationPhase === "transcribing",
     );
+  }
+
+  if (elements.filePickerButtonEl) {
+    elements.filePickerButtonEl.disabled = state.disabled;
   }
 
   if (elements.statusEl) {
