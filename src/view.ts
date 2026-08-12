@@ -72,6 +72,7 @@ import {
   TurnManager,
   type TurnCallbacks,
 } from "./ui/message-renderer";
+import { ScrollFollowController } from "./ui/scroll-lock";
 import {
   applyComposerSlashToken,
   applyComposerState,
@@ -276,6 +277,7 @@ export class HermesianSidebarView extends ItemView {
   private readonly permissions = new Map<string, PendingPermission>();
   private readonly loadedMessageTabIds = new Set<string>();
   private messageRenderer!: MessageRenderer;
+  private scrollFollow!: ScrollFollowController;
   private turnManager!: TurnManager;
   private readonly editScopes = new Map<
     string,
@@ -595,7 +597,10 @@ export class HermesianSidebarView extends ItemView {
     this.historyButtonEl = shell.historyButtonEl;
     this.conversationTabsEl = shell.conversationTabsEl;
     this.messagesEl = shell.messagesEl;
-    this.messageRenderer = new MessageRenderer(this.messagesEl);
+    this.scrollFollow = new ScrollFollowController();
+    this.messageRenderer = new MessageRenderer(this.messagesEl, {
+      scrollFollow: this.scrollFollow,
+    });
 
     const turnCallbacks: TurnCallbacks = {
       onTurnComplete: (tabId: string) => {
@@ -2778,7 +2783,8 @@ export class HermesianSidebarView extends ItemView {
         });
       }
     }
-    this.scrollToBottom(tabId);
+    // Sending / replaying a user bubble means intent to follow the latest output.
+    this.scrollToBottom(tabId, { force: true });
   }
 
   private appendAssistantDelta(tabId: string, text: string): void {
@@ -3115,8 +3121,11 @@ export class HermesianSidebarView extends ItemView {
     this.composerEl.setAttribute("data-placeholder", this.composerPlaceholder());
   }
 
-  private scrollToBottom(sourceTabId?: string): void {
-    this.messageRenderer.scrollToBottom(sourceTabId);
+  private scrollToBottom(
+    sourceTabId?: string,
+    options: { force?: boolean } = {},
+  ): void {
+    this.messageRenderer.scrollToBottom(sourceTabId, options);
   }
 
   private messageFor(error: unknown): string {

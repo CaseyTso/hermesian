@@ -1,12 +1,55 @@
+import type { ScrollFollowController } from "./scroll-lock";
+import { readScrollGeometry } from "./scroll-lock";
+
+export interface MessageRendererOptions {
+  /** Optional per-tab auto-follow lock. When set, scrollToBottom respects it. */
+  scrollFollow?: ScrollFollowController;
+}
+
+export interface ScrollToBottomOptions {
+  /**
+   * Force scroll to bottom and unlock follow for the source/visible tab.
+   * Used when the user sends a new message (intent: jump to latest).
+   */
+  force?: boolean;
+}
+
 export class MessageRenderer {
   readonly #caches = new Map<string, HTMLElement>();
   readonly #document: Document;
   readonly #messagesEl: HTMLElement;
+  readonly #scrollFollow?: ScrollFollowController;
+  /** Last user/programmatic scrollTop per tab — restored when revisiting a locked tab. */
+  readonly #scrollTopByTab = new Map<string, number>();
+  /** True while we programmatically set scrollTop so the scroll listener ignores it. */
+  #programmaticScroll = false;
   #visibleTabId: string | undefined;
 
-  constructor(messagesEl: HTMLElement) {
+  constructor(messagesEl: HTMLElement, options: MessageRendererOptions = {}) {
     this.#messagesEl = messagesEl;
     this.#document = messagesEl.ownerDocument;
+    this.#scrollFollow = options.scrollFollow;
+    if (this.#scrollFollow) {
+      this.#messagesEl.addEventListener("scroll", () => {
+        this.#onUserScroll();
+      }, { passive: true });
+    }
+  }
+
+  /** Expose follow controller for view/send paths that need explicit unlock. */
+  get scrollFollow(): ScrollFollowController | undefined {
+    return this.#scrollFollow;
+  }
+
+  #onUserScroll(): void {
+    if (this.#programmaticScroll || !this.#scrollFollow || !this.#visibleTabId) {
+      return;
+    }
+    this.#scrollTopByTab.set(this.#visibleTabId, this.#messagesEl.scrollTop);
+    this.#scrollFollow.syncFromGeometry(
+      this.#visibleTabId,
+      readScrollGeometry(this.#messagesEl),
+    );
   }
 
   /** Returns the DOM container where messages for `tabId` should be inserted. */
@@ -32,6 +75,9 @@ export class MessageRenderer {
       return;
     }
 
+    // Preserve outgoing tab scroll so a locked tab can restore mid-history position.
+    this.#scrollTopByTab.set(this.#visibleTabId, this.#messagesEl.scrollTop);
+
     const currentCache = this.#getOrCreateCache(this.#visibleTabId);
     currentCache.replaceChildren(...Array.from(this.#messagesEl.childNodes));
 
@@ -39,12 +85,18 @@ export class MessageRenderer {
     this.#messagesEl.replaceChildren(...Array.from(targetCache.childNodes));
 
     this.#visibleTabId = tabId;
-    this.scrollToBottom();
+    if (this.#scrollFollow?.isLocked(tabId)) {
+      this.#setScrollTop(this.#scrollTopByTab.get(tabId) ?? 0);
+      return;
+    }
+    this.scrollToBottom(tabId);
   }
 
   /** Discards the cached messages for `tabId`. */
   forget(tabId: string): void {
     this.#caches.delete(tabId);
+    this.#scrollTopByTab.delete(tabId);
+    this.#scrollFollow?.forget(tabId);
   }
 
   /** Returns true when `tabId` messages are currently displayed. */
@@ -57,13 +109,38 @@ export class MessageRenderer {
     this.#messagesEl.empty();
   }
 
-  /** Schedules a scroll-to-bottom via requestAnimationFrame. */
-  scrollToBottom(sourceTabId?: string): void {
+  /**
+   * Schedules a scroll-to-bottom via requestAnimationFrame.
+   * When a ScrollFollowController is attached, skips auto-scroll while the
+   * relevant tab is locked (user scrolled away). Pass `{ force: true }` to
+   * unlock and jump (e.g. user sent a new message).
+   */
+  scrollToBottom(sourceTabId?: string, options: ScrollToBottomOptions = {}): void {
     window.requestAnimationFrame(() => {
       if (sourceTabId !== undefined && this.#visibleTabId !== sourceTabId) {
         return;
       }
-      this.#messagesEl.scrollTop = this.#messagesEl.scrollHeight;
+      const followTabId = sourceTabId ?? this.#visibleTabId;
+      if (this.#scrollFollow && followTabId !== undefined) {
+        if (options.force) {
+          this.#scrollFollow.unlock(followTabId);
+        } else if (!this.#scrollFollow.shouldAutoScroll(this.#visibleTabId, sourceTabId)) {
+          return;
+        }
+      }
+      this.#setScrollTop(this.#messagesEl.scrollHeight);
+      if (followTabId !== undefined) {
+        this.#scrollTopByTab.set(followTabId, this.#messagesEl.scrollTop);
+      }
+    });
+  }
+
+  #setScrollTop(value: number): void {
+    this.#programmaticScroll = true;
+    this.#messagesEl.scrollTop = value;
+    // Re-enable user-scroll tracking after the browser delivers any synthetic scroll.
+    window.requestAnimationFrame(() => {
+      this.#programmaticScroll = false;
     });
   }
 
