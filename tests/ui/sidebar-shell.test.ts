@@ -107,6 +107,15 @@ describe("createSidebarShell", () => {
       expect(shell.messagesEl.classList.contains("hermesian-messages")).toBe(true);
     });
 
+    it("renders the top dock container wrapping header and tabs", () => {
+      const { shell } = setup();
+      expect(shell.topDockEl).toBeInstanceOf(HTMLElement);
+      expect(shell.topDockEl.classList.contains("hermesian-top-dock")).toBe(true);
+      expect(shell.topDockEl.contains(shell.statusEl)).toBe(true);
+      expect(shell.topDockEl.contains(shell.addConversationButtonEl)).toBe(true);
+      expect(shell.topDockEl.contains(shell.conversationTabsEl)).toBe(true);
+    });
+
     it("returns the root element for composer attachment", () => {
       const { shell } = setup();
       expect(shell.root).toBeInstanceOf(HTMLElement);

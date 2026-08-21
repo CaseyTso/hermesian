@@ -2180,7 +2180,7 @@ export class HermesianSidebarView extends ItemView {
     const request =
       rawRequest ||
       (this.pendingSelection
-        ? "请根据上下文改写选中的内容，使其更清晰、严谨，并保留原意。"
+        ? "Rewrite the selected text for clarity, precision, and tone while preserving its original meaning."
         : pendingImages.length > 0
           ? "Please analyze the pasted image and respond to my request."
         : "");

@@ -163,6 +163,7 @@ export interface TurnRuntime {
   busy: boolean;
   completionPromise?: Promise<void>;
   thoughtContentEl?: HTMLElement;
+  thoughtDetailsEl?: HTMLDetailsElement;
   toolEls: Map<string, HTMLElement>;
   turnActivityEl?: HTMLElement;
 }
@@ -288,9 +289,10 @@ export class TurnManager {
     if (!runtime.thoughtContentEl) {
       const details = this.ensureActivity(tabId).createEl("details", {
         cls: "hermesian-thought",
-      });
+      }) as HTMLDetailsElement;
       details.open = true;
       details.createEl("summary", { text: "Thinking" });
+      runtime.thoughtDetailsEl = details;
       runtime.thoughtContentEl = details.createEl("pre");
     }
     runtime.thoughtContentEl.textContent =
@@ -303,6 +305,7 @@ export class TurnManager {
     runtime.assistantContentEl = undefined;
     runtime.assistantText = "";
     runtime.thoughtContentEl = undefined;
+    runtime.thoughtDetailsEl = undefined;
   }
 
   /** Clears all messages and streaming state for a tab. */
@@ -357,12 +360,16 @@ export class TurnManager {
     finalize: () => Promise<void>,
   ): Promise<void> {
     try {
+      if (runtime.thoughtDetailsEl) {
+        runtime.thoughtDetailsEl.open = false;
+      }
       await finalize();
     } finally {
       runtime.busy = false;
       runtime.activeTurnEl = undefined;
       runtime.turnActivityEl = undefined;
       runtime.thoughtContentEl = undefined;
+      runtime.thoughtDetailsEl = undefined;
       this.#callbacks?.onTurnComplete(tabId);
     }
   }

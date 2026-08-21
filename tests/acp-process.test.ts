@@ -166,7 +166,7 @@ setTimeout(() => {}, 30000)`,
 setTimeout(() => {}, 30000)`,
         ),
       );
-      await tick(50);
+      await tick(150);
       const exit = await proc.terminate({ graceMs: 2000, killWaitMs: 1000 });
       expect(exitCode(exit)).toBe(99);
     });
@@ -181,7 +181,7 @@ process.on("SIGTERM", () => { process.exit(0) });
 setTimeout(() => {}, 30000)`,
         ),
       );
-      await tick(50);
+      await tick(150);
       await proc.terminate({ graceMs: 1000, killWaitMs: 500 });
       expect(proc.stderrTail()).toBe("pre-terminate");
     });
@@ -201,7 +201,7 @@ process.on("SIGTERM", () => {}); // ignore, wait for SIGKILL
 setTimeout(() => {}, 30000)`,
         ),
       );
-      await tick(100);
+      await tick(200);
       await proc.terminate({ graceMs: 150, killWaitMs: 2000 });
       expect(proc.stderrTail()).toContain("before-kill");
     });

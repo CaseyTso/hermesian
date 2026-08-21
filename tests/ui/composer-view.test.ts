@@ -189,7 +189,7 @@ describe("createComposerView", () => {
     expect(elements.folderInputEl.style.display).toBe("none");
   });
 
-  it("toggles a dropdown menu with 选择文件… and 选择文件夹… options", () => {
+  it("toggles a dropdown menu with Select file… and Select folder… options", () => {
     const { elements } = setup();
     expect(elements.filePickerMenuEl.style.display).toBe("none");
     elements.filePickerButtonEl.click();
@@ -198,14 +198,14 @@ describe("createComposerView", () => {
       ".hermesian-file-picker-option",
     );
     expect(options).toHaveLength(2);
-    expect(options[0]!.textContent).toBe("选择文件…");
-    expect(options[1]!.textContent).toBe("选择文件夹…");
+    expect(options[0]!.textContent).toBe("Select file…");
+    expect(options[1]!.textContent).toBe("Select folder…");
     // Toggling the button again closes the menu.
     elements.filePickerButtonEl.click();
     expect(elements.filePickerMenuEl.style.display).toBe("none");
   });
 
-  it("triggers the file input from the 选择文件… option and hides the menu", () => {
+  it("triggers the file input from the Select file… option and hides the menu", () => {
     const { elements } = setup();
     elements.filePickerButtonEl.click();
     const clickSpy = vi.spyOn(elements.fileInputEl, "click");
@@ -217,7 +217,7 @@ describe("createComposerView", () => {
     expect(elements.filePickerMenuEl.style.display).toBe("none");
   });
 
-  it("triggers the folder input from the 选择文件夹… option and hides the menu", () => {
+  it("triggers the folder input from the Select folder… option and hides the menu", () => {
     const { elements } = setup();
     elements.filePickerButtonEl.click();
     const clickSpy = vi.spyOn(elements.folderInputEl, "click");

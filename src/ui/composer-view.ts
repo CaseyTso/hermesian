@@ -248,12 +248,12 @@ export function createComposerView(
   const pickFileOptionEl = filePickerMenuEl.createEl("button", {
     attr: { type: "button" },
     cls: "hermesian-file-picker-option",
-    text: "选择文件…",
+    text: "Select file…",
   });
   const pickFolderOptionEl = filePickerMenuEl.createEl("button", {
     attr: { type: "button" },
     cls: "hermesian-file-picker-option",
-    text: "选择文件夹…",
+    text: "Select folder…",
   });
   pickFileOptionEl.addEventListener("click", () => {
     callbacks.onFilePickerOpen?.("file");

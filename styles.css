@@ -8,6 +8,21 @@
   --hermesian-radius-sm: 6px;
   --hermesian-radius-md: 9px;
   --hermesian-radius-lg: 12px;
+
+  /* Theme-Adaptive Glass tokens */
+  --hermesian-glass-bg: color-mix(in srgb, var(--background-primary) 82%, transparent);
+  --hermesian-glass-border: color-mix(in srgb, var(--background-modifier-border) 60%, transparent);
+  --hermesian-glass-shadow: 0 2px 8px rgb(0 0 0 / 0.04);
+  --hermesian-glass-blur: blur(16px);
+
+  /* Safety Surface tokens (opaque, high-contrast) */
+  --hermesian-safety-bg: var(--background-secondary);
+  --hermesian-safety-border: color-mix(in srgb, var(--interactive-accent) 50%, var(--background-modifier-border));
+
+  /* Density rhythm */
+  --hermesian-density-gap: 6px;
+  --hermesian-density-padding: 8px;
+
   background: var(--background-primary);
   display: flex;
   flex-direction: column;
@@ -36,14 +51,28 @@
   outline: none;
 }
 
+.hermesian-top-dock {
+  background: var(--hermesian-glass-bg);
+  backdrop-filter: var(--hermesian-glass-blur);
+  -webkit-backdrop-filter: var(--hermesian-glass-blur);
+  border-bottom: 1px solid var(--hermesian-glass-border);
+  box-shadow: var(--hermesian-glass-shadow);
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+  z-index: 10;
+}
+
 .hermesian-header {
   align-items: center;
-  border-bottom: 1px solid var(--background-modifier-border);
   box-sizing: border-box;
   display: flex;
   justify-content: space-between;
   min-height: 36px;
-  padding: 2px 8px;
+  padding: 4px 8px 2px;
 }
 
 .hermesian-header-actions .clickable-icon {
@@ -63,16 +92,15 @@
 
 .hermesian-conversation-tabs {
   align-items: center;
-  border-bottom: 1px solid var(--background-modifier-border);
   box-sizing: border-box;
   display: flex;
   flex: 0 0 auto;
   gap: 4px;
-  min-height: 36px;
+  min-height: 32px;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 3px 8px;
+  padding: 2px 8px 5px;
   scrollbar-width: thin;
   white-space: nowrap;
   width: 100%;
@@ -86,13 +114,13 @@
   box-shadow: none;
   color: var(--text-muted);
   display: inline-flex;
-  flex: 0 0 30px;
   font-size: var(--font-ui-small);
   font-weight: var(--font-medium);
-  height: 30px;
+  gap: 3px;
+  height: 28px;
   justify-content: center;
-  min-width: 30px;
-  padding: 0 8px;
+  min-width: 28px;
+  padding: 0 6px 0 8px;
   position: relative;
 }
 
@@ -106,6 +134,42 @@
   background: var(--hermesian-accent-soft);
   border-color: color-mix(in srgb, var(--hermesian-accent) 45%, transparent);
   color: var(--text-accent);
+}
+
+.hermesian-tab-label {
+  display: inline-block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermesian-tab-close {
+  align-items: center;
+  border-radius: var(--hermesian-radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: none;
+  font-size: 13px;
+  font-weight: bold;
+  height: 16px;
+  justify-content: center;
+  line-height: 1;
+  opacity: 0.7;
+  padding: 0 1px;
+  transition: opacity var(--hermesian-motion), color var(--hermesian-motion), background var(--hermesian-motion);
+  width: 16px;
+}
+
+.hermesian-conversation-tab:hover .hermesian-tab-close,
+.hermesian-conversation-tab.is-active .hermesian-tab-close {
+  display: inline-flex;
+}
+
+.hermesian-tab-close:hover {
+  background: color-mix(in srgb, var(--text-muted) 20%, transparent);
+  color: var(--text-normal);
+  opacity: 1;
 }
 
 .hermesian-conversation-tab.is-working::after {
@@ -434,7 +498,8 @@
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   min-width: 0;
-  padding: 5px 7px;
+  padding: 4px 8px;
+  transition: border-color var(--hermesian-motion), background var(--hermesian-motion);
 }
 
 .hermesian-thought > summary {
@@ -442,6 +507,7 @@
   cursor: pointer;
   font-weight: var(--font-medium);
   transition: color var(--hermesian-motion);
+  user-select: none;
 }
 
 .hermesian-thought[open] > summary,
@@ -450,20 +516,23 @@
 }
 
 .hermesian-thought pre {
-  margin: 6px 0 0;
+  margin: 6px 0 2px;
   max-height: 180px;
   overflow: auto;
   white-space: pre-wrap;
 }
 
 .hermesian-tool {
+  align-items: center;
   background: var(--background-secondary);
   border: 1px solid var(--hermesian-border);
   border-radius: var(--hermesian-radius-sm);
   color: var(--text-muted);
+  display: flex;
   font-size: var(--font-ui-smaller);
+  gap: 8px;
   min-width: 0;
-  padding: 5px 7px;
+  padding: 4px 8px;
 }
 
 .hermesian-tool > span:first-child {
@@ -492,16 +561,17 @@
 }
 
 .hermesian-permission {
-  background: var(--background-secondary);
-  border: 1px solid color-mix(in srgb, var(--hermesian-accent) 55%, var(--hermesian-border));
+  background: var(--hermesian-safety-bg);
+  border: 2px solid var(--hermesian-safety-border);
   border-radius: var(--hermesian-radius-md);
-  box-shadow: 0 4px 14px rgb(0 0 0 / 0.08);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.12);
   padding: 10px;
 }
 
 .hermesian-permission.is-resolved {
-  border-color: var(--background-modifier-border);
-  opacity: 0.72;
+  border: 1px solid var(--hermesian-border);
+  box-shadow: none;
+  opacity: 0.85;
 }
 
 .hermesian-permission-heading {
@@ -853,10 +923,12 @@
 }
 
 .hermesian-composer {
-  background: var(--background-secondary);
-  border: 1px solid var(--hermesian-border);
+  background: var(--hermesian-glass-bg);
+  backdrop-filter: var(--hermesian-glass-blur);
+  -webkit-backdrop-filter: var(--hermesian-glass-blur);
+  border: 1px solid var(--hermesian-glass-border);
   border-radius: var(--hermesian-radius-lg);
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.08);
+  box-shadow: 0 4px 20px rgb(0 0 0 / 0.07);
   margin: 8px 8px calc(8px + var(--status-bar-scroll-padding, 30px));
   padding: 8px 9px 7px;
   transition:
@@ -869,15 +941,16 @@
 }
 
 .hermesian-composer:focus-within {
-  border-color: color-mix(in srgb, var(--hermesian-accent) 55%, var(--hermesian-border));
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.08), 0 0 0 1px var(--hermesian-accent-soft);
+  border-color: color-mix(in srgb, var(--hermesian-accent) 50%, var(--hermesian-glass-border));
+  box-shadow: 0 4px 20px rgb(0 0 0 / 0.08), 0 0 0 1px var(--hermesian-accent-soft);
 }
 
 .hermesian-composer-contexts {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
+  margin-bottom: 2px;
   min-width: 0;
   overflow: hidden;
   width: 100%;
@@ -1431,6 +1504,23 @@
   }
 }
 
+@media (max-width: 300px) {
+  .hermesian-model-button {
+    flex: 0 0 30px;
+    max-width: 30px;
+    min-width: 30px;
+    padding: 4px 7px;
+  }
+
+  .hermesian-model-label {
+    display: none;
+  }
+
+  .hermesian-title {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hermesian-view *,
   .hermesian-view *::before,
@@ -1446,8 +1536,10 @@
 
 .hermesian-model-popover {
   align-items: stretch;
-  background: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
+  background: var(--hermesian-glass-bg);
+  backdrop-filter: var(--hermesian-glass-blur);
+  -webkit-backdrop-filter: var(--hermesian-glass-blur);
+  border: 1px solid var(--hermesian-glass-border);
   border-radius: var(--hermesian-radius-lg);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16), 0 12px 40px rgba(0, 0, 0, 0.14);
   display: flex;
@@ -1458,8 +1550,8 @@
   position: fixed;
   transform: translateY(4px);
   transition:
-    opacity 160ms ease-out,
-    transform 160ms ease-out;
+    opacity var(--hermesian-motion),
+    transform var(--hermesian-motion);
   z-index: 1000;
 }
 
@@ -1654,8 +1746,10 @@
 
 .hermesian-reasoning-popover {
   align-items: stretch;
-  background: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
+  background: var(--hermesian-glass-bg);
+  backdrop-filter: var(--hermesian-glass-blur);
+  -webkit-backdrop-filter: var(--hermesian-glass-blur);
+  border: 1px solid var(--hermesian-glass-border);
   border-radius: var(--hermesian-radius-lg);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16), 0 12px 40px rgba(0, 0, 0, 0.14);
   display: flex;
@@ -1666,8 +1760,8 @@
   position: fixed;
   transform: translateY(4px);
   transition:
-    opacity 160ms ease-out,
-    transform 160ms ease-out;
+    opacity var(--hermesian-motion),
+    transform var(--hermesian-motion);
   z-index: 1000;
 }
 

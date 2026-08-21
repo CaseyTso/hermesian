@@ -30,6 +30,12 @@ import type { PersistedConversationTab } from "../../src/conversation-tabs";
 (HTMLElement.prototype as any).empty = function () {
   this.innerHTML = "";
 };
+(HTMLElement.prototype as any).createDiv = function (options: any = {}) {
+  return (this as any).createEl("div", options);
+};
+(HTMLElement.prototype as any).createSpan = function (options: any = {}) {
+  return (this as any).createEl("span", options);
+};
 
 function makeTab(overrides: Partial<PersistedConversationTab> = {}): PersistedConversationTab {
   return {
@@ -88,9 +94,9 @@ describe("renderConversationTabsView", () => {
 
     const buttons = host.querySelectorAll("button");
     expect(buttons).toHaveLength(3);
-    expect(buttons[0].textContent).toBe("1");
-    expect(buttons[1].textContent).toBe("2");
-    expect(buttons[2].textContent).toBe("3");
+    expect(buttons[0].querySelector(".hermesian-tab-label")!.textContent).toBe("1");
+    expect(buttons[1].querySelector(".hermesian-tab-label")!.textContent).toBe("2");
+    expect(buttons[2].querySelector(".hermesian-tab-label")!.textContent).toBe("3");
   });
 
   it("marks the active tab with aria-selected true and is-active class", () => {
@@ -166,6 +172,28 @@ describe("renderConversationTabsView", () => {
 
     expect(event.defaultPrevented).toBe(true);
     expect(onClose).toHaveBeenCalledWith("tab-1");
+  });
+
+  it("calls onClose when the close (×) button is clicked without activating tab", () => {
+    const host = document.createElement("div");
+    const onActivate = vi.fn();
+    const onClose = vi.fn();
+    const state: ConversationTabsState = {
+      activeTabId: "tab-1",
+      isTabBusy: () => false,
+      isTabLoading: () => false,
+      tabNavigationDisabled: false,
+      tabs: [makeTab({ id: "tab-1" })],
+    };
+
+    renderConversationTabsView(host, state, defaults({ onActivate, onClose }));
+
+    const closeBtn = host.querySelector<HTMLElement>(".hermesian-tab-close")!;
+    expect(closeBtn).not.toBeNull();
+    closeBtn.click();
+
+    expect(onClose).toHaveBeenCalledWith("tab-1");
+    expect(onActivate).not.toHaveBeenCalled();
   });
 
   it("calls onActivate on click", () => {

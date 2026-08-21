@@ -276,16 +276,29 @@ describe("TurnManager", () => {
   });
 
   describe("appendThought", () => {
-    it("creates thought details element", () => {
+    it("creates thought details element with open=true", () => {
       const { turns } = setupTurn();
       turns.appendThought("tab-A", "thinking...");
-      const el = turns.ensure("tab-A").thoughtContentEl;
+      const rt = turns.ensure("tab-A");
+      const el = rt.thoughtContentEl;
       expect(el).not.toBeUndefined();
       expect(el!.tagName).toBe("PRE");
+      expect(rt.thoughtDetailsEl).not.toBeUndefined();
+      expect(rt.thoughtDetailsEl!.open).toBe(true);
     });
   });
 
   describe("complete", () => {
+    it("collapses open thinking details to an Activity Row on completion", async () => {
+      const { turns } = setupTurn();
+      turns.appendThought("tab-A", "thinking deep...");
+      const details = turns.ensure("tab-A").thoughtDetailsEl!;
+      expect(details.open).toBe(true);
+
+      await turns.complete("tab-A", async () => {});
+      expect(details.open).toBe(false);
+    });
+
     it("runs finalize callback and marks turn as done", async () => {
       const { turns, turnCallbacks } = setupTurn();
       const runtime = turns.ensure("tab-A");

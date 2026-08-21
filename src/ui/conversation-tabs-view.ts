@@ -36,15 +36,33 @@ export function renderConversationTabsView(
         "aria-selected": String(active),
         "data-conversation-tab-id": tab.id,
         role: "tab",
-        title: `Conversation ${tab.label}${activityTitle} · Right-click to close`,
+        title: `Conversation ${tab.label}${activityTitle} · Right-click or click × to close`,
         type: "button",
       },
       cls: `hermesian-conversation-tab${active ? " is-active" : ""}${working ? " is-working" : ""}${loading ? " is-loading" : ""}${deferred ? " is-deferred" : ""}`,
+    });
+    button.createSpan({
+      cls: "hermesian-tab-label",
       text: String(tab.label),
+    });
+    const closeBtn = button.createSpan({
+      attr: {
+        "aria-label": `Close conversation ${tab.label}`,
+        role: "button",
+        tabindex: "-1",
+        title: `Close conversation ${tab.label}`,
+      },
+      cls: "hermesian-tab-close",
+      text: "×",
     });
     button.disabled = state.tabNavigationDisabled;
     button.addEventListener("click", () => {
       callbacks.onActivate(tab.id);
+    });
+    closeBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      callbacks.onClose(tab.id);
     });
     button.addEventListener("contextmenu", (event) => {
       event.preventDefault();

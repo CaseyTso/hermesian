@@ -5,6 +5,7 @@ export interface SidebarShellElements {
   messagesEl: HTMLElement;
   root: HTMLElement;
   statusEl: HTMLElement;
+  topDockEl: HTMLElement;
 }
 
 export interface SidebarShellCallbacks {
@@ -21,8 +22,11 @@ export function createSidebarShell(
   root.empty();
   root.addClass("hermesian-view");
 
-  // --- Header ---
-  const header = root.createDiv({ cls: "hermesian-header" });
+  // --- Top Dock (Shared Theme-Adaptive Glass container) ---
+  const topDockEl = root.createDiv({ cls: "hermesian-top-dock" });
+
+  // --- Header Row in Top Dock ---
+  const header = topDockEl.createDiv({ cls: "hermesian-header" });
   const identity = header.createDiv({ cls: "hermesian-identity" });
   identity.createSpan({ cls: "hermesian-logo" });
   identity.createSpan({ text: "Hermesian", cls: "hermesian-title" });
@@ -38,15 +42,6 @@ export function createSidebarShell(
 
   const headerActions = header.createDiv({ cls: "hermesian-header-actions" });
 
-  const addConversationButtonEl = headerActions.createEl("button", {
-    attr: {
-      "aria-label": "Add conversation",
-      title: "Add conversation",
-      type: "button",
-    },
-    cls: "clickable-icon",
-  }) as HTMLButtonElement;
-
   const historyButtonEl = headerActions.createEl("button", {
     attr: {
       "aria-label": "View Hermes history",
@@ -56,8 +51,17 @@ export function createSidebarShell(
     cls: "clickable-icon",
   }) as HTMLButtonElement;
 
-  // --- Tabs ---
-  const conversationTabsEl = root.createDiv({
+  const addConversationButtonEl = headerActions.createEl("button", {
+    attr: {
+      "aria-label": "Add conversation",
+      title: "Add conversation",
+      type: "button",
+    },
+    cls: "clickable-icon",
+  }) as HTMLButtonElement;
+
+  // --- Tabs Row in Top Dock ---
+  const conversationTabsEl = topDockEl.createDiv({
     attr: { "aria-label": "Hermes conversations", role: "tablist" },
     cls: "hermesian-conversation-tabs",
   });
@@ -83,5 +87,6 @@ export function createSidebarShell(
     messagesEl,
     root,
     statusEl,
+    topDockEl,
   };
 }
