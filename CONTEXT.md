@@ -55,8 +55,8 @@ Hermesian's readable conversation and review content, including messages, agent 
 _Avoid_: Navigation chrome, control layer, glass controls
 
 **Theme-Adaptive Glass**:
-A restrained regular-glass Functional Layer surface whose color and contrast come from the active Obsidian theme and accessibility preferences rather than a fixed Apple palette.
-_Avoid_: Fixed Apple skin, glassmorphism, frosted content card
+A restrained regular-glass Functional Layer surface whose color and contrast come from the active Obsidian theme and accessibility preferences rather than a fixed Apple palette. Used only for *resident* Functional Layer containers that stay in normal layout flow and do not need line-by-line reading — currently the Top Dock and Composer. Transient choice surfaces that require high legibility (Picker Popovers) are opaque instead.
+_Avoid_: Fixed Apple skin, glassmorphism, frosted content card, transparent picker popover
 
 **Activity Row**:
 A compact, expandable Content Layer record of Thinking or Tool activity that opens during live work and collapses after completion while keeping its details accessible.
@@ -89,6 +89,10 @@ _Avoid_: Hidden control, overflow-only action, removed functionality
 **Host-Native Surface**:
 An Obsidian-owned modal or suggestion container whose outer appearance remains controlled by the host theme while Hermesian styles only its own content.
 _Avoid_: Custom glass popover, global modal override, themed host chrome
+
+**Picker Popover**:
+An opaque, high-contrast Functional Layer popover that lists selectable options and floats above conversation content. Unlike Theme-Adaptive Glass, it uses a solid background so list text never bleeds through against the content beneath it. Currently the model picker, thinking-depth picker, slash menu, and file picker menu.
+_Avoid_: Glass picker, frosted popover, transparent dropdown, blurred selector
 
 **Safety Surface**:
 An opaque, high-contrast Content Layer surface for pending permission requests and their diffs.

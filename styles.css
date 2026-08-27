@@ -1536,10 +1536,8 @@
 
 .hermesian-model-popover {
   align-items: stretch;
-  background: var(--hermesian-glass-bg);
-  backdrop-filter: var(--hermesian-glass-blur);
-  -webkit-backdrop-filter: var(--hermesian-glass-blur);
-  border: 1px solid var(--hermesian-glass-border);
+  background: var(--background-primary);
+  border: 1px solid var(--hermesian-border);
   border-radius: var(--hermesian-radius-lg);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16), 0 12px 40px rgba(0, 0, 0, 0.14);
   display: flex;
@@ -1746,10 +1744,8 @@
 
 .hermesian-reasoning-popover {
   align-items: stretch;
-  background: var(--hermesian-glass-bg);
-  backdrop-filter: var(--hermesian-glass-blur);
-  -webkit-backdrop-filter: var(--hermesian-glass-blur);
-  border: 1px solid var(--hermesian-glass-border);
+  background: var(--background-primary);
+  border: 1px solid var(--hermesian-border);
   border-radius: var(--hermesian-radius-lg);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16), 0 12px 40px rgba(0, 0, 0, 0.14);
   display: flex;
