@@ -76,7 +76,7 @@ describe("conversation runtime control availability", () => {
       composer: true,
       history: true,
       model: true,
-      reasoning: false,
+      reasoning: true,
       send: true,
       stop: false,
       tabNavigation: true,
@@ -99,14 +99,14 @@ describe("conversation runtime control availability", () => {
       composer: true,
       history: false,
       model: false,
-      reasoning: false,
+      reasoning: true,
       send: false,
       stop: true,
       tabNavigation: true,
     });
   });
 
-  it("allows drafting in a loading or deferred tab but not sending", () => {
+  it("allows drafting in a loading or deferred tab and accepting a pending send", () => {
     const availability = deriveConversationControlAvailability(
       runtimeState(
         new Map([
@@ -122,7 +122,7 @@ describe("conversation runtime control availability", () => {
       composer: true,
       history: false,
       model: false,
-      send: false,
+      send: true,
       stop: false,
     });
   });
@@ -143,7 +143,7 @@ describe("conversation runtime control availability", () => {
       composer: true,
       history: true,
       model: true,
-      reasoning: false,
+      reasoning: true,
       send: true,
       tabNavigation: true,
     });
@@ -160,14 +160,14 @@ describe("conversation runtime control availability", () => {
       history: false,
       model: false,
       send: false,
-      reasoning: false,
+      reasoning: true,
     });
     expect(deriveConversationControlAvailability(runtimeState(tabs), "tab-b")).toMatchObject({
       close: true,
       history: true,
       model: true,
       send: true,
-      reasoning: false,
+      reasoning: true,
     });
   });
 
@@ -236,7 +236,7 @@ describe("conversation runtime control availability", () => {
     expect(controls.active).toBe(controls.byTab.get("tab-b"));
     expect(controls.aggregate).toEqual({
       connectionSettings: false,
-      reasoning: false,
+      reasoning: true,
       tabNavigation: true,
     });
   });
@@ -277,7 +277,7 @@ describe("conversation runtime control availability", () => {
     });
     expect(controls.aggregate).toEqual({
       connectionSettings: false,
-      reasoning: false,
+      reasoning: true,
       tabNavigation: false,
     });
   });

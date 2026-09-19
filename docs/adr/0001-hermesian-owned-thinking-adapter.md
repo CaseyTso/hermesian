@@ -1,0 +1,5 @@
+# Keep thinking-depth adaptation inside Hermesian
+
+Hermes ACP currently acknowledges unknown configuration options without applying them to the model, while changing its global configuration would couple independent Conversation Tabs. Hermesian therefore bundles a small in-memory adapter around the native Hermes CLI/ACP entry: a versioned acknowledgment is required before each normal turn, with session-owned preferences and a turn-local override for native fallback resolution; installed Hermes files, profile paths, credentials and transcript ownership stay unchanged.
+
+Relocating `HERMES_HOME`, copying profiles, modifying the installed backend and silently accepting unknown ACP options were rejected because they risk fractured history, credential duplication or incorrect behavior. This deliberately trades an internal Hermes API compatibility dependency for local, non-disruptive control; keep real installed-source compatibility tests and fail explicitly if the adapter no longer applies. Replace the adapter with a verified native session-level option when upstream provides one.

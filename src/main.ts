@@ -1,3 +1,4 @@
+import { loadHermesLocalHistory } from "./hermes-local-history";
 import {
   addIcon,
   FileSystemAdapter,
@@ -11,6 +12,7 @@ import {
 import {
   automaticVaultEditApproval,
   HermesAcpClient,
+  resolveHermesExecutable,
   type PermissionRequest,
   type PermissionResponse,
 } from "./acp-client";
@@ -85,6 +87,7 @@ export default class HermesianPlugin extends Plugin {
         debugLogging: this.settings.debugLogging,
         settings: () => this.settings,
         vaultPath: this.getVaultPath(),
+        desiredReasoningEffort: () => this.getReasoningEffort(tabId),
       });
       const unsubscribe = client.onSessionState((state) => {
         if (isCurrent()) {
@@ -197,6 +200,9 @@ export default class HermesianPlugin extends Plugin {
 
   getConversationControllerDependencies(): ConversationControllerDependencies<HermesAcpClient> {
     return {
+      readLocalHistory: (sessionId) => loadHermesLocalHistory(
+        resolveHermesExecutable(this.settings.hermesExecutable), this.settings.profile, sessionId,
+      ),
       clients: {
         acquireClient: (tabId) => this.clients.getOrCreate(tabId),
         getClient: (tabId) => this.clients.peek(tabId),
@@ -204,6 +210,7 @@ export default class HermesianPlugin extends Plugin {
         releaseClient: (tabId) => this.clients.release(tabId),
       },
       createTabId: () => crypto.randomUUID(),
+      defaultReasoningEffort: () => this.settings.reasoningEffort,
       reportBackgroundError: (_operation, _error) => {
         if (this.settings.debugLogging) {
           console.debug("[hermesian]", { event: "controller.background.failure" });
@@ -397,7 +404,10 @@ export default class HermesianPlugin extends Plugin {
   }
 
   getConversationWorkspace(): PersistedConversationWorkspace | undefined {
-    return normalizeConversationWorkspace(this.conversationWorkspace);
+    return normalizeConversationWorkspace(
+      this.conversationWorkspace,
+      this.settings.reasoningEffort,
+    );
   }
 
   setConversationWorkspace(workspace: PersistedConversationWorkspace): void {
@@ -460,18 +470,23 @@ export default class HermesianPlugin extends Plugin {
     await this.disconnectAllClients();
   }
 
-  getReasoningEffort(): ReasoningEffort {
-    return this.settings.reasoningEffort;
+  getReasoningEffort(tabId?: string): ReasoningEffort {
+    if (tabId) {
+      const tab = this.conversationWorkspace?.tabs.find((t) => t.id === tabId);
+      return tab?.reasoningEffort ?? this.settings.reasoningEffort ?? "default";
+    }
+    const activeTab = this.conversationWorkspace?.tabs.find(
+      (t) => t.id === this.conversationWorkspace?.activeTabId,
+    );
+    return activeTab?.reasoningEffort ?? this.settings.reasoningEffort ?? "default";
   }
 
   async setReasoningEffort(tabId: string, effort: ReasoningEffort): Promise<void> {
-    if (!this.canApplyConnectionSettings()) {
-      throw new Error("Cannot change thinking depth while Hermes is responding");
+    if (!isReasoningEffort(effort)) {
+      throw new Error(`Invalid reasoning effort: ${String(effort)}`);
     }
-    await this.getClient(tabId).configureReasoningEffort(effort);
-    this.settings.reasoningEffort = effort;
-    await this.saveSettings();
-    await this.disconnectAllClients();
+    if (!this.sidebarView) throw new Error("Conversation view is not open");
+    await this.sidebarView.setConversationReasoningEffort(tabId, effort);
   }
 
   private async disconnectAllClients(): Promise<void> {
@@ -556,6 +571,7 @@ export default class HermesianPlugin extends Plugin {
     };
     this.conversationWorkspace = normalizeConversationWorkspace(
       saved.conversationWorkspace,
+      this.settings.reasoningEffort,
     );
     if (!isReasoningEffort(String(this.settings.reasoningEffort))) {
       this.settings.reasoningEffort = DEFAULT_SETTINGS.reasoningEffort;

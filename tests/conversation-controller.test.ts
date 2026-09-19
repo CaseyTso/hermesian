@@ -33,14 +33,15 @@ function deferred<T>(): {
 }
 
 function fakeClient(id: string): FakeClient {
-  return {
+  const client: FakeClient = {
     connect: vi.fn(async () => undefined),
     disconnect: vi.fn(async () => undefined),
     id,
-    loadSessionHistory: vi.fn(async () => []),
+    loadSessionHistory: vi.fn(async (sessionId: string) => { client.sessionId = sessionId; return []; }),
     newSession: vi.fn(async () => undefined),
     sessionId: `${id}-session`,
   };
+  return client;
 }
 
 function dependencies(
@@ -78,7 +79,7 @@ describe("ConversationController boundary", () => {
     const snapshot = controller.getSnapshot();
 
     expect(snapshot.workspace).toEqual(workspace);
-    expect(snapshot.initializing).toBe(true);
+    expect(snapshot.initializing).toBe(false);
     expect(snapshot.tabOperations.get("tab-a")).toMatchObject({
       connection: "unloaded",
       hasSession: true,
@@ -162,7 +163,7 @@ describe("ConversationController boundary", () => {
     });
     expect(snapshot.controls.aggregate).toMatchObject({
       connectionSettings: false,
-      reasoning: false,
+      reasoning: true,
       tabNavigation: true,
     });
   });
@@ -313,7 +314,7 @@ describe("ConversationController initialization", () => {
     expect(result.started).toBe(true);
   });
 
-  it("falls back to exactly one newSession when persisted load fails", async () => {
+  it("never falls back to a replacement session when persisted load fails", async () => {
     const order: string[] = [];
     const client = fakeClient("tab-a");
     client.connect = vi.fn(async () => {
@@ -330,12 +331,12 @@ describe("ConversationController initialization", () => {
     const controller = new ConversationController(
       dependencies(createConversationWorkspace("tab-a", "missing-session"), client),
     );
-    const result = await controller.initialize();
-    expect(order).toEqual(["load", "new"]);
+    await expect(controller.initialize()).rejects.toThrow("gone");
+    expect(order).toEqual(["load"]);
     expect(client.connect).not.toHaveBeenCalled();
-    expect(client.newSession).toHaveBeenCalledOnce();
-    expect(result.sessionId).toBe("replacement-only");
-    expect(result.replaced).toBe(true);
+    expect(client.newSession).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().workspace?.tabs[0]?.sessionId).toBe("missing-session");
+    expect(controller.getSnapshot().tabOperations.get("tab-a")?.connection).toBe("failed");
   });
 
   it("reverse: restoring connect-before-load would reintroduce a throwaway session", async () => {
@@ -360,7 +361,7 @@ describe("ConversationController initialization", () => {
     expect(order[0]).toBe("load");
   });
 
-  it("replaces a saved session only when the ACP load fails", async () => {
+  it("retains a saved session when the ACP load fails", async () => {
     const client = fakeClient("tab-a");
     client.loadSessionHistory = vi.fn(async () => {
       throw new Error("saved session unavailable");
@@ -373,17 +374,13 @@ describe("ConversationController initialization", () => {
       dependencies(workspace, client),
     );
 
-    const result = await controller.initialize();
-
+    await expect(controller.initialize()).rejects.toThrow("saved session unavailable");
     expect(client.loadSessionHistory).toHaveBeenCalledOnce();
-    expect(client.newSession).toHaveBeenCalledOnce();
-    expect(result.items).toBeUndefined();
-    expect(result.started).toBe(true);
-    expect(result.sessionId).toBe("replacement-session");
-    expect(result.workspace.tabs[0]?.sessionId).toBe("replacement-session");
+    expect(client.newSession).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().workspace).toEqual(workspace);
   });
 
-  it("does not spawn clients for inactive tabs during startup", async () => {
+  it("restores inactive tabs after the active tab is ready", async () => {
     const first = fakeClient("tab-a");
     first.loadSessionHistory = vi.fn(async (sessionId: string) => {
       first.sessionId = sessionId;
@@ -415,15 +412,15 @@ describe("ConversationController initialization", () => {
     await controller.initialize();
 
     expect(deps.clients.acquireClient).toHaveBeenCalledWith("tab-a");
-    expect(deps.clients.acquireClient).not.toHaveBeenCalledWith("tab-b");
+    expect(deps.clients.acquireClient).toHaveBeenCalledWith("tab-b");
     expect(second.connect).not.toHaveBeenCalled();
 
     const snapshot = controller.getSnapshot();
     expect(snapshot.tabOperations.get("tab-a")?.connection).toBe("ready");
-    expect(snapshot.tabOperations.get("tab-b")?.connection).toBe("unloaded");
+    expect(snapshot.tabOperations.get("tab-b")?.connection).toBe("loading");
   });
 
-  it("lazily hydrates an unloaded tab on first switch", async () => {
+  it("reuses background hydration on first switch", async () => {
     const historyA = [{ kind: "user" as const, text: "A-restored" }];
     const historyB = [{ kind: "user" as const, text: "B-restored" }];
 
@@ -459,17 +456,19 @@ describe("ConversationController initialization", () => {
 
     await controller.initialize();
 
-    // Only active tab A loaded during startup (no throwaway connect/new).
+    // Active tab A is ready and B restoration has started without throwaway sessions.
     expect(first.connect).not.toHaveBeenCalled();
     expect(first.loadSessionHistory).toHaveBeenCalledWith("session-a");
     expect(second.connect).not.toHaveBeenCalled();
-    expect(second.loadSessionHistory).not.toHaveBeenCalled();
+    expect(second.loadSessionHistory).toHaveBeenCalledOnce();
 
     // Switch to B — must hydrate lazily via load only.
     const result = await controller.switchConversation("tab-b");
     expect(second.connect).not.toHaveBeenCalled();
     expect(second.loadSessionHistory).toHaveBeenCalledWith("session-b");
-    expect(result.items).toEqual(historyB);
+    expect(result.items).toBeUndefined();
+    await controller.ensureConversationReady("tab-b");
+    expect(controller.getSnapshot().histories.get("tab-b")?.items).toEqual(historyB);
     expect(controller.getSnapshot().tabOperations.get("tab-b")?.connection).toBe("ready");
 
     // Switch back to A — no repeat load
@@ -479,7 +478,7 @@ describe("ConversationController initialization", () => {
     expect(controller.getSnapshot().tabOperations.get("tab-a")?.connection).toBe("ready");
   });
 
-  it("unloaded tab disallows send but permits close and tab navigation", async () => {
+  it("restoring tab permits pending send, close and tab navigation", async () => {
     const first = fakeClient("tab-a");
     const second = fakeClient("tab-b");
     const base = createConversationWorkspace("tab-a", "session-a");
@@ -503,12 +502,12 @@ describe("ConversationController initialization", () => {
     await controller.initialize();
 
     const controlsB = controller.getSnapshot().controls.byTab.get("tab-b")!;
-    expect(controlsB.send).toBe(false);
+    expect(controlsB.send).toBe(true);
     expect(controlsB.close).toBe(true);
     expect(controlsB.activate).toBe(true);
 
     const aggregate = controller.getSnapshot().controls.aggregate;
-    expect(aggregate.connectionSettings).toBe(true);
+    expect(aggregate.connectionSettings).toBe(false);
     expect(aggregate.tabNavigation).toBe(true);
   });
 
@@ -526,10 +525,10 @@ describe("ConversationController initialization", () => {
 
     await expect(initialization).rejects.toMatchObject({ code: "cancelled" });
     await shutdown;
-    expect(deps.workspace.setWorkspace).not.toHaveBeenCalled();
+    expect(deps.workspace.getWorkspace()?.tabs[0]?.sessionId).toBeNull();
   });
 
-  it("blocks session-mutating handlers while startup is pending", async () => {
+  it("allows navigation and drafting but guards restart while startup is pending", async () => {
     const connect = deferred<void>();
     const client = fakeClient("tab-a");
     client.connect = vi.fn(() => connect.promise);
@@ -540,14 +539,11 @@ describe("ConversationController initialization", () => {
     const initialization = controller.initialize();
     await Promise.resolve();
 
-    await expect(controller.addConversation()).rejects.toMatchObject({
-      code: "cancelled",
-    });
-    await expect(controller.switchConversation("tab-a")).rejects.toMatchObject({
-      code: "cancelled",
-    });
+    await expect(controller.switchConversation("tab-a")).resolves.toMatchObject({ tabId: "tab-a" });
+    expect(controller.getSnapshot().controls.active.composer).toBe(true);
+    expect(controller.getSnapshot().controls.active.add).toBe(true);
     await expect(controller.restartConversation("tab-a")).rejects.toMatchObject({
-      code: "cancelled",
+      code: "operation_stale",
     });
     connect.resolve();
     await initialization;
@@ -770,7 +766,7 @@ describe("ConversationController add", () => {
     // Keep runtime map entry so failure path can still mark failed if ownership survives.
     connect.resolve();
 
-    await expect(adding).rejects.toMatchObject({ code: "workspace_conflict" });
+    await expect(adding).rejects.toMatchObject({ code: "operation_stale" });
     expect(deps.workspace.getWorkspace()?.tabs.some((tab) => tab.id === "new-tab")).toBe(false);
   });
 
@@ -809,7 +805,7 @@ describe("ConversationController add", () => {
     });
     connect.resolve();
 
-    await expect(adding).rejects.toMatchObject({ code: "workspace_conflict" });
+    await expect(adding).rejects.toMatchObject({ code: "operation_stale" });
     expect(deps.workspace.getWorkspace()?.tabs.some((tab) => tab.id === "new-tab")).toBe(false);
   });
 });
@@ -863,8 +859,9 @@ describe("ConversationController switch", () => {
     expect(clients.get("base")!.loadSessionHistory).toHaveBeenCalledOnce();
   });
 
-  it("keeps the previous active tab when target preparation fails", async () => {
+  it("keeps the selected tab visible when target preparation fails", async () => {
     const { controller, deps, clients } = await readySwitchController(["tab-b"]);
+    await controller.ensureConversationReady("tab-b");
     controller["snapshot"] = {
       ...controller.getSnapshot(),
       tabOperations: new Map(controller.getSnapshot().tabOperations).set(
@@ -886,8 +883,9 @@ describe("ConversationController switch", () => {
       throw new Error("connection unavailable");
     });
 
-    await expect(controller.switchConversation("tab-b")).rejects.toThrow("connection unavailable");
-    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("base");
+    await expect(controller.switchConversation("tab-b")).resolves.toMatchObject({ tabId: "tab-b" });
+    await expect(controller.ensureConversationReady("tab-b")).rejects.toThrow("connection unavailable");
+    expect(deps.workspace.getWorkspace()?.activeTabId).toBe("tab-b");
     expect(controller.getSnapshot().tabOperations.get("tab-b")?.connection).toBe("failed");
   });
 
@@ -1722,6 +1720,7 @@ describe("ConversationController history and restart", () => {
     const deps = dependencies(workspace, clients.get("base")!, clients);
     const controller = new ConversationController(deps);
     await controller.initialize();
+  for (const tab of workspace.tabs) await controller.ensureConversationReady(tab.id);
     return { controller, deps };
   }
 
@@ -1828,7 +1827,7 @@ describe("ConversationController history and restart", () => {
       "history unavailable",
     );
     expect(deps.workspace.getWorkspace()?.tabs.find((tab) => tab.id === "tab-b")?.sessionId).toBe(
-      null,
+      "tab-b-session",
     );
   });
 
@@ -1837,7 +1836,7 @@ describe("ConversationController history and restart", () => {
     workspace = replaceConversationSession(workspace, "tab-b", "old-session");
     const target = fakeClient("tab-b");
     target.sessionId = "new-session";
-    target.newSession = vi.fn(async () => undefined);
+    target.newSession = vi.fn(async () => { target.sessionId = "new-session"; });
     const { controller, deps } = await readySessionController(
       workspace,
       new Map([
@@ -1968,7 +1967,7 @@ describe("ConversationController openHistorySession", () => {
     expect(result.workspace.tabs).toHaveLength(2);
   });
 
-  it("rolls back on failure and preserves the original workspace", async () => {
+  it("retains the failed historical tab and requested session for explicit retry", async () => {
     const workspace = createConversationWorkspace("tab-a", "session-a");
     const clients = new Map([["tab-a", fakeClient("tab-a")]]);
     const { controller, deps } = await readySessionController(workspace, clients);
@@ -1984,10 +1983,11 @@ describe("ConversationController openHistorySession", () => {
       "load failed",
     );
 
-    // Workspace must be restored to original
     const snapshot = controller.getSnapshot();
-    expect(snapshot.workspace?.tabs).toHaveLength(1);
-    expect(snapshot.workspace?.activeTabId).toBe("tab-a");
+    expect(snapshot.workspace?.tabs).toHaveLength(2);
+    const failed = snapshot.workspace?.tabs.find((tab) => tab.sessionId === "doomed-session");
+    expect(failed).toBeDefined();
+    expect(snapshot.tabOperations.get(failed!.id)?.connection).toBe("failed");
   });
 });
 
@@ -2029,7 +2029,7 @@ describe("ConversationController client and permission state", () => {
       clients: {
         acquireClient: vi.fn((tabId: string) => {
           capturedController?.updateClientState(tabId, factoryState);
-          return newClient;
+          return tabId === "base" ? fakeClient("base") : newClient;
         }),
         getClient: vi.fn(() => newClient),
         isCurrentClient: vi.fn(() => true),
@@ -2364,6 +2364,7 @@ describe("ConversationController ensureConversationReady", () => {
     injected.sessionId = undefined;
     injected.connect = vi.fn(async () => { injected.sessionId = "created-session"; });
     controller["dependencies"].clients.acquireClient = vi.fn(() => injected);
+    controller["dependencies"].clients.isCurrentClient = vi.fn((_id, client) => client === injected);
 
     const result = await controller.ensureConversationReady("main");
     expect(result.tabId).toBe("main");

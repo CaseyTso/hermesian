@@ -29,6 +29,7 @@ describe("conversation workspace", () => {
           id: "tab-a",
           includeCurrentDocumentContext: true,
           label: 1,
+          reasoningEffort: "default",
           sessionId: "session-a",
         },
       ],
@@ -76,6 +77,7 @@ describe("conversation workspace", () => {
       id: "tab-b",
       includeCurrentDocumentContext: false,
       label: 2,
+      reasoningEffort: "default",
       sessionId: "session-b",
     });
   });
@@ -270,7 +272,7 @@ describe("conversationControlAvailability", () => {
       composer: true,
       history: true,
       model: true,
-      reasoning: false,
+      reasoning: true,
       send: true,
       stop: false,
     });
@@ -361,6 +363,7 @@ describe("normalizeConversationWorkspace", () => {
           id: "tab-a",
           includeCurrentDocumentContext: false,
           label: 1,
+          reasoningEffort: "default",
           sessionId: "session-a",
         },
         {
@@ -368,6 +371,7 @@ describe("normalizeConversationWorkspace", () => {
           id: "tab-b",
           includeCurrentDocumentContext: true,
           label: 2,
+          reasoningEffort: "default",
           sessionId: "session-b",
         },
       ],

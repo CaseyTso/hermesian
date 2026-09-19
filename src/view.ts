@@ -1,3 +1,4 @@
+import { PendingSendStore } from "./pending-send";
 import type {
   ContentBlock,
   PermissionOption,
@@ -19,7 +20,7 @@ import {
   ConversationController,
   ConversationControllerError,
   type ConversationControllerSnapshot,
-  type ConversationInitializationResult,
+  type ConversationHistory,
 } from "./conversation-controller";
 import {
   isActiveConversationSession,
@@ -277,6 +278,16 @@ function electronWebUtilsResolver(file: File): string | null {
   }
 }
 
+interface PendingComposerSend {
+  tabId: string;
+  draft: ComposerInlineDraft;
+  images: PastedImageAttachment[];
+  selection?: SelectionContext;
+  includeCurrentDocumentContext: boolean;
+  documentContext?: MarkdownDocumentContext;
+  activeNotePath?: string;
+}
+
 export class HermesianSidebarView extends ItemView {
   private addConversationButtonEl!: HTMLButtonElement;
   private composerEl!: HTMLElement;
@@ -287,7 +298,13 @@ export class HermesianSidebarView extends ItemView {
   };
   private conversationTabsEl!: HTMLElement;
   private conversationWorkspace: PersistedConversationWorkspace | undefined;
+  private lastControllerWorkspace: PersistedConversationWorkspace | undefined;
   private controller: ConversationController<HermesAcpClient> | undefined;
+  private readonly pendingSends = new PendingSendStore<PendingComposerSend>();
+  private viewEpoch = 0;
+  private viewClosed = false;
+  private readonly displayedHistories = new Map<string, ConversationHistory>();
+  private readonly historyRendering = new Map<string, Promise<void>>();
   private controllerUnsubscribe: (() => void) | undefined;
   private contextProgressEl!: HTMLElement;
   private contextUsageEl!: HTMLElement;
@@ -377,12 +394,21 @@ export class HermesianSidebarView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.viewClosed = false;
+    this.viewEpoch += 1;
+    this.startupStatusClickBound = false;
     this.renderShell();
     this.updateControls(true, false);
     this.plugin.attachView(this);
     this.bindStartupStatusRetry();
     this.bindEscapeToStop();
     this.ensureConversationController();
+    this.restoreActiveConversationRuntime();
+    if (this.conversationWorkspace) {
+      this.showConversationMessages(this.conversationWorkspace.activeTabId);
+      void this.controller?.readWorkspaceHistory();
+    }
+    this.renderConversationTabs();
     this.ensureStopAndSendCoordinator();
     this.startup = new ViewStartupCoordinator({
       isLayoutReady: () => this.app.workspace.layoutReady,
@@ -393,15 +419,19 @@ export class HermesianSidebarView extends ItemView {
       onFailure: (error) => {
         this.handleStartupFailure(error);
       },
-      onStatus: (status, detail) => {
-        this.applyStartupStatus(status, detail);
-      },
+      onStatus: () => { this.renderReadinessStatus(); },
     });
     // Must return immediately so Obsidian layout restore is never blocked on ACP.
     this.startup.begin();
   }
 
   async onClose(): Promise<void> {
+    this.viewClosed = true;
+    this.pendingSends.clear();
+    this.viewEpoch += 1;
+    this.displayedHistories.clear();
+    this.historyRendering.clear();
+    this.loadedMessageTabIds.clear();
     this.composerDispose?.();
     this.composerDispose = undefined;
     this.modelPicker?.detach();
@@ -412,20 +442,28 @@ export class HermesianSidebarView extends ItemView {
     this.startup = undefined;
     this.teardownDictationRecording();
     this.captureActiveConversationRuntime();
-    await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
+    const controller = this.controller;
     for (const [permissionId, permission] of this.permissions) {
-      this.controller?.completePermission(permissionId);
+      controller?.completePermission(permissionId);
       permission.resolve({ outcome: { outcome: "cancelled" } });
     }
     this.permissions.clear();
     this.controllerUnsubscribe?.();
     this.controllerUnsubscribe = undefined;
-    await this.controller?.shutdown();
     this.controller = undefined;
-    await this.plugin.releaseView(this);
+    // Invalidate ownership and detach registry slots synchronously, before any
+    // persistence/disconnect await. A reopened view must get fresh clients.
+    const shutdown = controller?.shutdown();
+    const release = this.plugin.releaseView(this);
+    try {
+      await this.plugin.flushConversationWorkspace(this.conversationWorkspace);
+    } finally {
+      await Promise.allSettled([shutdown, release]);
+    }
   }
 
   setSelection(context: SelectionContext): void {
+    if (this.hasPendingSend()) return;
     this.pendingSelection = context;
     const activeTabId = this.conversationWorkspace?.activeTabId;
     if (activeTabId) {
@@ -665,6 +703,7 @@ export class HermesianSidebarView extends ItemView {
     const composerCallbacks: ComposerCallbacks = {
       getDraft: () => this.composerDraft,
       onDraftChange: (draft: ComposerInlineDraft) => {
+        if (this.hasPendingSend()) return;
         this.composerDraft = draft;
         if (this.composerHint) {
           this.composerHint = undefined;
@@ -693,6 +732,7 @@ export class HermesianSidebarView extends ItemView {
         this.pendingFilePickerCaret = getCaretOffset(this.composerEl);
       },
       onKeydown: (event: KeyboardEvent) => {
+        if (this.hasPendingSend()) return;
         if (this.handleSlashMenuKeydown(event)) {
           return;
         }
@@ -730,6 +770,7 @@ export class HermesianSidebarView extends ItemView {
         event.clipboardData?.setData("text/plain", payload);
       },
       onCut: (event: ClipboardEvent) => {
+        if (this.hasPendingSend()) { event.preventDefault(); return; }
         const result = applyInlineCut(
           this.composerEl,
           this.composerDraft,
@@ -811,7 +852,7 @@ export class HermesianSidebarView extends ItemView {
 
     // Wire event handlers
     this.currentFileBarEl.addEventListener("click", () => {
-      if (!this.currentFilePath) {
+      if (!this.currentFilePath || this.hasPendingSend()) {
         return;
       }
       this.includeCurrentDocumentContext = !this.includeCurrentDocumentContext;
@@ -859,34 +900,6 @@ export class HermesianSidebarView extends ItemView {
     });
   }
 
-  private async initializeConversationWorkspace(
-    result: ConversationInitializationResult,
-  ): Promise<void> {
-    this.conversationWorkspace = result.workspace;
-    this.showConversationMessages(result.tabId);
-    this.renderConversationTabs();
-
-    if (result.items) {
-      await this.renderHistorySession(
-        { cwd: "", sessionId: result.sessionId },
-        result.items,
-        false,
-      );
-    } else if (result.started) {
-      this.resetConversationView(result.tabId);
-      this.loadedMessageTabIds.add(result.tabId);
-      this.appendSystemMessage(
-        result.replaced
-          ? "The saved Hermes session could not be restored. A new session was started for this tab."
-          : "New Hermes conversation started.",
-        result.replaced,
-      );
-    }
-
-    this.restoreActiveConversationRuntime();
-    this.renderConversationTabs();
-  }
-
   private ensureConversationController(): void {
     if (this.controller) {
       return;
@@ -907,24 +920,20 @@ export class HermesianSidebarView extends ItemView {
     if (!this.controller) {
       throw new Error("Conversation controller is unavailable");
     }
-    const result = await this.controller.initialize();
-    if (this.startup?.isClosed()) {
-      return;
-    }
-    await this.initializeConversationWorkspace(result);
+    await this.controller.initialize();
   }
 
-  private handleStartupFailure(error: unknown): void {
-    if (this.startup?.isClosed()) {
-      return;
-    }
-    const message = this.messageFor(error);
-    new Notice(`Hermesian connection failed: ${message}`);
-    this.appendSystemMessage(
-      `Connection failed: ${message}. Click the status badge to retry.`,
-      true,
-    );
+  private handleStartupFailure(_error: unknown): void {
+    if (this.viewClosed) return;
+    this.renderReadinessStatus();
     this.updateControls(false);
+  }
+
+  private renderReadinessStatus(): void {
+    if (this.viewClosed) return;
+    const id = this.conversationWorkspace?.activeTabId;
+    const connection = id ? this.controller?.getSnapshot().tabOperations.get(id)?.connection : undefined;
+    this.applyStartupStatus(connection === "failed" ? "error" : connection === "ready" ? "ready" : "connecting");
   }
 
   private applyStartupStatus(
@@ -955,7 +964,7 @@ export class HermesianSidebarView extends ItemView {
     }
     if (status === "ready") {
       // Live ACP status events will refine this; keep a non-blocking default.
-      if (this.statusEl.dataset.status === "connecting") {
+      if (this.statusEl.dataset.status !== "connected") {
         this.statusEl.setText("Connected");
         this.statusEl.dataset.status = "connected";
         this.statusEl.setAttribute("aria-label", "Connected");
@@ -975,33 +984,36 @@ export class HermesianSidebarView extends ItemView {
     }
     this.startupStatusClickBound = true;
     this.statusEl.addEventListener("click", () => {
-      if (this.startup?.getPhase() !== "failed") {
-        return;
+      const tabId = this.conversationWorkspace?.activeTabId;
+      if (tabId && this.controller?.getSnapshot().tabOperations.get(tabId)?.connection === "failed") {
+        this.startConversationHydration(tabId);
       }
-      void this.prepareStartupRetry().then(() => {
-        if (!this.startup || this.startup.isClosed()) {
-          return;
-        }
-        this.applyStartupStatus("connecting");
-        this.startup.retry();
-      });
     });
-  }
-
-  private async prepareStartupRetry(): Promise<void> {
-    // controller.initialize() caches the first promise; rebuild after failure.
-    this.controllerUnsubscribe?.();
-    this.controllerUnsubscribe = undefined;
-    await this.controller?.shutdown();
-    this.controller = undefined;
-    this.ensureConversationController();
   }
 
   private handleControllerSnapshot(
     snapshot: ConversationControllerSnapshot,
   ): void {
-    if (snapshot.workspace) {
+    if (this.viewClosed) return;
+    // Status/history publications reuse the same workspace object. They must
+    // not roll back composer edits captured since the last structural commit.
+    if (snapshot.workspace && snapshot.workspace !== this.lastControllerWorkspace) {
+      this.lastControllerWorkspace = snapshot.workspace;
       this.conversationWorkspace = snapshot.workspace;
+    }
+    for (const [tabId, history] of snapshot.histories) {
+      if (this.displayedHistories.get(tabId) === history) continue;
+      this.displayedHistories.set(tabId, history);
+      const epoch = this.viewEpoch;
+      const current = () => !this.viewClosed && this.viewEpoch === epoch &&
+        this.displayedHistories.get(tabId) === history &&
+        this.conversationWorkspace?.tabs.some((tab) => tab.id === tabId && tab.sessionId === history.sessionId) === true;
+      const rendering = (this.historyRendering.get(tabId) ?? Promise.resolve()).then(async () => {
+        if (!current() || this.isTabBusy(tabId)) return;
+        await this.renderHistorySession({ cwd: "", sessionId: history.sessionId }, history.items, false, tabId, current);
+        if (current()) this.seedNoteContextFingerprint(tabId);
+      }).catch(() => { /* Local display failure must not block runtime readiness. */ });
+      this.historyRendering.set(tabId, rendering);
     }
     if (this.sendButtonEl) {
       this.updateControls(
@@ -1159,6 +1171,8 @@ export class HermesianSidebarView extends ItemView {
 
   private forgetConversationMessages(tabId: string): void {
     this.loadedMessageTabIds.delete(tabId);
+    this.displayedHistories.delete(tabId);
+    this.historyRendering.delete(tabId);
     this.messageRenderer.forget(tabId);
   }
 
@@ -1243,6 +1257,7 @@ export class HermesianSidebarView extends ItemView {
       activeTabId: workspace.activeTabId,
       isTabBusy: (tabId) => this.isTabBusy(tabId),
       isTabLoading: (tabId) => this.isTabLoading(tabId),
+      isTabFailed: (tabId) => this.controller?.getSnapshot().tabOperations.get(tabId)?.connection === "failed",
       tabNavigationDisabled: !this.controlAvailability().tabNavigation,
       tabs: workspace.tabs,
     }, callbacks);
@@ -1285,8 +1300,6 @@ export class HermesianSidebarView extends ItemView {
       this.noteContextFingerprints.delete(result.tabId);
       if (result.workspace.activeTabId === result.tabId) {
         this.showConversationMessages(result.tabId);
-        this.resetConversationView(result.tabId);
-        this.restoreActiveConversationRuntime();
       }
       this.renderConversationTabs();
       this.appendSystemMessage(
@@ -1294,8 +1307,8 @@ export class HermesianSidebarView extends ItemView {
         false,
         result.tabId,
       );
-    } catch (error) {
-      new Notice(`Hermesian could not add a conversation: ${this.messageFor(error)}`);
+    } catch (_error) {
+      this.renderReadinessStatus();
     }
   }
 
@@ -1319,6 +1332,7 @@ export class HermesianSidebarView extends ItemView {
     try {
       const result = await this.controller.closeConversation(tabId);
       this.conversationWorkspace = result.workspace;
+      this.pendingSends.cancel(tabId);
       this.tabSelections.delete(tabId);
       this.pendingImages.delete(tabId);
       this.noteContextFingerprints.delete(tabId);
@@ -1358,57 +1372,11 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private startConversationHydration(tabId: string): void {
-    if (!this.controller) {
-      return;
-    }
-    const ownerId = tabId;
-    this.controller
-      .ensureConversationReady(ownerId)
-      .then((result) => {
-        const snapshot = this.controller?.getSnapshot();
-        if (!snapshot || !snapshot.workspace?.tabs.some((t) => t.id === ownerId)) {
-          return; // owner was removed
-        }
-        if (result.items && result.sessionId && !result.started) {
-          void this.renderHistorySession(
-            { cwd: "", sessionId: result.sessionId },
-            result.items,
-            false,
-            ownerId,
-          );
-          this.loadedMessageTabIds.add(ownerId);
-          this.seedNoteContextFingerprint(ownerId);
-        } else if (result.started) {
-          this.resetConversationView(ownerId);
-          this.loadedMessageTabIds.add(ownerId);
-          this.noteContextFingerprints.delete(ownerId);
-          this.appendSystemMessage(
-            "New Hermes conversation started.",
-            false,
-            ownerId,
-          );
-        }
-        const activeNow = snapshot.workspace?.activeTabId;
-        if (activeNow === ownerId) {
-          this.showConversationMessages(ownerId);
-        }
-        this.restoreActiveConversationRuntime();
-        this.renderConversationTabs();
-      })
-      .catch((_error) => {
-        const snapshot = this.controller?.getSnapshot();
-        if (
-          snapshot &&
-          snapshot.workspace?.tabs.some((t) => t.id === ownerId) &&
-          snapshot.tabOperations.get(ownerId)?.connection === "failed"
-        ) {
-          this.appendSystemMessage(
-            `Unable to load this conversation. Select the tab to retry.`,
-            false,
-            ownerId,
-          );
-        }
-      });
+    const controller = this.controller;
+    if (!controller) return;
+    void controller.ensureConversationReady(tabId).catch(() => {
+      if (!this.viewClosed && this.controller === controller) this.renderReadinessStatus();
+    });
   }
 
   private async switchConversation(tabId: string): Promise<void> {
@@ -1457,7 +1425,7 @@ export class HermesianSidebarView extends ItemView {
       this.showConversationMessages(result.tabId);
       this.restoreActiveConversationRuntime();
       this.renderSessionState(
-        this.controller?.getSnapshot().sessionStates.get(result.tabId) ?? this.plugin.getClient(result.tabId).currentSessionState,
+        this.controller?.getSnapshot().sessionStates.get(result.tabId) ?? this.activeSessionState(),
       );
       this.renderConversationTabs();
     } catch (error) {
@@ -1542,61 +1510,41 @@ export class HermesianSidebarView extends ItemView {
     }
   }
 
-  private async chooseHistorySession(
-    session: HermesHistoryEntry,
-  ): Promise<void> {
-    const workspace = this.conversationWorkspace;
-    if (
-      !this.controller ||
-      !workspace
-    ) {
-      return;
-    }
+  private async chooseHistorySession(session: HermesHistoryEntry): Promise<void> {
+    const controller = this.controller;
+    if (!controller || !this.conversationWorkspace) return;
     this.captureActiveConversationRuntime();
-    this.updateControls(false);
+    const previousActive = this.conversationWorkspace.activeTabId;
+    const epoch = this.viewEpoch;
+    const opening = controller.openHistorySession(session.sessionId);
+    const pendingActive = this.conversationWorkspace.activeTabId;
+    if (pendingActive !== previousActive) {
+      this.showConversationMessages(pendingActive);
+      this.restoreActiveConversationRuntime();
+    }
     try {
-      const result = await this.controller.openHistorySession(session.sessionId);
-      this.conversationWorkspace = result.workspace;
-
-      if (result.reused) {
+      const result = await opening;
+      if (this.viewClosed || epoch !== this.viewEpoch || this.controller !== controller) return;
+      // History snapshots own rendering; never replay/reset it a second time.
+      if (this.conversationWorkspace?.activeTabId === result.tabId && pendingActive !== result.tabId) {
         this.showConversationMessages(result.tabId);
         this.restoreActiveConversationRuntime();
-        this.renderConversationTabs();
-        this.seedNoteContextFingerprint(result.tabId);
-        const owner = result.workspace.tabs.find((tab) => tab.id === result.tabId);
-        new Notice(
-          `That Hermes session is already open in conversation ${owner?.label ?? result.tabId}.`,
-        );
-        return;
       }
-
-      this.loadedMessageTabIds.add(result.tabId);
-      if (result.items) {
-        await this.renderHistorySession(session, result.items, true, result.tabId);
-      }
-      this.editScopes.set(result.tabId, undefined);
-      this.seedNoteContextFingerprint(result.tabId);
-      this.showConversationMessages(result.tabId);
-      this.restoreActiveConversationRuntime();
-      this.renderConversationTabs();
-    } catch (error) {
-      if (error instanceof ConversationControllerError && error.code === "session_reserved") {
-        new Notice("That Hermes session is already opening in another conversation.");
-        return;
-      }
-      new Notice(`Hermesian could not load that session: ${this.messageFor(error)}`);
+    } catch (_error) {
+      // Preserve the requested session, draft and readable history for local retry.
     } finally {
-      this.updateControls(false);
+      if (!this.viewClosed && epoch === this.viewEpoch) this.updateControls(false);
     }
   }
 
   private async renderHistorySession(
     session: HermesHistoryEntry,
-    items: HermesHistoryItem[],
+    items: readonly HermesHistoryItem[],
     announce = true,
     tabId = this.conversationWorkspace?.activeTabId,
+    isCurrent: () => boolean = () => !this.viewClosed,
   ): Promise<void> {
-    if (!tabId) {
+    if (!tabId || !isCurrent()) {
       return;
     }
     this.resetConversationView(tabId);
@@ -1617,14 +1565,18 @@ export class HermesianSidebarView extends ItemView {
       turnItems = [];
     };
     for (const item of items) {
+      if (!isCurrent()) return;
       if (item.kind === "user") {
         await flushTurn();
+        if (!isCurrent()) return;
         this.appendUserMessage(item.text, undefined, undefined, tabId);
       } else {
         turnItems.push(item);
       }
     }
+    if (!isCurrent()) return;
     await flushTurn();
+    if (!isCurrent()) return;
     if (items.length === 0) {
       this.appendSystemMessage("This session has no displayable messages.", false, tabId);
     }
@@ -1680,11 +1632,13 @@ export class HermesianSidebarView extends ItemView {
     }
     this.modelPicker?.detach();
     const targetTabId = activeTab.id;
+    const currentEffort =
+      activeTab.reasoningEffort ?? this.plugin.getReasoningEffort(targetTabId);
     let settled = false;
 
     this.reasoningPicker = new HermesReasoningPickerPopover({
       anchorEl: this.reasoningButtonEl,
-      current: this.plugin.getReasoningEffort(),
+      current: currentEffort,
       iconRenderer: (element, icon) => setIcon(element, icon),
       onChoose: (effort) => {
         if (settled) {
@@ -1700,39 +1654,40 @@ export class HermesianSidebarView extends ItemView {
     this.reasoningPicker.open();
   }
 
+  async setConversationReasoningEffort(tabId: string, effort: ReasoningEffort): Promise<void> {
+    if (!this.controller || this.viewClosed) throw new Error("Conversation view is not ready");
+    await this.controller.setReasoningEffort(tabId, effort);
+  }
+
   private async chooseReasoningEffort(
     tabId: string,
     effort: ReasoningEffort,
   ): Promise<void> {
-    if (effort === this.plugin.getReasoningEffort()) {
+    const tab = this.conversationWorkspace?.tabs.find((t) => t.id === tabId);
+    if (tab && tab.reasoningEffort === effort) {
       return;
     }
-    if (!this.plugin.canApplyConnectionSettings()) {
-      return;
-    }
-    this.captureActiveConversationRuntime();
-    this.updateControls(true, false);
     try {
       await this.plugin.setReasoningEffort(tabId, effort);
-      await this.ensureClientForTab(tabId);
       this.renderReasoningButton();
-      this.appendSystemMessage(
-        `Thinking depth set to ${reasoningEffortLabel(effort)}. The current Hermes session was restored.`,
-        false,
-        tabId,
-      );
     } catch (error) {
       new Notice(`Hermesian thinking-depth update failed: ${this.messageFor(error)}`);
-    } finally {
-      this.updateControls(false);
     }
   }
 
   private renderReasoningButton(): void {
-    const effort = this.plugin.getReasoningEffort();
-    const label = `Thinking: ${reasoningEffortLabel(effort)}`;
+    const activeTab = this.activeConversationTab();
+    const effort =
+      activeTab?.reasoningEffort ??
+      this.plugin.getReasoningEffort(activeTab?.id);
+    const client = activeTab ? this.plugin.peekClient(activeTab.id) : undefined;
+    const applied = client?.appliedReasoningEffort;
+    const nextTurn = Boolean(activeTab && this.isTabBusy(activeTab.id) && applied !== undefined && applied !== effort);
+    const label = `Thinking: ${reasoningEffortLabel(effort)}${nextTurn ? " (next turn)" : ""}`;
     this.reasoningLabelEl.setText(label);
-    this.reasoningButtonEl.setAttribute("title", label);
+    const description = nextTurn ? `Active: ${reasoningEffortLabel(applied!)} · Next turn: ${reasoningEffortLabel(effort)}` : label;
+    this.reasoningButtonEl.setAttribute("title", description);
+    this.reasoningButtonEl.setAttribute("aria-label", description);
   }
 
   private renderAddConversationControl(): void {
@@ -1745,6 +1700,7 @@ export class HermesianSidebarView extends ItemView {
     this.renderAddConversationControl();
     this.historyButtonEl.disabled = !availability.history;
     this.reasoningButtonEl.disabled = !availability.reasoning;
+    this.renderReasoningButton();
     this.renderConversationTabs();
     const current = state.currentModel;
     const label = state.switchingModel
@@ -1955,6 +1911,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private async handleComposerPaste(event: ClipboardEvent): Promise<void> {
+    if (this.hasPendingSend()) { event.preventDefault(); return; }
     const clipboardItems = Array.from(event.clipboardData?.items ?? []);
     const imageItems = clipboardItems.filter(isImageClipboardItem);
     if (imageItems.length === 0) {
@@ -2008,10 +1965,13 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
 
+    // A paste begun before Send must not race an immutable waiting intent.
+    this.pendingSends.cancel(tabId);
     const current = this.pendingImages.get(tabId) ?? [];
     this.pendingImages.set(tabId, [...current, ...attachments].slice(0, 4));
     if (this.conversationWorkspace?.activeTabId === tabId) {
       this.renderImageAttachmentBar();
+      this.updateControls(false);
     }
   }
 
@@ -2049,7 +2009,7 @@ export class HermesianSidebarView extends ItemView {
       });
       setIcon(remove, "x");
       remove.addEventListener("click", () => {
-        if (!tabId) {
+        if (!tabId || this.pendingSends.has(tabId)) {
           return;
         }
         const remaining = (this.pendingImages.get(tabId) ?? []).filter(
@@ -2084,15 +2044,69 @@ export class HermesianSidebarView extends ItemView {
     });
     setIcon(remove, "x");
     remove.addEventListener("click", () => {
+      if (this.hasPendingSend()) return;
       this.pendingSelection = undefined;
       this.renderSelectionBar();
       this.captureActiveConversationRuntime();
     });
   }
 
+  private hasPendingSend(): boolean {
+    return this.pendingSends.has(this.conversationWorkspace?.activeTabId ?? "");
+  }
+
+  private async waitToSend(tabId: string): Promise<void> {
+    if (this.dictationPhase !== "idle") {
+      this.composerHint = "Finish dictation before sending.";
+      this.updateControls(false);
+      return;
+    }
+    const controller = this.controller;
+    if (!controller || this.pendingSends.has(tabId)) return;
+    const routing = composerInlineDraftRouting(this.composerDraft);
+    const images = routing.hasSlashInvocation ? [] : [...(this.pendingImages.get(tabId) ?? [])];
+    if (!this.getComposerCanonicalDraft().trim() && !this.pendingSelection && !images.length) return;
+    const selection = routing.isNativeSlashCommand ? undefined : this.pendingSelection;
+    const include = !routing.isNativeSlashCommand && !selection && this.includeCurrentDocumentContext;
+    const documentContext = include ? this.plugin.getCurrentDocumentContext() : undefined;
+    const payload: PendingComposerSend = {
+      tabId, draft: structuredClone(this.composerDraft), images, selection,
+      includeCurrentDocumentContext: this.includeCurrentDocumentContext,
+      documentContext,
+      activeNotePath: include && !documentContext ? this.plugin.getCurrentMarkdownFilePath() : undefined,
+    };
+    const entry = this.pendingSends.add(tabId, payload);
+    if (!entry) return;
+    const epoch = this.viewEpoch;
+    this.captureActiveConversationRuntime();
+    this.updateControls(false);
+    try {
+      await controller.ensureConversationReady(tabId);
+      await this.historyRendering.get(tabId);
+      if (this.viewClosed || this.viewEpoch !== epoch || this.controller !== controller) return;
+      const pending = this.pendingSends.take(tabId, entry);
+      if (!pending) return;
+      // Readiness never authorizes bypassing a permission or a turn that won the race.
+      if (!this.tabControlAvailability(tabId).send || this.isTabBusy(tabId) || this.hasPendingPermission(tabId)) {
+        if (this.conversationWorkspace?.activeTabId === tabId) {
+          this.composerHint = "Message not sent. Review this conversation and send again.";
+        }
+        return;
+      }
+      await this.sendMessage({ pending });
+    } catch (_error) {
+      if (this.pendingSends.take(tabId, entry) && this.conversationWorkspace?.activeTabId === tabId) {
+        this.composerHint = "Connection failed. Message retained; retry connection, then send again.";
+      }
+    } finally {
+      if (!this.viewClosed && this.viewEpoch === epoch) this.updateControls(false);
+    }
+  }
+
   private async sendMessage(
     options: {
       fromStopAndSend?: boolean;
+      pending?: PendingComposerSend;
       /** Restore this composer text right after outbound dispatch, before the turn awaits. */
       restoreComposerAfterDispatch?: string;
       /**
@@ -2102,7 +2116,24 @@ export class HermesianSidebarView extends ItemView {
       onStopAndSendDispatched?: () => void;
     } = {},
   ): Promise<void> {
-    const activeTab = this.activeConversationTab();
+    const pending = options.pending;
+    const activeTab = pending
+      ? this.conversationWorkspace?.tabs.find((tab) => tab.id === pending.tabId)
+      : this.activeConversationTab();
+    if (!pending && !options.fromStopAndSend && activeTab &&
+        this.controller?.getSnapshot().tabOperations.get(activeTab.id)?.connection !== "ready") {
+      if (this.controlAvailability().send) await this.waitToSend(activeTab.id);
+      return;
+    }
+    // Finish any history projection before creating a live turn; otherwise a
+    // delayed Markdown render could interleave restored rows with the new turn.
+    const historyRendering = activeTab ? this.historyRendering.get(activeTab.id) : undefined;
+    if (historyRendering && !pending) await historyRendering;
+    if (this.viewClosed) return;
+    const visible = () => this.conversationWorkspace?.activeTabId === activeTab?.id;
+    const draft = pending?.draft ?? this.composerDraft;
+    const pendingSelection = pending ? pending.selection : this.pendingSelection;
+    const includeCurrentDocumentContext = pending?.includeCurrentDocumentContext ?? this.includeCurrentDocumentContext;
     if (options.fromStopAndSend) {
       // Stop-and-send must never silent-return: coordinator would mark success
       // and drop the snapshot. Throw so send-failed restores + surfaces error.
@@ -2118,7 +2149,7 @@ export class HermesianSidebarView extends ItemView {
     } else if (
       !activeTab ||
       this.isStopping() ||
-      !this.controlAvailability().send ||
+      !(pending ? this.tabControlAvailability(activeTab.id).send : this.controlAvailability().send) ||
       this.isTabBusy(activeTab.id) ||
       this.isTabLoading(activeTab.id) ||
       this.hasPendingPermission(activeTab.id)
@@ -2137,22 +2168,27 @@ export class HermesianSidebarView extends ItemView {
     }
     const client = this.plugin.getClient(activeTab.id);
     if (client.sessionId !== activeTab.sessionId) {
+      if (!pending && !options.fromStopAndSend) {
+        await this.waitToSend(activeTab.id);
+        return;
+      }
       try {
         await this.ensureClientForTab(activeTab.id);
       } catch (error) {
         if (options.fromStopAndSend) {
           throw error instanceof Error ? error : new Error(this.messageFor(error));
         }
-        new Notice(`Hermesian could not prepare this conversation: ${this.messageFor(error)}`);
+        this.composerHint = "Connection failed. Message retained; retry connection, then send again.";
+        this.renderReadinessStatus();
         return;
       }
     }
     if (
-      !isActiveConversationSession(
+      (!pending && !isActiveConversationSession(
         this.conversationWorkspace,
         activeTab.id,
         activeTab.sessionId,
-      ) ||
+      )) ||
       client.sessionId !== activeTab.sessionId
     ) {
       if (options.fromStopAndSend) {
@@ -2160,16 +2196,16 @@ export class HermesianSidebarView extends ItemView {
       }
       return;
     }
-    const rawRequest = this.getComposerCanonicalDraft().trim();
+    const rawRequest = serializeComposerInlineDraft(draft).trim();
     // Two separate states: any slash invocation (menu token or free-typed
     // slash text) keeps the image/slash exclusivity, while a menu-selected
     // skill still routes like an ordinary model request (selection/document/
     // off context handling below). Native control commands stay bare.
     const { hasSlashInvocation, isSkill, isNativeSlashCommand } =
-      composerInlineDraftRouting(this.composerDraft);
+      composerInlineDraftRouting(draft);
     const pendingImages = hasSlashInvocation
       ? []
-      : this.pendingImages.get(activeTab.id) ?? [];
+      : pending?.images ?? this.pendingImages.get(activeTab.id) ?? [];
     if (pendingImages.length > 0 && !client.supportsImagePrompts) {
       if (options.fromStopAndSend) {
         throw new Error("The connected Hermes agent does not support image prompts.");
@@ -2179,7 +2215,7 @@ export class HermesianSidebarView extends ItemView {
     }
     const request =
       rawRequest ||
-      (this.pendingSelection
+      (pendingSelection
         ? "Rewrite the selected text for clarity, precision, and tone while preserving its original meaning."
         : pendingImages.length > 0
           ? "Please analyze the pasted image and respond to my request."
@@ -2191,21 +2227,21 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
 
-    const selection = isNativeSlashCommand ? undefined : this.pendingSelection;
+    const selection = isNativeSlashCommand ? undefined : pendingSelection;
     // The current note's identity (path/title/body) is only ever read when the
     // context capsule is on; with the capsule off, this send path cannot obtain
     // the current note's path at all, so it cannot leak it to Hermes.
     const includeFullContext =
-      !isNativeSlashCommand && !selection && this.includeCurrentDocumentContext;
+      !isNativeSlashCommand && !selection && includeCurrentDocumentContext;
     let documentContext: MarkdownDocumentContext | undefined;
     let activeNotePath: string | undefined;
     if (includeFullContext) {
-      documentContext = this.plugin.getCurrentDocumentContext();
+      documentContext = pending ? pending.documentContext : this.plugin.getCurrentDocumentContext();
       if (documentContext) {
-        this.setCurrentFile(documentContext.filePath);
+        if (visible()) this.setCurrentFile(documentContext.filePath);
       } else {
-        activeNotePath = this.plugin.getCurrentMarkdownFilePath();
-        this.setCurrentFile(activeNotePath);
+        activeNotePath = pending ? pending.activeNotePath : this.plugin.getCurrentMarkdownFilePath();
+        if (visible()) this.setCurrentFile(activeNotePath);
       }
     }
     const notePath =
@@ -2224,7 +2260,7 @@ export class HermesianSidebarView extends ItemView {
       request,
       isSlashCommand: isNativeSlashCommand,
       isSkill,
-      includeCurrentDocumentContext: this.includeCurrentDocumentContext,
+      includeCurrentDocumentContext,
       selection,
       documentContext,
       activeNotePath,
@@ -2248,17 +2284,25 @@ export class HermesianSidebarView extends ItemView {
         ? `${notePath} · note changed (not re-sent)`
         : undefined,
     );
-    this.setComposerSlashToken(null);
-    this.composerDraft = { token: null, text: "", references: [] };
-    this.renderComposerInlineDraft();
-    this.hideSlashMenu();
-    if (!isNativeSlashCommand) {
-      this.pendingSelection = undefined;
+    if (visible()) {
+      this.setComposerSlashToken(null);
+      this.composerDraft = { token: null, text: "", references: [] };
+      this.renderComposerInlineDraft();
+      this.hideSlashMenu();
+      if (!isNativeSlashCommand) this.pendingSelection = undefined;
       this.renderSelectionBar();
     }
+    if (!isNativeSlashCommand) this.tabSelections.delete(activeTab.id);
     this.pendingImages.delete(activeTab.id);
-    this.renderImageAttachmentBar();
-    this.captureActiveConversationRuntime();
+    if (visible()) {
+      this.renderImageAttachmentBar();
+      this.captureActiveConversationRuntime();
+    } else if (this.conversationWorkspace) {
+      this.conversationWorkspace = updateConversationTab(this.conversationWorkspace, activeTab.id, {
+        draft: "", token: undefined, references: [], includeCurrentDocumentContext,
+      });
+      this.plugin.setConversationWorkspace(this.conversationWorkspace);
+    }
     this.resetStreamingMessage(activeTab.id);
     runtime.busy = true;
     this.controller?.setPromptRunning(activeTab.id, true);
@@ -2284,7 +2328,9 @@ export class HermesianSidebarView extends ItemView {
       const promptContent: string | ContentBlock[] = pendingImages.length
         ? buildImagePrompt(outboundPrompt, pendingImages)
         : outboundPrompt;
-      await client.sendPrompt(promptContent);
+      await client.sendPrompt(promptContent, {
+        reasoningEffort: activeTab?.reasoningEffort,
+      });
       // Fingerprints update only after a successful send: a native
       // /new|/reset|/compress resets the tab's dedupe state, otherwise the
       // sent note path+hash is recorded (full/changed) or left untouched
@@ -2303,6 +2349,20 @@ export class HermesianSidebarView extends ItemView {
       }
     } catch (error) {
       new Notice(`Hermesian: ${this.messageFor(error)}`);
+      const notDispatched = error instanceof Error && "promptNotDispatched" in error && error.promptNotDispatched === true;
+      if ((pending || notDispatched) && this.conversationWorkspace?.tabs.some((tab) => tab.id === activeTab.id)) {
+        // Keep failed connection/preflight content recoverable without automatically resending.
+        const current = this.conversationWorkspace.tabs.find((tab) => tab.id === activeTab.id)!;
+        if (!current.draft) {
+          this.conversationWorkspace = updateConversationTab(this.conversationWorkspace, activeTab.id, {
+            draft: serializeComposerInlineDraft(draft), token: draft.token ?? undefined,
+            references: draft.references, includeCurrentDocumentContext,
+          });
+          this.plugin.setConversationWorkspace(this.conversationWorkspace);
+          this.tabSelections.set(activeTab.id, pendingSelection);
+          if (visible()) this.restoreActiveConversationRuntime();
+        }
+      }
       if (pendingImages.length > 0) {
         this.pendingImages.set(activeTab.id, pendingImages);
         if (this.conversationWorkspace?.activeTabId === activeTab.id) {
@@ -2328,6 +2388,8 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private async handleComposerSubmit(): Promise<void> {
+    const tabId = this.conversationWorkspace?.activeTabId;
+    if (tabId && this.pendingSends.has(tabId)) return;
     if (this.isStopping()) {
       return;
     }
@@ -2403,6 +2465,11 @@ export class HermesianSidebarView extends ItemView {
   private async handleComposerStop(): Promise<void> {
     const activeTab = this.activeConversationTab();
     if (!activeTab) {
+      return;
+    }
+    if (this.pendingSends.has(activeTab.id)) {
+      this.pendingSends.cancel(activeTab.id);
+      this.updateControls(false);
       return;
     }
     const availability = this.controlAvailability();
@@ -2508,7 +2575,7 @@ export class HermesianSidebarView extends ItemView {
       const availability = this.controlAvailability();
       if (
         !shouldStopOnEscape({
-          stopAvailable: availability.stop === true,
+          stopAvailable: this.hasPendingSend() || availability.stop === true,
           stopping: this.isStopping(),
           focusOwnsEscape: focusOwnsEscape(event.target),
         })
@@ -2729,7 +2796,7 @@ export class HermesianSidebarView extends ItemView {
     folderMode: boolean,
   ): void {
     // Availability guard FIRST — a disabled composer must never insert.
-    if (!this.controlAvailability().composer) {
+    if (!this.controlAvailability().composer || this.hasPendingSend()) {
       input.value = "";
       return;
     }
@@ -2781,10 +2848,11 @@ export class HermesianSidebarView extends ItemView {
     if (!availability.composer) {
       this.hideSlashMenu();
     }
+    const waiting = this.pendingSends.has(this.conversationWorkspace?.activeTabId ?? "");
     const stopping = this.isStopping();
     const primaryMode = composerPrimaryMode({
       stopping,
-      stopAvailable: availability.stop === true,
+      stopAvailable: waiting || availability.stop === true,
       steerAvailable: availability.steer === true && !this.steerInFlight,
     });
     applyComposerState(
@@ -2800,24 +2868,30 @@ export class HermesianSidebarView extends ItemView {
         hintEl: this.composerHintEl,
       },
       {
-        disabled: !availability.composer,
+        disabled: !availability.composer || waiting,
         draft: this.composerDraft,
         placeholder: this.composerPlaceholder(),
         sendEnabled: availability.send && !stopping,
         stopVisible: primaryMode !== "send",
         primaryMode,
-        stopEnabled: availability.stop === true && !stopping,
+        stopEnabled: waiting || (availability.stop === true && !stopping),
         steerEnabled: availability.steer === true && !this.steerInFlight && !stopping,
         dictationPhase: this.dictationPhase,
-        dictationEnabled: availability.composer === true,
+        dictationEnabled: availability.composer === true && !waiting,
         hint: this.composerHint,
       },
     );
+    if (waiting) {
+      this.composerStatusEl.setText("Waiting for connection… Cancel to edit.");
+      this.stopButtonEl.setAttribute("aria-label", "Cancel pending send");
+      this.stopButtonEl.title = "Cancel pending send";
+    }
     this.renderAddConversationControl();
     this.historyButtonEl.disabled = !availability.history;
     this.reasoningButtonEl.disabled = !availability.reasoning;
     this.renderConversationTabs();
     this.renderSessionState(this.activeSessionState());
+    this.renderReadinessStatus();
   }
 
   async startNewSession(): Promise<void> {
@@ -2825,7 +2899,7 @@ export class HermesianSidebarView extends ItemView {
     if (
       !this.controller ||
       !activeTab ||
-      !this.controlAvailability().composer ||
+      !this.controlAvailability().restart ||
       this.isTabBusy(activeTab.id) ||
       this.activeSessionState().switchingModel ||
       this.hasPendingPermission(activeTab.id)
@@ -3204,6 +3278,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private removeComposerReference(index: number): void {
+    if (this.hasPendingSend()) return;
     this.composerDraft = {
       ...removeInlineReference(this.composerDraft, index),
       token: this.composerDraft.token,

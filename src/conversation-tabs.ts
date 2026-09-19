@@ -3,13 +3,16 @@ import {
   isReferenceToken,
   type ReferenceToken,
 } from "./composer-reference-tokens";
+import { isReasoningEffort } from "./session-history";
 import { SLASH_TOKEN_NAME_PATTERN } from "./slash-menu";
+import type { ReasoningEffort } from "./types";
 
 export interface PersistedConversationTab {
   draft: string;
   id: string;
   includeCurrentDocumentContext: boolean;
   label: number;
+  reasoningEffort?: ReasoningEffort | undefined;
   sessionId: string | null;
   /** Explicit token metadata from menu selection (not inferred from draft text). */
   token?: { kind: "skill" | "command"; name: string } | undefined;
@@ -24,9 +27,11 @@ export interface PersistedConversationWorkspace {
   version: 2;
 }
 
-export type ConversationTabPatch = Pick<
-  PersistedConversationTab,
-  "draft" | "includeCurrentDocumentContext"
+export type ConversationTabPatch = Partial<
+  Pick<
+    PersistedConversationTab,
+    "draft" | "includeCurrentDocumentContext" | "reasoningEffort"
+  >
 > & {
   token?: { kind: "skill" | "command"; name: string } | undefined;
   references?: ReferenceToken[] | undefined;
@@ -110,12 +115,7 @@ export function conversationControlAvailability(
       !globalBusy && !state.activeTabBusy && !state.activeTabPermissionPending,
     history: !activeSessionBusy,
     model: !activeSessionBusy,
-    reasoning:
-      !globalBusy &&
-      !state.switchingModel &&
-      !state.anyTabBusy &&
-      !state.anyTabLoading &&
-      !state.anyPermissionPending,
+    reasoning: !globalBusy,
     send: !activeSessionBusy && state.hasSession,
     stop: state.activeTabBusy,
   };
@@ -163,6 +163,7 @@ export function isActiveConversationSession(
 export function createConversationWorkspace(
   tabId: string,
   sessionId: string,
+  reasoningEffort: ReasoningEffort = "default",
 ): PersistedConversationWorkspace {
   const id = requireIdentifier(tabId, "Conversation tab ID");
   const session = requireIdentifier(sessionId, "Hermes session ID");
@@ -175,6 +176,7 @@ export function createConversationWorkspace(
         id,
         includeCurrentDocumentContext: true,
         label: 1,
+        reasoningEffort,
         sessionId: session,
       },
     ],
@@ -186,16 +188,20 @@ function appendConversationTab(
   workspace: PersistedConversationWorkspace,
   tabId: string,
   sessionId: string | null,
+  options?: { reasoningEffort?: ReasoningEffort },
 ): PersistedConversationWorkspace {
   const id = requireIdentifier(tabId, "Conversation tab ID");
   if (workspace.tabs.some((tab) => tab.id === id)) {
     throw new Error(`Conversation tab ${id} already exists`);
   }
+  const activeTab = workspace.tabs.find((tab) => tab.id === workspace.activeTabId);
+  const reasoningEffort = options?.reasoningEffort ?? activeTab?.reasoningEffort ?? "default";
   const newTab: PersistedConversationTab = {
     draft: "",
     id,
     includeCurrentDocumentContext: true,
     label: workspace.tabs.length + 1,
+    reasoningEffort,
     sessionId,
   };
   return withSequentialLabels(
@@ -211,16 +217,18 @@ export function addConversationTab(
   workspace: PersistedConversationWorkspace,
   tabId: string,
   sessionId: string,
+  reasoningEffort?: ReasoningEffort,
 ): PersistedConversationWorkspace {
   const session = requireIdentifier(sessionId, "Hermes session ID");
-  return appendConversationTab(workspace, tabId, session);
+  return appendConversationTab(workspace, tabId, session, { reasoningEffort });
 }
 
 export function addPendingConversationTab(
   workspace: PersistedConversationWorkspace,
   tabId: string,
+  reasoningEffort?: ReasoningEffort,
 ): PersistedConversationWorkspace {
-  return appendConversationTab(workspace, tabId, null);
+  return appendConversationTab(workspace, tabId, null, { reasoningEffort });
 }
 
 export function activateConversationTab(
@@ -375,6 +383,7 @@ export function replaceConversationSession(
 
 export function normalizeConversationWorkspace(
   value: unknown,
+  fallbackReasoningEffort: ReasoningEffort = "default",
 ): PersistedConversationWorkspace | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
@@ -455,14 +464,19 @@ export function normalizeConversationWorkspace(
     if (sessionId) {
       sessionIds.add(sessionId);
     }
+    const tabEffort = typeof tab.reasoningEffort === "string" ? tab.reasoningEffort : undefined;
+    const reasoningEffort = tabEffort && isReasoningEffort(tabEffort)
+      ? tabEffort
+      : fallbackReasoningEffort;
     tabs.push({
       draft: tab.draft ?? "",
       id: tab.id,
       includeCurrentDocumentContext: tab.includeCurrentDocumentContext ?? true,
       label: tabs.length + 1,
+      reasoningEffort,
       sessionId,
-      token,
-      references,
+      ...(token !== undefined ? { token } : {}),
+      ...(references !== undefined ? { references } : {}),
     } as PersistedConversationTab);
   }
 

@@ -138,13 +138,7 @@ export function deriveConversationControlAvailability(
       !anySessionOperation &&
       !anyPermissionPending &&
       !anyTabClosing,
-    reasoning:
-      !globalBusy &&
-      !anyTabBusy &&
-      !anyTabLoading &&
-      !anySessionOperation &&
-      !anyPermissionPending &&
-      !anyTabClosing,
+    reasoning: !globalBusy,
     tabNavigation: !globalBusy && !anyPermissionPending,
   });
 
@@ -152,7 +146,6 @@ export function deriveConversationControlAvailability(
     activate:
       Boolean(activeTab) &&
       aggregate.tabNavigation &&
-      !activeTabLoading &&
       activeTab?.closing !== true,
     add:
       Boolean(activeTab) &&
@@ -162,7 +155,6 @@ export function deriveConversationControlAvailability(
       Boolean(activeTab) &&
       !globalBusy &&
       !activeTabBusy &&
-      !activeTabLoading &&
       !activeSessionOperation &&
       !activePermissionPending &&
       activeTab?.closing !== true,
@@ -175,11 +167,15 @@ export function deriveConversationControlAvailability(
       !activePermissionPending &&
       activeTab?.closing !== true,
     hasSession,
-    history: !activeSessionBusy,
-    model: !activeSessionBusy,
-    reasoning: aggregate.reasoning,
-    restart: !activeSessionBusy,
-    send: !activeSessionBusy && hasSession,
+    history: !activeSessionBusy && hasSession,
+    model: !activeSessionBusy && hasSession,
+    reasoning: Boolean(activeTab) && !globalBusy && activeTab?.closing !== true,
+    restart: !activeSessionBusy && hasSession,
+    send: (!activeSessionBusy && hasSession) || Boolean(
+      activeTab && !globalBusy && !activeTabBusy && !activeSessionOperation &&
+      !activePermissionPending && !activeTab.closing &&
+      (activeTab.connection === "unloaded" || activeTab.connection === "deferred" || activeTab.connection === "loading")
+    ),
     steer:
       Boolean(activeTab) &&
       activeTabBusy &&
@@ -238,7 +234,7 @@ export function deriveConversationAggregateControls(
     !facts.anyTabClosing;
   return Object.freeze({
     connectionSettings,
-    reasoning: connectionSettings,
+    reasoning: !facts.globalBusy,
     tabNavigation: !facts.globalBusy && !facts.anyPermissionPending,
   });
 }

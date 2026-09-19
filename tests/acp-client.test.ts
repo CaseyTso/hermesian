@@ -884,7 +884,22 @@ describe("HermesAcpClient steer", () => {
       close: vi.fn(),
       signal: { aborted: false },
     });
-    Reflect.set(client, "context", { request });
+    const handler = (method: unknown, params: unknown, ...rest: unknown[]) => {
+      if (method === "session/set_config_option") {
+        const p = (params ?? {}) as { configId?: string; value?: string };
+        return Promise.resolve({
+          configOptions: [],
+          _meta: {
+            hermesian_version: 1,
+            config_id: p.configId ?? "hermesian:reasoning_effort",
+            effort: p.value ?? "default",
+            applied: true,
+          },
+        });
+      }
+      return request(method, params, ...rest);
+    };
+    Reflect.set(client, "context", { request: handler });
     Reflect.set(client, "intentionalShutdown", false);
   }
 
@@ -1267,7 +1282,7 @@ describe("HermesAcpClient steer", () => {
     await expect(steer).resolves.toEqual({ ok: false, reason: "no_active_turn" });
 
     resolveConnect();
-    await expect(main).rejects.toThrow("Hermes ACP session is unavailable");
+    await expect(main).rejects.toThrow("Hermes prompt was cancelled before dispatch");
     expect(request).not.toHaveBeenCalled();
   });
 

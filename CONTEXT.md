@@ -20,12 +20,16 @@ _Avoid_: Queue, follow-up message, interrupt
 A message submitted while an Active Turn is being cancelled, held until cancellation completes and then started as a normal new turn.
 _Avoid_: Queue, retry send
 
+**Connection-Waiting Message**:
+The single cancellable message a Conversation Tab holds while becoming ready to send. Its text and attachments remain recoverable if connection fails; it is distinct from Stop-and-send during cancellation of an Active Turn.
+_Avoid_: Automatic retry, Stop-and-send, message queue
+
 **Dictation**:
 A single microphone recording transcribed into the composer without sending it automatically.
 _Avoid_: Voice conversation, voice mode, auto-send
 
 **Thinking Depth**:
-The reasoning-effort level used by Hermes for model calls.
+A Conversation Tab's independently saved reasoning-effort preference, inherited from the current Conversation Tab when a new one is created. A change applies from the next turn, including when chosen during an Active Turn; it does not alter an ongoing Active Turn or another Conversation Tab's preference.
 _Avoid_: Thinking display, reasoning visibility
 
 **File Attachment Capsule**:

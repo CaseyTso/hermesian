@@ -22,6 +22,13 @@ import {
   normalizeSessionEntries,
 } from "./session-history";
 import type { HermesianSettings } from "./settings";
+import {
+  HERMESIAN_REASONING_EFFORT_CONFIG_ID,
+  buildHermesAcpSpawnArgs,
+  isReasoningEffortAck,
+} from "./hermes-acp-adapter";
+import { resolveHermesPythonCommand } from "./hermes-model-catalog";
+import { isReasoningEffort } from "./session-history";
 import type {
   HermesHistoryEntry,
   HermesHistoryItem,
@@ -44,6 +51,7 @@ interface NewSessionResponseCompat extends acp.NewSessionResponse {
 
 export interface HermesAcpClientOptions {
   debugLogging?: boolean;
+  desiredReasoningEffort?: () => ReasoningEffort;
   onEvent: (event: HermesUiEvent) => void;
   onPermission: (
     request: PermissionRequest,
@@ -292,6 +300,7 @@ export class HermesAcpClient {
    * overtake a main prompt that is still connecting/dispatching.
    */
   private mainTurnActive = false;
+  private promptOwner: { cancelled: boolean } | undefined;
   /**
    * One-shot commit signal for the in-flight main prompt: created when
    * sendPrompt claims busy, resolved at dispatch and again in finally so
@@ -365,6 +374,12 @@ export class HermesAcpClient {
     return Boolean(this.isTransportReady && (this.activeSession || this.resumedSessionId));
   }
 
+  #appliedReasoningEffort?: ReasoningEffort;
+
+  get appliedReasoningEffort(): ReasoningEffort | undefined {
+    return this.#appliedReasoningEffort;
+  }
+
   get sessionId(): string | undefined {
     return this.resumedSessionId ?? this.activeSession?.sessionId;
   }
@@ -434,6 +449,8 @@ export class HermesAcpClient {
     this.activeSession?.dispose();
     this.activeSession = undefined;
     this.resumedSessionId = undefined;
+    this.promptOwner = undefined;
+    this.#appliedReasoningEffort = undefined;
     this.historyCapture = undefined;
     this.sessionOperation = undefined;
     this.busy = false;
@@ -543,8 +560,10 @@ export class HermesAcpClient {
 
     const settings = this.options.settings();
     const executable = resolveHermesExecutable(settings.hermesExecutable);
+    const pythonCommand = resolveHermesPythonCommand(executable);
     const profile = settings.profile.trim();
-    const args = buildHermesAcpArgs(profile, settings.acceptHooks);
+    const cliArgs = buildHermesAcpArgs(profile, settings.acceptHooks);
+    const spawnInfo = buildHermesAcpSpawnArgs(pythonCommand, cliArgs);
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       HERMES_ACCEPT_HOOKS: settings.acceptHooks ? "1" : "0",
@@ -555,8 +574,8 @@ export class HermesAcpClient {
     }
 
     const childProcess = AcpProcess.spawn({
-      command: executable,
-      args,
+      command: spawnInfo.command,
+      args: spawnInfo.args,
       cwd: this.options.vaultPath,
       env,
     });
@@ -845,17 +864,38 @@ export class HermesAcpClient {
     }
   }
 
-  async configureReasoningEffort(effort: ReasoningEffort): Promise<void> {
-    if (this.isBusy || this.isOperating) {
-      throw new Error("Cannot change thinking depth while Hermes is responding");
+  async applyReasoningEffort(
+    sessionId: string,
+    effort: ReasoningEffort,
+  ): Promise<void> {
+    if (!isReasoningEffort(effort)) {
+      throw new Error(`Invalid reasoning effort: ${String(effort)}`);
     }
-    const settings = this.options.settings();
-    const executable = resolveHermesExecutable(settings.hermesExecutable);
-    const args = settings.profile.trim()
-      ? ["--profile", settings.profile.trim()]
-      : [];
-    args.push("config", "set", "agent.reasoning_effort", effort === "default" ? "" : effort);
-    await runHermesCommand(executable, args);
+    if (!this.context) {
+      throw new Error("Hermes ACP session is unavailable");
+    }
+    const lifecycle = this.captureLifecycle();
+    const response = await withTimeout(this.context.request<
+      acp.SetSessionConfigOptionResponse,
+      {
+        configId: string;
+        sessionId: string;
+        value: string;
+      }
+    >(acp.methods.agent.session.setConfigOption, {
+      configId: HERMESIAN_REASONING_EFFORT_CONFIG_ID,
+      sessionId,
+      value: effort,
+    }), FINITE_OPERATION_TIMEOUT_MS, "Hermes ACP thinking-depth acknowledgment");
+    this.assertLifecycleOwned(lifecycle.generation, lifecycle.connection, lifecycle.context);
+    if (this.sessionId !== sessionId) throw new Error("Hermes session changed during thinking-depth update");
+
+    if (!isReasoningEffortAck(response, effort)) {
+      throw new Error(
+        `Hermes ACP adapter did not acknowledge reasoning effort (configId=${HERMESIAN_REASONING_EFFORT_CONFIG_ID}, effort=${effort})`,
+      );
+    }
+    this.#appliedReasoningEffort = effort;
   }
 
   async setModel(model: HermesModelOption): Promise<void> {
@@ -916,7 +956,10 @@ export class HermesAcpClient {
     }
   }
 
-  async sendPrompt(prompt: string | acp.ContentBlock[]): Promise<void> {
+  async sendPrompt(
+    prompt: string | acp.ContentBlock[],
+    options?: { reasoningEffort?: ReasoningEffort },
+  ): Promise<void> {
     const hasContent = Array.isArray(prompt)
       ? prompt.some(
           (block) => block.type === "image" || (block.type === "text" && Boolean(block.text.trim())),
@@ -935,6 +978,14 @@ export class HermesAcpClient {
     if (this.busy || this.sessionOperation) {
       throw new Error("Hermes is already processing a prompt");
     }
+    const owner = { cancelled: false };
+    this.promptOwner = owner;
+    const desiredEffort = options?.reasoningEffort ?? this.options.desiredReasoningEffort?.() ?? "default";
+    const assertPromptOwner = () => {
+      if (this.promptOwner !== owner || owner.cancelled) {
+        throw new Error("Hermes prompt was cancelled before dispatch");
+      }
+    };
     this.busy = true;
     let fireCommit!: (committed: boolean) => void;
     const commitPromise = new Promise<boolean>((resolve) => {
@@ -946,11 +997,17 @@ export class HermesAcpClient {
     };
     try {
       await this.connect();
+      assertPromptOwner();
       const session = this.activeSession;
       const resumedSessionId = this.resumedSessionId;
-      if (!this.context || (!session && !resumedSessionId)) {
+      const sessionId = resumedSessionId ?? session?.sessionId;
+      if (!this.context || !sessionId) {
         throw new Error("Hermes ACP session is unavailable");
       }
+
+      await this.applyReasoningEffort(sessionId, desiredEffort);
+      assertPromptOwner();
+
       if (resumedSessionId) {
         // Ownership transfers the instant the main prompt is about to be
         // dispatched so a steer waiting on the commit signal never overtakes.
@@ -979,21 +1036,29 @@ export class HermesAcpClient {
         await yieldToUi();
       }
     } catch (error) {
-      this.emit({ type: "error", message: errorMessage(error), terminal: true });
+      if (this.promptOwner === owner) {
+        if (!this.mainTurnActive && error instanceof Error) Object.assign(error, { promptNotDispatched: true });
+        this.emit({ type: "error", message: errorMessage(error), terminal: true });
+      }
       throw error;
     } finally {
-      this.mainTurnActive = false;
-      this.mainTurnCommit?.fire();
-      this.mainTurnCommit = undefined;
-      this.busy = false;
-      // Main turn reached terminal: a steer slot still held by an unresolved
-      // request must not outlive the turn, and the late-receipt window
-      // closes with it.
-      this.closeSteerWindow();
+      if (this.promptOwner === owner) {
+        this.promptOwner = undefined;
+        this.mainTurnActive = false;
+        this.mainTurnCommit?.fire();
+        this.mainTurnCommit = undefined;
+        this.busy = false;
+        // Do not let an old disconnected turn clear a newer turn's ownership.
+        this.closeSteerWindow();
+      }
     }
   }
 
   async cancel(): Promise<void> {
+    if (this.promptOwner && !this.mainTurnActive) {
+      this.promptOwner.cancelled = true;
+      return;
+    }
     const sessionId = this.sessionId;
     if (!this.context || !sessionId || !this.busy) {
       return;
@@ -1167,6 +1232,8 @@ export class HermesAcpClient {
 
   async disconnect(): Promise<void> {
     this.lifecycleGeneration += 1;
+    this.promptOwner = undefined;
+    this.#appliedReasoningEffort = undefined;
     this.connectPromise = undefined;
     this.transportPromise = undefined;
     this.intentionalShutdown = true;
@@ -1338,6 +1405,7 @@ export class HermesAcpClient {
     executable: string,
     profile: string,
   ): void {
+    this.#appliedReasoningEffort = undefined;
     const generation = ++this.catalogGeneration;
     const fallback = normalizeAcpModelState(
       response.models,
@@ -1480,31 +1548,4 @@ export class HermesAcpClient {
   private emit(event: HermesUiEvent): void {
     this.options.onEvent(event);
   }
-}
-
-function runHermesCommand(executable: string, args: string[]): Promise<void> {
-  const childProcess = AcpProcess.spawn({
-    command: executable,
-    args,
-  });
-  const operation = childProcess.waitForExit().then((exit) => {
-    if (exit.code === 0) {
-      return;
-    }
-    const details = childProcess.stderrTail().trim();
-    throw new Error(
-      `Hermes config update failed (code=${String(exit.code)}, signal=${String(exit.signal)})${
-        details ? `: ${details}` : ""
-      }`,
-    );
-  });
-  return withTimeout(
-    operation,
-    FINITE_OPERATION_TIMEOUT_MS,
-    "Hermes config update",
-  ).catch((error) => {
-    // Ensure the child is terminated on any failure
-    childProcess.terminate({ graceMs: 500 }).catch(() => {});
-    throw error;
-  });
 }

@@ -4,6 +4,7 @@ export interface ConversationTabsState {
   activeTabId: string | undefined;
   isTabBusy(tabId: string): boolean;
   isTabLoading(tabId: string): boolean;
+  isTabFailed?(tabId: string): boolean;
   tabNavigationDisabled: boolean;
   tabs: PersistedConversationTab[];
 }
@@ -26,9 +27,10 @@ export function renderConversationTabsView(
     const active = tab.id === state.activeTabId;
     const deferred = tab.sessionId === null;
     const working = state.isTabBusy(tab.id);
-    const loading = deferred || state.isTabLoading(tab.id);
-    const activityLabel = working ? ", responding" : loading ? ", starting" : "";
-    const activityTitle = working ? " · Responding" : loading ? " · Starting" : "";
+    const failed = state.isTabFailed?.(tab.id) === true;
+    const loading = !failed && (deferred || state.isTabLoading(tab.id));
+    const activityLabel = failed ? ", connection failed, select to retry" : working ? ", responding" : loading ? ", starting" : "";
+    const activityTitle = failed ? " · Connection failed · Select to retry" : working ? " · Responding" : loading ? " · Starting" : "";
     const button = hostEl.createEl("button", {
       attr: {
         "aria-busy": String(working || loading),

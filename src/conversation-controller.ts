@@ -1,4 +1,5 @@
-import type { HermesSessionState, HermesHistoryItem } from "./types";
+import type { HermesSessionState, HermesHistoryItem, ReasoningEffort } from "./types";
+import { isReasoningEffort } from "./session-history";
 import {
   ConversationOperationCoordinator,
   deriveConversationControlAvailability,
@@ -16,6 +17,7 @@ import {
   createCloseIntent,
   removeConversationTab,
   replaceConversationSession,
+  updateConversationTab,
   type PersistedConversationTab,
   type PersistedConversationWorkspace,
 } from "./conversation-tabs";
@@ -67,11 +69,20 @@ export interface ConversationControllerDependencies<
 > {
   clients: ConversationClientPort<TClient>;
   createTabId?: () => string;
+  defaultReasoningEffort?: () => ReasoningEffort;
+  readLocalHistory?: (sessionId: string) => Promise<HermesHistoryItem[]>;
   reportBackgroundError?: (operation: "releaseClient", error: unknown) => void;
   workspace: ConversationWorkspacePort;
 }
 
+export interface ConversationHistory {
+  sessionId: string;
+  source: "local" | "acp";
+  items: readonly HermesHistoryItem[];
+}
+
 export interface ConversationControllerSnapshot {
+  histories: ReadonlyMap<string, ConversationHistory>;
   controls: ConversationControls;
   globalOperation: "idle" | "reconnecting";
   initializing: boolean;
@@ -217,7 +228,7 @@ function reconcileRuntimeForWorkspace(
   return seeded;
 }
 
-function createPendingWorkspace(tabId: string): PersistedConversationWorkspace {
+function createPendingWorkspace(tabId: string, reasoningEffort: ReasoningEffort = "default"): PersistedConversationWorkspace {
   const id = tabId.trim();
   if (!id) {
     throw new ConversationControllerError(
@@ -234,6 +245,7 @@ function createPendingWorkspace(tabId: string): PersistedConversationWorkspace {
         id,
         includeCurrentDocumentContext: true,
         label: 1,
+        reasoningEffort,
         sessionId: null,
       },
     ],
@@ -249,6 +261,13 @@ export class ConversationController<TClient extends ConversationClient> {
     string,
     Promise<EnsureConversationReadyResult>
   >();
+  private readonly restoreQueue: Array<{
+    tabId: string;
+    resolve: (result: EnsureClientResult) => void;
+    reject: (error: unknown) => void;
+  }> = [];
+  private restoring = false;
+  private readonly localReads = new Map<string, Promise<void>>();
   private readonly historyReservations = new Map<string, string>();
   private readonly permissionTokens = new Map<string, string>();
   private readonly operations = new ConversationOperationCoordinator();
@@ -263,18 +282,21 @@ export class ConversationController<TClient extends ConversationClient> {
     dependencies: ConversationControllerDependencies<TClient>,
   ) {
     this.dependencies = dependencies;
-    const workspace = copyWorkspace(dependencies.workspace.getWorkspace());
+    const workspace = copyWorkspace(dependencies.workspace.getWorkspace()) ??
+      createPendingWorkspace(dependencies.createTabId?.() ?? globalThis.crypto.randomUUID(),
+        dependencies.defaultReasoningEffort?.() ?? "default");
     const tabOperations = runtimeForWorkspace(workspace);
     const controls = deriveConversationControls({
       activeTabId: workspace?.activeTabId,
       globalOperation: "idle",
-      initializing: true,
+      initializing: false,
       tabs: tabOperations,
     });
     this.snapshot = Object.freeze({
+      histories: new Map(),
       controls,
       globalOperation: "idle",
-      initializing: true,
+      initializing: false,
       sessionStates: new Map(),
       tabOperations,
       transitionGeneration: this.operations.getTransitionGeneration(),
@@ -334,296 +356,163 @@ export class ConversationController<TClient extends ConversationClient> {
   }
 
   ensureClientForTab(tabId: string): Promise<EnsureClientResult> {
-    if (this.snapshot.initializing) {
-      return Promise.reject(
-        this.controllerError("cancelled", "Conversation initialization is still pending", tabId),
-      );
-    }
-    return this.ensureClientForTabInternal(
-      tabId,
-      this.snapshot.workspace,
-      this.operations.beginTransition(),
-    );
+    return this.ensureConversationReady(tabId);
   }
 
-  ensureConversationReady(
-    tabId: string,
-  ): Promise<EnsureConversationReadyResult> {
+  /** Foreground callers move queued work ahead of silent restoration. */
+  ensureConversationReady(tabId: string): Promise<EnsureConversationReadyResult> {
     if (this.disposed) {
       return Promise.reject(this.controllerError("cancelled", "Controller is shut down", tabId));
     }
     const existing = this.hydrationPromises.get(tabId);
     if (existing) {
+      const index = this.restoreQueue.findIndex((entry) => entry.tabId === tabId);
+      if (index > 0) this.restoreQueue.unshift(...this.restoreQueue.splice(index, 1));
       return existing;
     }
-    const tabOp = this.snapshot.tabOperations.get(tabId);
-    if (!tabOp) {
-      return Promise.reject(
-        this.controllerError("workspace_conflict", "Conversation tab was not found", tabId),
-      );
+    const tab = this.snapshot.workspace?.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || this.snapshot.tabOperations.get(tabId)?.closing) {
+      return Promise.reject(this.controllerError("workspace_conflict", "Conversation tab was not found", tabId));
     }
-    if (tabOp.connection === "ready") {
-      const tab = this.snapshot.workspace?.tabs.find((t) => t.id === tabId);
-      return Promise.resolve({
-        items: undefined,
-        sessionId: tab?.sessionId ?? "",
-        started: false,
-        replaced: false,
-        tabId,
-        workspace: copyWorkspace(this.snapshot.workspace)!,
-      } as EnsureConversationReadyResult);
+    if (this.snapshot.tabOperations.get(tabId)?.connection === "ready" && tab.sessionId &&
+        this.dependencies.clients.getClient(tabId)?.sessionId === tab.sessionId) {
+      return Promise.resolve({ sessionId: tab.sessionId, started: false, replaced: false,
+        tabId, workspace: copyWorkspace(this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace)! });
     }
-    const promise = this.ensureConversationReadyInternal(tabId);
-    this.hydrationPromises.set(tabId, promise);
-    void promise.finally(() => {
-      if (this.hydrationPromises.get(tabId) === promise) {
-        this.hydrationPromises.delete(tabId);
-      }
+    const promise = new Promise<EnsureClientResult>((resolve, reject) => {
+      this.restoreQueue.unshift({ tabId, resolve, reject });
     });
+    this.hydrationPromises.set(tabId, promise);
+    // Handle both outcomes without creating an unhandled rejected finally promise.
+    const cleanup = () => {
+      if (this.hydrationPromises.get(tabId) === promise) this.hydrationPromises.delete(tabId);
+    };
+    void promise.then(cleanup, cleanup);
+    void this.pumpRestoration();
     return promise;
   }
 
-  private async initializeInternal(): Promise<ConversationInitializationResult> {
-    const generation = this.operations.beginTransition();
-    this.publish({
-      ...this.snapshot,
-      globalOperation: "reconnecting",
-      initializing: true,
-      transitionGeneration: generation,
-    });
+  /** Local display is independent of ACP readiness and never mutates session bindings. */
+  readAvailableHistory(tabId: string): Promise<void> {
+    const existing = this.localReads.get(tabId);
+    if (existing) return existing;
+    const sessionId = this.snapshot.workspace?.tabs.find((tab) => tab.id === tabId)?.sessionId;
+    if (!sessionId || !this.dependencies.readLocalHistory || this.disposed ||
+        this.snapshot.histories.get(tabId)?.source === "acp") return Promise.resolve();
+    const promise = Promise.resolve().then(() => this.dependencies.readLocalHistory!(sessionId)).then((items) => {
+      if (this.disposed || this.localReads.get(tabId) !== promise ||
+          this.snapshot.workspace?.tabs.find((tab) => tab.id === tabId)?.sessionId !== sessionId ||
+          this.snapshot.histories.get(tabId)?.source === "acp") return;
+      this.publishHistory(tabId, { sessionId, source: "local", items });
+    }, () => { /* Local history is best effort; ACP remains authoritative. */ });
+    this.localReads.set(tabId, promise);
+    return promise;
+  }
 
+  async readWorkspaceHistory(): Promise<void> {
+    const workspace = this.snapshot.workspace;
+    if (!workspace) return;
+    const ids = [workspace.activeTabId, ...workspace.tabs.filter((tab) => tab.id !== workspace.activeTabId).map((tab) => tab.id)];
+    for (const id of ids) {
+      if (this.disposed) return;
+      await this.readAvailableHistory(id);
+    }
+  }
+
+  private publishHistory(tabId: string, history: ConversationHistory): void {
+    const histories = new Map(this.snapshot.histories);
+    histories.set(tabId, Object.freeze({ ...history,
+      items: Object.freeze(history.items.map((item) => Object.freeze({ ...item }))),
+    }));
+    this.publish({ ...this.snapshot, histories });
+  }
+
+  private async initializeInternal(): Promise<ConversationInitializationResult> {
     let workspace = copyWorkspace(this.dependencies.workspace.getWorkspace());
     if (!workspace) {
-      const tabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
-      workspace = createPendingWorkspace(tabId);
+      workspace = copyWorkspace(this.snapshot.workspace)!;
+      // Persist the editable pending workspace before starting ACP.
       this.publishWorkspace(workspace);
+      await this.dependencies.workspace.setWorkspace(workspace, { save: true });
     }
-
-    try {
-      const result = await this.ensureClientForTabInternal(
-        workspace.activeTabId,
-        workspace,
-        generation,
-      );
-      this.assertCurrentTransition(generation);
-      const latestWorkspace =
-        copyWorkspace(this.dependencies.workspace.getWorkspace()) ?? result.workspace;
-      this.publish({
-        ...this.snapshot,
-        globalOperation: "idle",
-        initializing: false,
-        tabOperations: reconcileRuntimeForWorkspace(latestWorkspace, this.snapshot.tabOperations),
-        transitionGeneration: this.operations.getTransitionGeneration(),
-        workspace: latestWorkspace,
-      });
-      return { ...result, workspace: latestWorkspace };
-    } finally {
-      if (this.isCurrentTransition(generation)) {
-        this.publish({
-          ...this.snapshot,
-          globalOperation: "idle",
-          initializing: false,
-          transitionGeneration: this.operations.getTransitionGeneration(),
-        });
-      }
+    if (this.disposed) throw this.controllerError("cancelled", "Controller is shut down");
+    this.publish({ ...this.snapshot, initializing: false, globalOperation: "idle" });
+    void this.readWorkspaceHistory();
+    const active = this.ensureConversationReady(workspace.activeTabId);
+    // Queue in persisted order. The active request already owns the worker.
+    for (const tab of workspace.tabs) {
+      if (tab.id === workspace.activeTabId) continue;
+      const background = this.ensureConversationReady(tab.id);
+      const index = this.restoreQueue.findIndex((entry) => entry.tabId === tab.id);
+      if (index >= 0) this.restoreQueue.push(...this.restoreQueue.splice(index, 1));
+      void background.catch(() => { /* Failure is tab-local; retry is explicit. */ });
     }
+    return active;
   }
 
-  private async ensureClientForTabInternal(
-    tabId: string,
-    workspaceOverride: PersistedConversationWorkspace | undefined,
-    generation: number,
-  ): Promise<EnsureClientResult> {
-    const token = this.operations.begin(tabId);
-    let succeeded = false;
-    let workspace = copyWorkspace(
-      workspaceOverride ?? this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
-    );
-    const tab = workspace?.tabs.find((candidate) => candidate.id === tabId);
-    if (!workspace || !tab) {
-      this.operations.complete(token);
-      throw this.controllerError("workspace_conflict", "Conversation tab was not found", tabId);
-    }
-
-    const client = this.dependencies.clients.acquireClient(tabId);
-    this.assertCurrentOperation(tabId, client, token, generation);
-    this.updateTabOperation(tabId, {
-      connection: "loading",
-      hasSession: Boolean(tab.sessionId),
-    });
-
+  private async pumpRestoration(): Promise<void> {
+    if (this.restoring || this.disposed) return;
+    this.restoring = true;
     try {
-      // Resume path: load only — never create a throwaway session first.
-      // Fresh tabs without sessionId still use client.connect() elsewhere.
-      let items: HermesHistoryItem[] | undefined;
-      let started = false;
-      let sessionId: string | undefined;
-      let replaced = false;
-      let changedWorkspace = false;
-      if (tab.sessionId) {
-        try {
-          items = await client.loadSessionHistory(tab.sessionId);
-          sessionId = client.sessionId ?? tab.sessionId;
-        } catch (loadError) {
-          this.assertCurrentOperation(tabId, client, token, generation);
-          await client.newSession();
-          this.assertCurrentOperation(tabId, client, token, generation);
-          sessionId = client.sessionId;
-          if (!sessionId) {
-            throw new ConversationControllerError(
-              "client_unavailable",
-              `Hermes did not return a replacement session after load failure: ${String(loadError)}`,
-              tabId,
-            );
-          }
-          started = true;
-          replaced = true;
-          workspace = replaceConversationSession(workspace, tabId, sessionId);
-          changedWorkspace = true;
-        }
-      } else {
-        await client.connect();
-        this.assertCurrentOperation(tabId, client, token, generation);
-        sessionId = client.sessionId;
-        if (!sessionId) {
-          throw this.controllerError("client_unavailable", "Hermes did not return a session ID", tabId);
-        }
-        workspace = replaceConversationSession(workspace, tabId, sessionId);
-        changedWorkspace = true;
-        started = true;
+      while (this.restoreQueue.length && !this.disposed) {
+        const entry = this.restoreQueue.shift()!;
+        try { entry.resolve(await this.hydrateTab(entry.tabId)); }
+        catch (error) { entry.reject(error); }
       }
+    } finally { this.restoring = false; }
+  }
 
-      if (!sessionId) {
-        throw this.controllerError("client_unavailable", "Hermes session is unavailable", tabId);
-      }
-      this.assertCurrentOperation(tabId, client, token, generation);
-      if (changedWorkspace) {
-        await this.dependencies.workspace.setWorkspace(workspace, {
-          flush: true,
-          save: true,
-        });
-        this.assertCurrentOperation(tabId, client, token, generation);
-      }
-      this.publishWorkspace(workspace);
-      this.updateTabOperation(tabId, {
-        connection: "ready",
-        hasSession: true,
-        sessionOperation: "idle",
-      });
-      succeeded = true;
-      return {
-        items,
-        sessionId,
-        started,
-        replaced,
-        tabId,
-        workspace: copyWorkspace(workspace)!,
-      };
+  private async hydrateTab(tabId: string): Promise<EnsureClientResult> {
+    const tab = this.snapshot.workspace?.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || this.snapshot.tabOperations.get(tabId)?.closing) {
+      throw this.controllerError("operation_stale", "Conversation was closed", tabId);
+    }
+    const token = this.operations.begin(tabId);
+    let client: TClient;
+    try {
+      client = this.dependencies.clients.acquireClient(tabId);
     } catch (error) {
-      if (this.isCurrentTransition(generation) && this.operations.isCurrent(token)) {
-        this.updateTabOperation(tabId, { connection: "failed" });
-      }
-      throw error;
-    } finally {
       this.operations.complete(token);
-      if (!succeeded && this.isCurrentTransition(generation)) {
-        this.updateTabOperation(tabId, { connection: "failed" });
-      }
+      this.updateTabOperation(tabId, { connection: "failed" });
+      throw error;
     }
-  }
-
-  private async ensureConversationReadyInternal(
-    tabId: string,
-  ): Promise<EnsureConversationReadyResult> {
-    const token = this.operations.begin(tabId);
+    const assertOwner = () => {
+      this.assertOwnedOperation(tabId, client, token);
+      if (this.snapshot.workspace?.tabs.find((candidate) => candidate.id === tabId)?.sessionId !== tab.sessionId) {
+        throw this.controllerError("operation_stale", "Conversation binding changed", tabId);
+      }
+    };
     this.updateTabOperation(tabId, { connection: "loading" });
     try {
-      const latestWorkspace = copyWorkspace(
-        this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
-      );
-      const tab = latestWorkspace?.tabs.find((t) => t.id === tabId);
-      if (!latestWorkspace || !tab) {
-        throw this.controllerError("workspace_conflict", "Owner tab was removed during hydration", tabId);
+      const items = tab.sessionId ? await client.loadSessionHistory(tab.sessionId) : undefined;
+      if (!tab.sessionId) await client.connect();
+      assertOwner();
+      const sessionId = tab.sessionId ?? client.sessionId;
+      if (!sessionId || (tab.sessionId && client.sessionId && client.sessionId !== tab.sessionId)) {
+        throw this.controllerError("client_unavailable", "Hermes session binding is unavailable", tabId);
       }
-      const client = this.dependencies.clients.acquireClient(tabId);
-      let items: HermesHistoryItem[] | undefined;
-      let started = false;
-      let sessionId: string | undefined;
-      let replaced = false;
-      let changedWorkspace = false;
-      let mergedWorkspace = latestWorkspace;
-      if (tab.sessionId) {
-        try {
-          items = await client.loadSessionHistory(tab.sessionId);
-          sessionId = client.sessionId ?? tab.sessionId;
-        } catch (_loadError) {
-          await client.newSession();
-          sessionId = client.sessionId;
-          if (!sessionId) {
-            throw this.controllerError("client_unavailable", "Hermes did not return a replacement session", tabId);
-          }
-          started = true;
-          replaced = true;
+      const workspace = await this.enqueueWorkspaceCommit(async () => {
+        assertOwner();
+        const latest = copyWorkspace(this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace)!;
+        if (!latest.tabs.some((candidate) => candidate.id === tabId && candidate.sessionId === tab.sessionId)) {
+          throw this.controllerError("operation_stale", "Conversation binding changed", tabId);
         }
-      } else {
-        await client.connect();
-        const postConnectWorkspace = copyWorkspace(
-          this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
-        );
-        const postTab = postConnectWorkspace?.tabs.find((t) => t.id === tabId);
-        if (!postConnectWorkspace || !postTab) {
-          throw this.controllerError("workspace_conflict", "Owner tab was removed after connect", tabId);
-        }
-        mergedWorkspace = postConnectWorkspace;
-        sessionId = client.sessionId;
-        if (!sessionId) {
-          throw this.controllerError("client_unavailable", "Hermes did not return a session ID", tabId);
-        }
-        started = true;
-      }
-      if (sessionId && sessionId !== tab.sessionId) {
-        mergedWorkspace = replaceConversationSession(mergedWorkspace, tabId, sessionId);
-        changedWorkspace = true;
-      }
-      if (changedWorkspace) {
-        const latest = copyWorkspace(
-          this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
-        );
-        if (latest?.tabs.some((t) => t.id === tabId)) {
-          const withActive = { ...mergedWorkspace, activeTabId: latest.activeTabId };
-          await this.enqueueWorkspaceCommit(async () => {
-            await this.dependencies.workspace.setWorkspace(withActive, {
-              flush: true,
-              save: true,
-            });
-            this.publishWorkspace(withActive);
-            return withActive;
-          });
-        }
-      }
-      this.updateTabOperation(tabId, {
-        connection: "ready",
-        hasSession: true,
-        sessionOperation: "idle",
+        const next = tab.sessionId ? latest : replaceConversationSession(latest, tabId, sessionId);
+        if (!tab.sessionId) await this.dependencies.workspace.setWorkspace(next, { flush: true, save: true });
+        assertOwner();
+        const current = copyWorkspace(this.dependencies.workspace.getWorkspace() ?? next)!;
+        this.publishWorkspace(current);
+        return current;
       });
-      return {
-        items,
-        sessionId: sessionId ?? "",
-        started,
-        replaced,
-        tabId,
-        workspace: copyWorkspace(
-          this.dependencies.workspace.getWorkspace() ?? mergedWorkspace,
-        )!,
-      };
+      if (items) this.publishHistory(tabId, { sessionId, source: "acp", items });
+      this.updateTabOperation(tabId, { connection: "ready", hasSession: true, sessionOperation: "idle" });
+      return { items, sessionId, started: !tab.sessionId, replaced: false, tabId, workspace };
     } catch (error) {
-      if (!this.disposed && this.snapshot.tabOperations.has(tabId)) {
+      if (!this.disposed && this.operations.isOwned(token)) {
         this.updateTabOperation(tabId, { connection: "failed" });
       }
       throw error;
-    } finally {
-      this.operations.complete(token);
-    }
+    } finally { this.operations.complete(token); }
   }
 
   private assertCurrentOperation(
@@ -679,6 +568,8 @@ export class ConversationController<TClient extends ConversationClient> {
     );
     this.publish({
       ...this.snapshot,
+      histories: new Map([...this.snapshot.histories].filter(([id, history]) =>
+        workspace.tabs.some((tab) => tab.id === id && tab.sessionId === history.sessionId))),
       sessionStates,
       tabOperations,
       workspace: copyWorkspace(workspace),
@@ -694,6 +585,36 @@ export class ConversationController<TClient extends ConversationClient> {
       () => undefined,
     );
     return result;
+  }
+
+  /** Serialize preference changes with structural commits, without marking any tab busy. */
+  setReasoningEffort(tabId: string, effort: ReasoningEffort): Promise<void> {
+    if (!isReasoningEffort(effort)) return Promise.reject(new Error("Invalid thinking depth"));
+    return this.enqueueWorkspaceCommit(async () => {
+      const latest = copyWorkspace(this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace);
+      const tab = latest?.tabs.find((candidate) => candidate.id === tabId);
+      if (this.disposed || !latest || !tab || this.snapshot.tabOperations.get(tabId)?.closing) {
+        throw this.controllerError("cancelled", "Conversation is no longer available", tabId);
+      }
+      const previous = tab.reasoningEffort ?? this.dependencies.defaultReasoningEffort?.() ?? "default";
+      const next = updateConversationTab(latest, tabId, { reasoningEffort: effort });
+      try {
+        const saving = this.dependencies.workspace.setWorkspace(next, { flush: true, save: true });
+        this.publishWorkspace(next);
+        await saving;
+      } catch (error) {
+        const current = copyWorkspace(this.dependencies.workspace.getWorkspace() ?? latest)!;
+        // Roll back only our field, not typing/navigation that happened while persistence awaited.
+        const owned = current.tabs.find((candidate) => candidate.id === tabId)?.reasoningEffort === effort;
+        const recovered = owned ? updateConversationTab(current, tabId, { reasoningEffort: previous }) : current;
+        if (!this.disposed) {
+          await this.dependencies.workspace.setWorkspace(recovered, { save: true });
+          this.publishWorkspace(recovered);
+        }
+        throw error;
+      }
+      if (!this.disposed) this.publishWorkspace(copyWorkspace(this.dependencies.workspace.getWorkspace() ?? next)!);
+    });
   }
 
   private updateTabOperation(
@@ -732,65 +653,17 @@ export class ConversationController<TClient extends ConversationClient> {
 
     const tabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
     const pendingWorkspace = addPendingConversationTab(currentWorkspace, tabId);
-    const token = this.operations.begin(tabId);
-    let succeeded = false;
     this.publishWorkspace(pendingWorkspace);
-    const client = this.dependencies.clients.acquireClient(tabId);
-    this.updateTabOperation(tabId, {
-      connection: "loading",
-      hasSession: false,
-      sessionOperation: "idle",
-    });
-
+    this.updateTabOperation(tabId, { connection: "loading" });
     try {
       await this.dependencies.workspace.setWorkspace(pendingWorkspace, { save: true });
-      this.assertOwnedOperation(tabId, client, token);
-      await client.connect();
-      this.assertOwnedOperation(tabId, client, token);
-      const sessionId = client.sessionId;
-      if (!sessionId) {
-        throw this.controllerError("client_unavailable", "Hermes did not return a new session ID", tabId);
-      }
-
-      const latestWorkspace = copyWorkspace(
-        this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
-      );
-      if (!latestWorkspace?.tabs.some((tab) => tab.id === tabId)) {
-        await this.dependencies.clients.releaseClient(tabId);
-        throw this.controllerError("workspace_conflict", "Added conversation tab no longer exists", tabId);
-      }
-      const committedWorkspace = replaceConversationSession(
-        latestWorkspace,
-        tabId,
-        sessionId,
-      );
-      this.assertOwnedOperation(tabId, client, token);
-      await this.dependencies.workspace.setWorkspace(committedWorkspace, {
-        flush: true,
-        save: true,
-      });
-      this.assertOwnedOperation(tabId, client, token);
-      this.publishWorkspace(committedWorkspace);
-      this.updateTabOperation(tabId, {
-        connection: "ready",
-        hasSession: true,
-        sessionOperation: "idle",
-      });
-      succeeded = true;
-      return { sessionId, tabId, workspace: copyWorkspace(committedWorkspace)! };
+      const result = await this.ensureConversationReady(tabId);
+      return { tabId, sessionId: result.sessionId, workspace: result.workspace };
     } catch (error) {
-      if (this.operations.isOwned(token) || this.snapshot.tabOperations.has(tabId)) {
+      if (!this.disposed && this.snapshot.tabOperations.has(tabId)) {
         this.updateTabOperation(tabId, { connection: "failed" });
       }
       throw error;
-    } finally {
-      this.operations.complete(token);
-      if (!succeeded && this.snapshot.tabOperations.has(tabId)) {
-        const connection = this.snapshot.tabOperations.get(tabId)?.connection;
-        if (connection === "loading") {
-          this.updateTabOperation(tabId, { connection: "failed" });
-        }
-      }
     }
   }
 
@@ -827,52 +700,10 @@ export class ConversationController<TClient extends ConversationClient> {
       };
     }
 
-    const tabOp = this.snapshot.tabOperations.get(tabId);
-    // Loading tabs keep their in-flight owner work. Switching only changes the
-    // active selection — never re-enter ensureClient / connect.
-    if (tabOp?.connection === "loading") {
-      return this.activateExistingTab(tabId, target.sessionId ?? undefined);
-    }
-    if (tabOp?.connection === "ready" && tabOp.hasSession && target.sessionId) {
-      return this.activateExistingTab(tabId, target.sessionId);
-    }
-
-    const generation = this.operations.beginTransition();
-    this.publish({
-      ...this.snapshot,
-      transitionGeneration: generation,
-    });
-    const prepared = await this.ensureClientForTabInternal(tabId, workspace, generation);
-    this.assertCurrentTransition(generation);
-    const activeWorkspace = await this.enqueueWorkspaceCommit(async () => {
-      this.assertCurrentTransition(generation);
-      const latestWorkspace = copyWorkspace(
-        this.dependencies.workspace.getWorkspace() ?? prepared.workspace,
-      );
-      if (!latestWorkspace?.tabs.some((tab) => tab.id === tabId)) {
-        throw this.controllerError("workspace_conflict", "Conversation tab was removed during switch", tabId);
-      }
-      const nextWorkspace = activateConversationTab(latestWorkspace, tabId);
-      await this.dependencies.workspace.setWorkspace(nextWorkspace, {
-        flush: true,
-        save: true,
-      });
-      this.assertCurrentTransition(generation);
-      this.publishWorkspace(nextWorkspace);
-      return nextWorkspace;
-    });
-    this.updateTabOperation(tabId, {
-      connection: "ready",
-      hasSession: true,
-      sessionOperation: "idle",
-    });
-    return {
-      items: prepared.items,
-      sessionId: prepared.sessionId,
-      started: prepared.started,
-      tabId,
-      workspace: copyWorkspace(activeWorkspace)!,
-    };
+    const result = await this.activateExistingTab(tabId, target.sessionId ?? undefined);
+    void this.readAvailableHistory(tabId);
+    void this.ensureConversationReady(tabId).catch(() => {});
+    return result;
   }
 
   private async activateExistingTab(
@@ -942,9 +773,6 @@ export class ConversationController<TClient extends ConversationClient> {
       if (targetOperation.prompt === "running") {
         throw this.controllerError("operation_stale", "Conversation tab is busy", tabId);
       }
-      if (targetOperation.connection === "loading") {
-        throw this.controllerError("operation_stale", "Conversation tab is loading", tabId);
-      }
       if (targetOperation.sessionOperation === "model") {
         throw this.controllerError("operation_stale", "Conversation tab is switching model", tabId);
       }
@@ -962,6 +790,8 @@ export class ConversationController<TClient extends ConversationClient> {
         )
       : undefined;
     const token = this.operations.begin(tabId);
+    this.cancelQueuedRestoration(tabId);
+    this.localReads.delete(tabId);
     this.updateTabOperation(tabId, { closing: true });
     let replacementTabId: string | undefined;
 
@@ -1187,114 +1017,28 @@ export class ConversationController<TClient extends ConversationClient> {
       };
     }
 
-    // Reservation guard
-    const reservationOwner = this.historyReservations.get(sessionId);
-    if (reservationOwner) {
-      throw this.controllerError(
-        "session_reserved",
-        "History session is already opening in another conversation",
-      );
+    if (this.historyReservations.has(sessionId)) {
+      throw this.controllerError("session_reserved", "History session is already opening");
     }
-    this.historyReservations.set(sessionId, "pending");
-
-    const previousWorkspace = copyWorkspace(workspace)!;
-    const newTabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
-    const pendingWorkspace = addPendingConversationTab(previousWorkspace, newTabId);
-    const token = this.operations.begin(newTabId);
-    const generation = this.operations.getTransitionGeneration();
-    let succeeded = false;
-
-    this.publishWorkspace(pendingWorkspace);
-    this.updateTabOperation(newTabId, {
-      connection: "loading",
-      hasSession: false,
-      sessionOperation: "load",
-    });
-
-    const client = this.dependencies.clients.acquireClient(newTabId);
-
+    const tabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
+    this.historyReservations.set(sessionId, tabId);
     try {
-      await this.dependencies.workspace.setWorkspace(pendingWorkspace, { save: true });
-      this.assertCurrentOperation(newTabId, client, token, generation);
-
-      const items = await client.loadSessionHistory(sessionId);
-      this.assertCurrentOperation(newTabId, client, token, generation);
-
-      const actualSessionId = client.sessionId ?? sessionId;
-      const latestWorkspace = copyWorkspace(
-        this.dependencies.workspace.getWorkspace() ?? pendingWorkspace,
-      );
-      if (!latestWorkspace?.tabs.some((tab) => tab.id === newTabId)) {
-        throw this.controllerError("workspace_conflict", "New history tab was removed", newTabId);
-      }
-
-      const committedWorkspace = replaceConversationSession(
-        latestWorkspace,
-        newTabId,
-        actualSessionId,
-      );
-      this.assertCurrentOperation(newTabId, client, token, generation);
-      await this.dependencies.workspace.setWorkspace(committedWorkspace, {
-        flush: true,
-        save: true,
-      });
-      this.assertCurrentOperation(newTabId, client, token, generation);
-      this.publishWorkspace(committedWorkspace);
-      this.updateTabOperation(newTabId, {
-        connection: "ready",
-        hasSession: true,
-        sessionOperation: "idle",
-      });
-      succeeded = true;
-      return {
-        items,
-        reused: false,
-        sessionId: actualSessionId,
-        tabId: newTabId,
-        workspace: copyWorkspace(committedWorkspace)!,
-      };
-    } catch (error) {
-      // Rollback: restore previous workspace if still current
-      if (this.isCurrentTransition(generation) && this.operations.isCurrent(token)) {
-        this.updateTabOperation(newTabId, { connection: "failed" });
-      }
-      try {
-        const currentWorkspace = copyWorkspace(
-          this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
-        );
-        // Only rollback if the pending tab is still present and no other transition won
-        const pendingStillExists = currentWorkspace?.tabs.some((tab) => tab.id === newTabId);
-        if (
-          pendingStillExists &&
-          currentWorkspace &&
-          this.isCurrentTransition(generation)
-        ) {
-          await this.dependencies.workspace.setWorkspace(previousWorkspace, {
-            flush: true,
-            save: true,
-          });
-          this.publishWorkspace(previousWorkspace);
-        }
-        // Also clean up the sessions/maps that contain the failed tab
-        this.sessionStates.delete(newTabId);
-      } catch {
-        // Best-effort rollback
-      }
-      throw error;
+      const pending = replaceConversationSession(addPendingConversationTab(workspace, tabId), tabId, sessionId);
+      this.publishWorkspace(pending);
+      await this.dependencies.workspace.setWorkspace(pending, { save: true });
+      void this.readAvailableHistory(tabId);
+      const result = await this.ensureConversationReady(tabId);
+      return { ...result, reused: false };
     } finally {
-      if (this.historyReservations.get(sessionId) === "pending") {
-        this.historyReservations.delete(sessionId);
-      }
-      this.operations.complete(token);
-      if (!succeeded && this.isCurrentTransition(generation)) {
-        this.updateTabOperation(newTabId, { connection: "failed" });
-        void this.dependencies.clients.releaseClient(newTabId);
-      }
+      if (this.historyReservations.get(sessionId) === tabId) this.historyReservations.delete(sessionId);
     }
   }
 
   restartConversation(tabId: string): Promise<RestartConversationResult> {
     const blocked = this.blockedDuringStartup<RestartConversationResult>("restartConversation", tabId);
+    if (!blocked && !this.snapshot.controls.byTab.get(tabId)?.restart) {
+      return Promise.reject(this.controllerError("operation_stale", "Conversation is not ready to restart", tabId));
+    }
     return blocked ?? this.restartConversationInternal(tabId);
   }
 
@@ -1504,11 +1248,21 @@ export class ConversationController<TClient extends ConversationClient> {
     });
   }
 
+  private cancelQueuedRestoration(tabId: string): void {
+    const index = this.restoreQueue.findIndex((entry) => entry.tabId === tabId);
+    if (index >= 0) {
+      this.restoreQueue.splice(index, 1)[0]!.reject(this.controllerError("cancelled", "Conversation closed", tabId));
+    }
+    this.hydrationPromises.delete(tabId);
+  }
+
   async shutdown(): Promise<void> {
     if (this.disposed) {
       return;
     }
     this.disposed = true;
+    for (const entry of [...this.restoreQueue]) this.cancelQueuedRestoration(entry.tabId);
+    this.localReads.clear();
     this.operations.invalidateTransition();
     const tabIds = Array.from(this.snapshot.tabOperations.keys());
     await Promise.allSettled(
@@ -1536,6 +1290,7 @@ export class ConversationController<TClient extends ConversationClient> {
         aggregate: controls.aggregate,
         byTab: freezeMap(controls.byTab),
       },
+      histories: freezeMap(snapshot.histories),
       sessionStates: freezeMap(snapshot.sessionStates),
       tabOperations: freezeMap(snapshot.tabOperations),
     });

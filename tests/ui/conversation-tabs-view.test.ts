@@ -57,6 +57,22 @@ function defaults(callbacks: Partial<ConversationTabsCallbacks> = {}): Conversat
 }
 
 describe("renderConversationTabsView", () => {
+  it("shows a failed pending tab as retryable rather than perpetually starting", () => {
+    const host = document.createElement("div");
+    const callbacks = defaults();
+    renderConversationTabsView(host, {
+      activeTabId: "tab-1", isTabBusy: () => false, isTabLoading: () => false,
+      isTabFailed: () => true, tabNavigationDisabled: false,
+      tabs: [makeTab({ sessionId: null })],
+    }, callbacks);
+    const button = host.querySelector("button")!;
+    expect(button.getAttribute("aria-busy")).toBe("false");
+    expect(button.classList.contains("is-loading")).toBe(false);
+    expect(button.getAttribute("aria-label")).toContain("select to retry");
+    button.click();
+    expect(callbacks.onActivate).toHaveBeenCalledWith("tab-1");
+  });
+
   it("renders tabs with role=tablist and role=tab", () => {
     const host = document.createElement("div");
     const state: ConversationTabsState = {
