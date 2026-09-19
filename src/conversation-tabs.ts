@@ -5,7 +5,7 @@ import {
 } from "./composer-reference-tokens";
 import { isReasoningEffort } from "./session-history";
 import { SLASH_TOKEN_NAME_PATTERN } from "./slash-menu";
-import type { ReasoningEffort } from "./types";
+import type { HermesModelOption, ReasoningEffort } from "./types";
 
 export interface PersistedConversationTab {
   draft: string;
@@ -18,6 +18,8 @@ export interface PersistedConversationTab {
   token?: { kind: "skill" | "command"; name: string } | undefined;
   /** Explicit reference metadata from whole-paste URL/path recognition. */
   references?: ReferenceToken[] | undefined;
+  /** Explicitly selected model option for this tab (not bare model name). */
+  selectedModel?: HermesModelOption | undefined;
 }
 
 export interface PersistedConversationWorkspace {
@@ -30,7 +32,10 @@ export interface PersistedConversationWorkspace {
 export type ConversationTabPatch = Partial<
   Pick<
     PersistedConversationTab,
-    "draft" | "includeCurrentDocumentContext" | "reasoningEffort"
+    | "draft"
+    | "includeCurrentDocumentContext"
+    | "reasoningEffort"
+    | "selectedModel"
   >
 > & {
   token?: { kind: "skill" | "command"; name: string } | undefined;
@@ -340,6 +345,41 @@ export function applyCloseIntent(
   return workspace;
 }
 
+export function sanitizeModelOption(
+  value: unknown,
+): HermesModelOption | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.modelId !== "string" ||
+    !candidate.modelId.trim() ||
+    typeof candidate.providerId !== "string" ||
+    !candidate.providerId.trim() ||
+    typeof candidate.switchId !== "string" ||
+    !candidate.switchId.trim()
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    description:
+      typeof candidate.description === "string" ? candidate.description : "",
+    modelId: candidate.modelId,
+    name:
+      typeof candidate.name === "string" && candidate.name.trim().length > 0
+        ? candidate.name
+        : candidate.modelId,
+    providerId: candidate.providerId,
+    providerName:
+      typeof candidate.providerName === "string" &&
+      candidate.providerName.trim().length > 0
+        ? candidate.providerName
+        : candidate.providerId,
+    switchId: candidate.switchId,
+  });
+}
+
 export function updateConversationTab(
   workspace: PersistedConversationWorkspace,
   tabId: string,
@@ -350,9 +390,25 @@ export function updateConversationTab(
   }
   return {
     ...workspace,
-    tabs: workspace.tabs.map((tab) =>
-      tab.id === tabId ? { ...tab, ...patch } : tab,
-    ),
+    tabs: workspace.tabs.map((tab) => {
+      if (tab.id !== tabId) {
+        return tab;
+      }
+      const updated = { ...tab, ...patch };
+      if ("selectedModel" in patch) {
+        if (patch.selectedModel) {
+          const sanitized = sanitizeModelOption(patch.selectedModel);
+          if (sanitized) {
+            updated.selectedModel = sanitized;
+          } else {
+            delete updated.selectedModel;
+          }
+        } else {
+          delete updated.selectedModel;
+        }
+      }
+      return updated;
+    }),
   };
 }
 
@@ -468,6 +524,7 @@ export function normalizeConversationWorkspace(
     const reasoningEffort = tabEffort && isReasoningEffort(tabEffort)
       ? tabEffort
       : fallbackReasoningEffort;
+    const selectedModel = sanitizeModelOption(tab.selectedModel);
     tabs.push({
       draft: tab.draft ?? "",
       id: tab.id,
@@ -475,6 +532,7 @@ export function normalizeConversationWorkspace(
       label: tabs.length + 1,
       reasoningEffort,
       sessionId,
+      ...(selectedModel !== undefined ? { selectedModel } : {}),
       ...(token !== undefined ? { token } : {}),
       ...(references !== undefined ? { references } : {}),
     } as PersistedConversationTab);

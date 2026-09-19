@@ -5,15 +5,17 @@ import {
   HERMESIAN_REASONING_EFFORT_CONFIG_ID,
   HERMESIAN_REASONING_EFFORT_VERSION,
 } from "../src/hermes-acp-adapter";
-import type { ReasoningEffort } from "../src/types";
+import type { HermesModelOption, ReasoningEffort } from "../src/types";
 
 function createClient(options: {
+  desiredModel?: (sessionId?: string) => HermesModelOption | undefined;
   desiredReasoningEffort?: () => ReasoningEffort;
   requestHandler?: (...args: unknown[]) => Promise<unknown>;
   resumedSessionId?: string;
 }) {
   const calls: Array<{ method: string; params: any }> = [];
   const client = new HermesAcpClient({
+    desiredModel: options.desiredModel,
     desiredReasoningEffort: options.desiredReasoningEffort ?? (() => "default"),
     onEvent: () => undefined,
     onPermission: async () => ({ outcome: { outcome: "cancelled" } }),
@@ -204,5 +206,73 @@ describe("HermesAcpClient reasoning effort transport", () => {
     await expect(client.sendPrompt("test prompt")).rejects.toThrow(
       "Hermes ACP session is unavailable",
     );
+  });
+
+  it("acknowledges desired model restoration BEFORE applying reasoning effort and prompt dispatch", async () => {
+    const savedModel: HermesModelOption = {
+      description: "Test Claude model",
+      modelId: "claude-3-5-sonnet",
+      name: "Claude 3.5 Sonnet",
+      providerId: "anthropic",
+      providerName: "Anthropic",
+      switchId: "anthropic:claude-3-5-sonnet",
+    };
+
+    const { client, calls } = createClient({
+      desiredModel: () => savedModel,
+      desiredReasoningEffort: () => "high",
+    });
+
+    await client.sendPrompt("test prompt with model restoration");
+
+    expect(calls).toHaveLength(3);
+    // 1. Model restoration
+    expect(calls[0]).toEqual({
+      method: "session/set_model",
+      params: {
+        modelId: "anthropic:claude-3-5-sonnet",
+        sessionId: "test-session",
+      },
+    });
+    // 2. Reasoning effort
+    expect(calls[1]).toEqual({
+      method: "session/set_config_option",
+      params: {
+        configId: HERMESIAN_REASONING_EFFORT_CONFIG_ID,
+        sessionId: "test-session",
+        value: "high",
+      },
+    });
+    // 3. Prompt dispatch
+    expect(calls[2].method).toBe("session/prompt");
+  });
+
+  it("never applies reasoning effort or dispatches prompt when model restoration fails", async () => {
+    const failingModel: HermesModelOption = {
+      description: "Broken provider",
+      modelId: "fail-model",
+      name: "Fail Model",
+      providerId: "broken-prov",
+      providerName: "Broken",
+      switchId: "broken-prov:fail-model",
+    };
+
+    const { client, calls } = createClient({
+      desiredModel: () => failingModel,
+      desiredReasoningEffort: () => "high",
+      requestHandler: async (method) => {
+        if (method === "session/set_model") {
+          return null; // rejected
+        }
+        return {};
+      },
+    });
+
+    await expect(client.sendPrompt("prompt that must not send")).rejects.toMatchObject({
+      promptNotDispatched: true,
+    });
+
+    expect(calls.some((c) => c.method === "session/set_config_option")).toBe(false);
+    expect(calls.some((c) => c.method === "session/prompt")).toBe(false);
   });
 });

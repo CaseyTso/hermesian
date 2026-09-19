@@ -51,6 +51,7 @@ interface NewSessionResponseCompat extends acp.NewSessionResponse {
 
 export interface HermesAcpClientOptions {
   debugLogging?: boolean;
+  desiredModel?: (sessionId?: string) => HermesModelOption | undefined;
   desiredReasoningEffort?: () => ReasoningEffort;
   onEvent: (event: HermesUiEvent) => void;
   onPermission: (
@@ -285,6 +286,9 @@ export class HermesAcpClient {
   private busy = false;
   private catalogGeneration = 0;
   private connectPromise: Promise<void> | undefined;
+  private confirmedModel:
+    | { model: HermesModelOption; sessionId: string }
+    | undefined;
   private connection: acp.ClientConnection | undefined;
   private context: acp.ClientContext | undefined;
   private transportPromise: Promise<void> | undefined;
@@ -294,6 +298,10 @@ export class HermesAcpClient {
   private imagePromptSupported = false;
   private intentionalShutdown = false;
   private lifecycleGeneration = 0;
+  private modelRestorationFailure: Error | undefined;
+  private restoringModel:
+    | { model: HermesModelOption; sessionId: string }
+    | undefined;
   /**
    * True once the main prompt has actually been dispatched on the session.
    * `busy` alone only means sendPrompt claimed the slot; steer must never
@@ -451,6 +459,9 @@ export class HermesAcpClient {
     this.resumedSessionId = undefined;
     this.promptOwner = undefined;
     this.#appliedReasoningEffort = undefined;
+    this.confirmedModel = undefined;
+    this.modelRestorationFailure = undefined;
+    this.restoringModel = undefined;
     this.historyCapture = undefined;
     this.sessionOperation = undefined;
     this.busy = false;
@@ -671,6 +682,9 @@ export class HermesAcpClient {
     if (!this.context || !this.isTransportReady) {
       throw new Error("Hermes ACP context is unavailable");
     }
+    this.confirmedModel = undefined;
+    this.modelRestorationFailure = undefined;
+    this.restoringModel = undefined;
     const generation = this.lifecycleGeneration;
     const connection = this.connection;
     const childProcess = this.#acpProcess;
@@ -703,6 +717,15 @@ export class HermesAcpClient {
       }
       this.activeSession = activeSession;
       this.resumedSessionId = undefined;
+      if (typeof activeSession.prompt === "function") {
+        const rawPrompt = activeSession.prompt.bind(activeSession);
+        activeSession.prompt = ((...args: Parameters<typeof rawPrompt>) => {
+          if (this.modelRestorationFailure) {
+            throw this.modelRestorationFailure;
+          }
+          return rawPrompt(...args);
+        }) as typeof activeSession.prompt;
+      }
       this.initializeSessionState(
         this.activeSession.newSessionResponse as NewSessionResponseCompat,
         executable,
@@ -720,6 +743,15 @@ export class HermesAcpClient {
       }
       throw error;
     }
+
+    const desired = this.options.desiredModel?.();
+    if (desired) {
+      await this.restoreModelRoute(desired, this.activeSession.sessionId, {
+        connection,
+        context: this.context,
+        generation,
+      });
+    }
   }
 
   async newSession(): Promise<void> {
@@ -732,6 +764,9 @@ export class HermesAcpClient {
       this.activeSession?.dispose();
       this.activeSession = undefined;
       this.resumedSessionId = undefined;
+      this.confirmedModel = undefined;
+      this.modelRestorationFailure = undefined;
+      this.restoringModel = undefined;
       if (!this.context) {
         throw new Error("Hermes ACP context is unavailable");
       }
@@ -753,6 +788,15 @@ export class HermesAcpClient {
       }
       this.activeSession = activeSession;
       this.resumedSessionId = undefined;
+      if (typeof activeSession.prompt === "function") {
+        const rawPrompt = activeSession.prompt.bind(activeSession);
+        activeSession.prompt = ((...args: Parameters<typeof rawPrompt>) => {
+          if (this.modelRestorationFailure) {
+            throw this.modelRestorationFailure;
+          }
+          return rawPrompt(...args);
+        }) as typeof activeSession.prompt;
+      }
       const settings = this.options.settings();
       this.initializeSessionState(
         this.activeSession.newSessionResponse as NewSessionResponseCompat,
@@ -765,6 +809,11 @@ export class HermesAcpClient {
         status: "connected",
         detail: `Session ${this.activeSession.sessionId}`,
       });
+
+      const desired = this.options.desiredModel?.();
+      if (desired) {
+        await this.restoreModelRoute(desired, this.activeSession.sessionId, lifecycle);
+      }
     } finally {
       releaseOperation();
     }
@@ -824,6 +873,9 @@ export class HermesAcpClient {
       const lifecycle = this.captureLifecycle();
       const capture = { sessionId, updates: [] as acp.SessionUpdate[] };
       this.historyCapture = capture;
+      this.confirmedModel = undefined;
+      this.modelRestorationFailure = undefined;
+      this.restoringModel = undefined;
       try {
         const response = await withTimeout(
           this.context.request(acp.methods.agent.session.load, {
@@ -853,6 +905,12 @@ export class HermesAcpClient {
           status: "connected",
           detail: `Session ${sessionId}`,
         });
+
+        const desired = this.options.desiredModel?.(sessionId);
+        if (desired) {
+          await this.restoreModelRoute(desired, sessionId, lifecycle);
+        }
+
         return historyItemsFromUpdates(capture.updates);
       } finally {
         if (this.historyCapture === capture) {
@@ -898,6 +956,110 @@ export class HermesAcpClient {
     this.#appliedReasoningEffort = effort;
   }
 
+  private isModelConfirmed(model: HermesModelOption, sessionId: string): boolean {
+    return (
+      !this.modelRestorationFailure &&
+      this.confirmedModel !== undefined &&
+      this.confirmedModel.sessionId === sessionId &&
+      this.confirmedModel.model.switchId === model.switchId
+    );
+  }
+
+  private async restoreModelRoute(
+    model: HermesModelOption,
+    sessionId: string,
+    lifecycle: {
+      connection: acp.ClientConnection | undefined;
+      context: acp.ClientContext | undefined;
+      generation: number;
+    },
+  ): Promise<void> {
+    if (!lifecycle.context || !sessionId) {
+      throw new Error("Hermes ACP session is unavailable");
+    }
+    this.restoringModel = { model, sessionId };
+    try {
+      const response = await withTimeout(
+        lifecycle.context.request<Record<string, never> | null, {
+          modelId: string;
+          sessionId: string;
+        }>("session/set_model", {
+          modelId: model.switchId,
+          sessionId,
+        }),
+        FINITE_OPERATION_TIMEOUT_MS,
+        "Hermes ACP session/set_model",
+      );
+      this.assertLifecycleOwned(
+        lifecycle.generation,
+        lifecycle.connection,
+        lifecycle.context,
+      );
+      if (this.sessionId !== sessionId) {
+        throw new Error("Hermes session changed during model restoration");
+      }
+      if (response === null) {
+        throw new Error(
+          `Hermes rejected model restoration to "${model.providerName} · ${model.name}" (${model.switchId}). Please select another model in the model picker.`,
+        );
+      }
+      this.modelRestorationFailure = undefined;
+      this.confirmedModel = { model, sessionId };
+      this.updateSessionState({
+        contextUsage: undefined,
+        currentModel: model,
+      });
+      if (
+        this.restoringModel?.sessionId === sessionId &&
+        this.restoringModel?.model.switchId === model.switchId
+      ) {
+        this.restoringModel = undefined;
+      }
+    } catch (error) {
+      const isOwned =
+        lifecycle.generation === this.lifecycleGeneration &&
+        lifecycle.connection === this.connection &&
+        !this.intentionalShutdown &&
+        !lifecycle.connection?.signal.aborted;
+
+      const isCancellation =
+        this.promptOwner?.cancelled === true ||
+        (error instanceof Error &&
+          (error.message.toLowerCase().includes("cancel") ||
+            error.message.toLowerCase().includes("stale lifecycle") ||
+            error.message.toLowerCase().includes("session changed") ||
+            error.message.toLowerCase().includes("aborted") ||
+            error.name === "AbortError"));
+
+      const isGenuine = !isCancellation && this.sessionId === sessionId;
+
+      if (isOwned && isGenuine) {
+        this.confirmedModel = undefined;
+        if (
+          this.restoringModel?.sessionId === sessionId &&
+          this.restoringModel?.model.switchId === model.switchId
+        ) {
+          this.restoringModel = undefined;
+        }
+        const failure =
+          error instanceof Error && error.message.includes("Please select another model")
+            ? error
+            : new Error(
+                `Hermes failed to restore model route "${model.providerName} · ${model.name}" (${model.switchId}): ${errorMessage(error)}. Please select another model in the model picker.`,
+              );
+        this.modelRestorationFailure = failure;
+        this.emit({
+          type: "error",
+          message: failure.message,
+          terminal: false,
+        });
+        throw failure;
+      }
+
+      throw error;
+    }
+  }
+
   async setModel(model: HermesModelOption): Promise<void> {
     const releaseOperation = this.claimSessionOperation(
       "model",
@@ -917,32 +1079,10 @@ export class HermesAcpClient {
       if (!this.context || !sessionId) {
         throw new Error("Hermes ACP session is unavailable");
       }
-      if (this.sessionState.currentModel?.switchId === model.switchId) {
+      if (!this.modelRestorationFailure && this.sessionState.currentModel?.switchId === model.switchId) {
         return;
       }
-      const response = await withTimeout(
-        this.context.request<Record<string, never> | null, {
-          modelId: string;
-          sessionId: string;
-        }>("session/set_model", {
-          modelId: model.switchId,
-          sessionId,
-        }),
-        FINITE_OPERATION_TIMEOUT_MS,
-        "Hermes ACP session/set_model",
-      );
-      this.assertLifecycleOwned(
-        lifecycle.generation,
-        lifecycle.connection,
-        lifecycle.context,
-      );
-      if (response === null) {
-        throw new Error("Hermes rejected the model switch");
-      }
-      this.updateSessionState({
-        contextUsage: undefined,
-        currentModel: model,
-      });
+      await this.restoreModelRoute(model, sessionId, lifecycle);
     } finally {
       // Only touch session state when this lifecycle still owns the client.
       // After disconnect, resetSessionState already cleared switchingModel.
@@ -1003,6 +1143,20 @@ export class HermesAcpClient {
       const sessionId = resumedSessionId ?? session?.sessionId;
       if (!this.context || !sessionId) {
         throw new Error("Hermes ACP session is unavailable");
+      }
+
+      if (this.modelRestorationFailure) {
+        const error = new Error(this.modelRestorationFailure.message);
+        Object.assign(error, { promptNotDispatched: true });
+        this.emit({ type: "error", message: error.message, terminal: true });
+        throw error;
+      }
+
+      const desiredModel = this.options.desiredModel?.(sessionId);
+      if (desiredModel && !this.isModelConfirmed(desiredModel, sessionId)) {
+        const lifecycle = this.captureLifecycle();
+        await this.restoreModelRoute(desiredModel, sessionId, lifecycle);
+        assertPromptOwner();
       }
 
       await this.applyReasoningEffort(sessionId, desiredEffort);
@@ -1234,6 +1388,9 @@ export class HermesAcpClient {
     this.lifecycleGeneration += 1;
     this.promptOwner = undefined;
     this.#appliedReasoningEffort = undefined;
+    this.confirmedModel = undefined;
+    this.modelRestorationFailure = undefined;
+    this.restoringModel = undefined;
     this.connectPromise = undefined;
     this.transportPromise = undefined;
     this.intentionalShutdown = true;
@@ -1441,10 +1598,28 @@ export class HermesAcpClient {
           currentProvider?.label ?? "Current provider",
         );
         const models = mergeModelCatalogs(normalized.models, catalog);
-        const currentModel = normalized.current
-          ? models.find((model) => model.switchId === normalized.current?.switchId) ??
-            normalized.current
-          : this.sessionState.currentModel;
+        const confirmed = this.confirmedModel;
+        const restoring = this.restoringModel;
+        const targetModel =
+          (confirmed && confirmed.sessionId === this.sessionId
+            ? confirmed.model
+            : undefined) ??
+          (restoring && restoring.sessionId === this.sessionId
+            ? restoring.model
+            : undefined) ??
+          this.sessionState.currentModel;
+        let currentModel: HermesModelOption | undefined;
+        if (targetModel) {
+          currentModel =
+            models.find((model) => model.switchId === targetModel.switchId) ??
+            targetModel;
+        } else if (normalized.current) {
+          currentModel =
+            models.find((model) => model.switchId === normalized.current?.switchId) ??
+            normalized.current;
+        } else {
+          currentModel = undefined;
+        }
         this.updateSessionState({
           catalogLoading: false,
           currentModel,

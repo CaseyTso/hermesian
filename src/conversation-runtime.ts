@@ -168,7 +168,9 @@ export function deriveConversationControlAvailability(
       activeTab?.closing !== true,
     hasSession,
     history: !activeSessionBusy && hasSession,
-    model: !activeSessionBusy && hasSession,
+    model:
+      !activeSessionBusy &&
+      (hasSession || (activeTab?.connection === "failed" && Boolean(activeTab?.hasSession))),
     reasoning: Boolean(activeTab) && !globalBusy && activeTab?.closing !== true,
     restart: !activeSessionBusy && hasSession,
     send: (!activeSessionBusy && hasSession) || Boolean(

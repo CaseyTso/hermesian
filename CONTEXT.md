@@ -32,6 +32,10 @@ _Avoid_: Voice conversation, voice mode, auto-send
 A Conversation Tab's independently saved reasoning-effort preference, inherited from the current Conversation Tab when a new one is created. A change applies from the next turn, including when chosen during an Active Turn; it does not alter an ongoing Active Turn or another Conversation Tab's preference.
 _Avoid_: Thinking display, reasoning visibility
 
+**Model Selection**:
+A Conversation Tab preference identifying both its provider and model; same model name across providers is not same selection.
+_Avoid_: Bare model name, global model, active model
+
 **File Attachment Capsule**:
 An inline reference capsule in the composer that holds an absolute file or folder path, inserted by the file picker button instead of by paste.
 _Avoid_: File chip, file pill, file token

@@ -44,7 +44,7 @@ import {
   HERMESIAN_VIEW_TYPE,
   HermesianSidebarView,
 } from "./view";
-import type { MarkdownDocumentContext, ReasoningEffort } from "./types";
+import type { HermesModelOption, MarkdownDocumentContext, ReasoningEffort } from "./types";
 
 export default class HermesianPlugin extends Plugin {
   settings: HermesianSettings = { ...DEFAULT_SETTINGS };
@@ -88,6 +88,7 @@ export default class HermesianPlugin extends Plugin {
         settings: () => this.settings,
         vaultPath: this.getVaultPath(),
         desiredReasoningEffort: () => this.getReasoningEffort(tabId),
+        desiredModel: (sessionId?: string) => this.getSelectedModel(tabId, sessionId),
       });
       const unsubscribe = client.onSessionState((state) => {
         if (isCurrent()) {
@@ -487,6 +488,30 @@ export default class HermesianPlugin extends Plugin {
     }
     if (!this.sidebarView) throw new Error("Conversation view is not open");
     await this.sidebarView.setConversationReasoningEffort(tabId, effort);
+  }
+
+  getSelectedModel(tabId?: string, sessionId?: string): HermesModelOption | undefined {
+    if (tabId) {
+      const tab = this.conversationWorkspace?.tabs.find((t) => t.id === tabId);
+      if (!tab || !tab.selectedModel) return undefined;
+      if (sessionId !== undefined && tab.sessionId && tab.sessionId !== sessionId) {
+        return undefined;
+      }
+      return { ...tab.selectedModel };
+    }
+    const activeTab = this.conversationWorkspace?.tabs.find(
+      (t) => t.id === this.conversationWorkspace?.activeTabId,
+    );
+    if (!activeTab || !activeTab.selectedModel) return undefined;
+    if (sessionId !== undefined && activeTab.sessionId && activeTab.sessionId !== sessionId) {
+      return undefined;
+    }
+    return { ...activeTab.selectedModel };
+  }
+
+  async setSelectedModel(tabId: string, model: HermesModelOption): Promise<void> {
+    if (!this.sidebarView) throw new Error("Conversation view is not open");
+    await this.sidebarView.setConversationSelectedModel(tabId, model);
   }
 
   private async disconnectAllClients(): Promise<void> {

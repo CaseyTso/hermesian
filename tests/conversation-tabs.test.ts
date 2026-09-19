@@ -14,6 +14,7 @@ import {
   normalizeConversationWorkspace,
   removeConversationTab,
   replaceConversationSession,
+  sanitizeModelOption,
   shouldAutoScrollConversation,
   updateConversationTab,
 } from "../src/conversation-tabs";
@@ -930,5 +931,192 @@ describe("inline reference persistence (start placements)", () => {
     expect(workspace!.tabs[0].references).toEqual([
       { kind: "url", value: URL_A },
     ]);
+  });
+
+  describe("model selection persistence and normalization", () => {
+    it("retains exact routing identity for named custom and tagged models", () => {
+      const namedCustom = {
+        description: "Custom Grok via reverse proxy",
+        modelId: "grok-2",
+        name: "Grok 2 (Custom)",
+        providerId: "custom:future-grok",
+        providerName: "Future Grok",
+        switchId: "custom:future-grok:grok-2",
+      };
+      const taggedModel = {
+        description: "Local Ollama Qwen",
+        modelId: "qwen2.5:7b-instruct",
+        name: "Qwen 2.5 7B",
+        providerId: "ollama",
+        providerName: "Ollama",
+        switchId: "ollama:qwen2.5:7b-instruct",
+      };
+
+      const workspace = normalizeConversationWorkspace({
+        activeTabId: "tab-1",
+        tabs: [
+          {
+            id: "tab-1",
+            label: 1,
+            sessionId: "sess-1",
+            selectedModel: namedCustom,
+          },
+          {
+            id: "tab-2",
+            label: 2,
+            sessionId: "sess-2",
+            selectedModel: taggedModel,
+          },
+        ],
+        version: 2,
+      });
+
+      expect(workspace).toBeDefined();
+      expect(workspace!.tabs[0].selectedModel).toEqual(namedCustom);
+      expect(workspace!.tabs[0].selectedModel?.switchId).toBe("custom:future-grok:grok-2");
+      expect(workspace!.tabs[0].selectedModel?.providerId).toBe("custom:future-grok");
+
+      expect(workspace!.tabs[1].selectedModel).toEqual(taggedModel);
+      expect(workspace!.tabs[1].selectedModel?.switchId).toBe("ollama:qwen2.5:7b-instruct");
+      expect(workspace!.tabs[1].selectedModel?.providerId).toBe("ollama");
+    });
+
+    it("normalizes legacy v1 and v2 workspaces lacking selectedModel field", () => {
+      const legacyV1 = {
+        activeTabId: "tab-1",
+        tabs: [
+          {
+            id: "tab-1",
+            label: 1,
+            sessionId: "sess-1",
+            draft: "legacy draft",
+          },
+        ],
+        version: 1,
+      };
+      const normalizedV1 = normalizeConversationWorkspace(legacyV1);
+      expect(normalizedV1).toBeDefined();
+      expect(normalizedV1!.tabs[0].selectedModel).toBeUndefined();
+      expect(normalizedV1!.tabs[0].draft).toBe("legacy draft");
+
+      const legacyV2 = {
+        activeTabId: "tab-2",
+        nextLabel: 3,
+        tabs: [
+          {
+            id: "tab-2",
+            label: 1,
+            sessionId: "sess-2",
+            draft: "v2 draft",
+          },
+        ],
+        version: 2,
+      };
+      const normalizedV2 = normalizeConversationWorkspace(legacyV2);
+      expect(normalizedV2).toBeDefined();
+      expect(normalizedV2!.tabs[0].selectedModel).toBeUndefined();
+      expect(normalizedV2!.tabs[0].draft).toBe("v2 draft");
+    });
+
+    it("drops malformed selectedModel metadata without discarding conversation, draft, or history binding", () => {
+      const workspace = normalizeConversationWorkspace({
+        activeTabId: "tab-1",
+        tabs: [
+          {
+            id: "tab-1",
+            label: 1,
+            sessionId: "sess-1",
+            draft: "important draft 1",
+            selectedModel: "bare-model-name", // string instead of object
+          },
+          {
+            id: "tab-2",
+            label: 2,
+            sessionId: "sess-2",
+            draft: "important draft 2",
+            selectedModel: { modelId: "gpt-4o", name: "GPT-4o" }, // missing providerId & switchId
+          },
+          {
+            id: "tab-3",
+            label: 3,
+            sessionId: "sess-3",
+            draft: "important draft 3",
+            selectedModel: {
+              modelId: "gpt-4o",
+              providerId: "   ", // empty providerId
+              switchId: "openai:gpt-4o",
+            },
+          },
+          {
+            id: "tab-4",
+            label: 4,
+            sessionId: "sess-4",
+            draft: "important draft 4",
+            selectedModel: null,
+          },
+          {
+            id: "tab-5",
+            label: 5,
+            sessionId: "sess-5",
+            draft: "important draft 5",
+            selectedModel: [1, 2, 3],
+          },
+        ],
+        version: 2,
+      });
+
+      expect(workspace).toBeDefined();
+      expect(workspace!.tabs).toHaveLength(5);
+      for (let i = 0; i < 5; i++) {
+        const tab = workspace!.tabs[i];
+        expect(tab.id).toBe(`tab-${i + 1}`);
+        expect(tab.sessionId).toBe(`sess-${i + 1}`);
+        expect(tab.draft).toBe(`important draft ${i + 1}`);
+        expect(tab.selectedModel).toBeUndefined();
+      }
+    });
+
+    it("never infers providers from model names", () => {
+      // Even if modelId or name suggests a well-known provider, lack of providerId must not infer it
+      expect(
+        sanitizeModelOption({
+          modelId: "claude-3-5-sonnet-20241022",
+          name: "Claude 3.5 Sonnet",
+          switchId: "anthropic:claude-3-5-sonnet-20241022",
+        }),
+      ).toBeUndefined();
+
+      expect(
+        sanitizeModelOption({
+          modelId: "gpt-4o",
+          name: "GPT-4o",
+          switchId: "openai:gpt-4o",
+        }),
+      ).toBeUndefined();
+    });
+
+    it("updates selectedModel via updateConversationTab and preserves it on subsequent draft edits", () => {
+      const initial = createConversationWorkspace("tab-1", "sess-1");
+      const model = {
+        description: "Test",
+        modelId: "model-1",
+        name: "Model 1",
+        providerId: "prov-1",
+        providerName: "Provider 1",
+        switchId: "prov-1:model-1",
+      };
+
+      const withModel = updateConversationTab(initial, "tab-1", { selectedModel: model });
+      expect(withModel.tabs[0].selectedModel).toEqual(model);
+
+      // Subsequent draft edit does not clear selectedModel
+      const withDraft = updateConversationTab(withModel, "tab-1", { draft: "updated text" });
+      expect(withDraft.tabs[0].selectedModel).toEqual(model);
+      expect(withDraft.tabs[0].draft).toBe("updated text");
+
+      // Explicitly clearing selectedModel
+      const cleared = updateConversationTab(withDraft, "tab-1", { selectedModel: undefined });
+      expect(cleared.tabs[0].selectedModel).toBeUndefined();
+    });
   });
 });

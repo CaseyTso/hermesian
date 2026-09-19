@@ -1474,12 +1474,29 @@ export class HermesianSidebarView extends ItemView {
     this.modelPicker.open();
   }
 
+  async setConversationSelectedModel(
+    tabId: string,
+    model: HermesModelOption,
+    expectedSessionId?: string | null,
+  ): Promise<void> {
+    if (!this.controller || this.viewClosed) {
+      throw new Error("Conversation view is not ready");
+    }
+    await this.controller.setSelectedModel(tabId, model, expectedSessionId);
+  }
+
   private async chooseModel(tabId: string, model: HermesModelOption): Promise<void> {
     if (this.isTabBusy(tabId)) {
       return;
     }
     try {
-      await this.plugin.getClient(tabId).setModel(model);
+      const client = this.plugin.getClient(tabId);
+      const expectedSessionId =
+        client.sessionId ??
+        this.conversationWorkspace?.tabs.find((t) => t.id === tabId)?.sessionId ??
+        null;
+      await client.setModel(model);
+      await this.setConversationSelectedModel(tabId, model, expectedSessionId);
     } catch (error) {
       new Notice(`Hermesian model switch failed: ${this.messageFor(error)}`);
     }

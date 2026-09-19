@@ -1,4 +1,4 @@
-import type { HermesSessionState, HermesHistoryItem, ReasoningEffort } from "./types";
+import type { HermesHistoryItem, HermesModelOption, HermesSessionState, ReasoningEffort } from "./types";
 import { isReasoningEffort } from "./session-history";
 import {
   ConversationOperationCoordinator,
@@ -17,6 +17,7 @@ import {
   createCloseIntent,
   removeConversationTab,
   replaceConversationSession,
+  sanitizeModelOption,
   updateConversationTab,
   type PersistedConversationTab,
   type PersistedConversationWorkspace,
@@ -161,7 +162,13 @@ function copyWorkspace(
     return undefined;
   }
   const tabs = Object.freeze(
-    workspace.tabs.map((tab) => Object.freeze({ ...tab })),
+    workspace.tabs.map((tab) => {
+      const copy = { ...tab };
+      if (tab.selectedModel) {
+        copy.selectedModel = Object.freeze({ ...tab.selectedModel });
+      }
+      return Object.freeze(copy);
+    }),
   );
   return Object.freeze({ ...workspace, tabs }) as PersistedConversationWorkspace;
 }
@@ -617,6 +624,101 @@ export class ConversationController<TClient extends ConversationClient> {
     });
   }
 
+  /** Serialize preference changes with structural commits, without marking any tab busy. */
+  setSelectedModel(
+    tabId: string,
+    model: HermesModelOption,
+    expectedSessionId?: string | null,
+  ): Promise<void> {
+    const sanitized = sanitizeModelOption(model);
+    if (!sanitized) {
+      return Promise.reject(new Error("Invalid model selection"));
+    }
+    return this.enqueueWorkspaceCommit(async () => {
+      const latest = copyWorkspace(
+        this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+      );
+      const tab = latest?.tabs.find((candidate) => candidate.id === tabId);
+      if (
+        this.disposed ||
+        !latest ||
+        !tab ||
+        this.snapshot.tabOperations.get(tabId)?.closing
+      ) {
+        throw this.controllerError(
+          "cancelled",
+          "Conversation is no longer available",
+          tabId,
+        );
+      }
+      if (
+        expectedSessionId !== undefined &&
+        tab.sessionId !== expectedSessionId
+      ) {
+        throw this.controllerError(
+          "operation_stale",
+          "Conversation session changed",
+          tabId,
+        );
+      }
+      const previous = tab.selectedModel ? { ...tab.selectedModel } : undefined;
+      const next = updateConversationTab(latest, tabId, {
+        selectedModel: sanitized,
+      });
+      try {
+        const saving = this.dependencies.workspace.setWorkspace(next, {
+          flush: true,
+          save: true,
+        });
+        this.publishWorkspace(next);
+        await saving;
+        if (!this.disposed && this.snapshot.tabOperations.get(tabId)?.connection === "failed") {
+          this.updateTabOperation(tabId, {
+            connection: "ready",
+            hasSession: Boolean(tab.sessionId),
+            sessionOperation: "idle",
+          });
+        }
+      } catch (error) {
+        const current = copyWorkspace(
+          this.dependencies.workspace.getWorkspace() ?? latest,
+        )!;
+        // Roll back only our field, not typing/navigation that happened while persistence awaited.
+        const currentTab = current.tabs.find(
+          (candidate) => candidate.id === tabId,
+        );
+        const owned =
+          currentTab?.selectedModel?.switchId === sanitized.switchId &&
+          currentTab?.selectedModel?.providerId === sanitized.providerId;
+        const recovered = owned
+          ? updateConversationTab(current, tabId, { selectedModel: previous })
+          : current;
+        if (!this.disposed) {
+          await this.dependencies.workspace.setWorkspace(recovered, {
+            save: true,
+          });
+          this.publishWorkspace(recovered);
+        }
+        throw error;
+      }
+      if (!this.disposed) {
+        this.publishWorkspace(
+          copyWorkspace(
+            this.dependencies.workspace.getWorkspace() ?? next,
+          )!,
+        );
+      }
+    });
+  }
+
+  getSelectedModel(tabId?: string): HermesModelOption | undefined {
+    const ws = this.snapshot.workspace;
+    if (!ws) return undefined;
+    const targetId = tabId ?? ws.activeTabId;
+    const tab = ws.tabs.find((t) => t.id === targetId);
+    return tab?.selectedModel ? { ...tab.selectedModel } : undefined;
+  }
+
   private updateTabOperation(
     tabId: string,
     patch: Partial<TabOperationState>,
@@ -943,10 +1045,14 @@ export class ConversationController<TClient extends ConversationClient> {
         throw this.controllerError("workspace_conflict", "Conversation tab was removed during history load", tabId);
       }
       const actualSessionId = client.sessionId ?? sessionId;
-      const committedWorkspace = replaceConversationSession(
-        latestWorkspace,
+      const committedWorkspace = updateConversationTab(
+        replaceConversationSession(
+          latestWorkspace,
+          tabId,
+          actualSessionId,
+        ),
         tabId,
-        actualSessionId,
+        { selectedModel: undefined },
       );
       await this.dependencies.workspace.setWorkspace(committedWorkspace, {
         flush: true,
