@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { resolveHermesPythonCommand } from "./hermes-model-catalog";
+import { buildHermesPythonArgs, resolveHermesPythonCommand } from "./hermes-model-catalog";
 import { stripUserPromptForDisplay } from "./outbound-envelope";
 import type { HermesHistoryItem } from "./types";
 
@@ -62,7 +62,7 @@ export function parseLocalHistoryOutput(output: string): HermesHistoryItem[] {
 export function loadHermesLocalHistory(executable: string, profile: string, sessionId: string): Promise<HermesHistoryItem[]> {
   const python = resolveHermesPythonCommand(executable);
   return new Promise((resolve, reject) => {
-    const child = spawn(python.executable, [...python.argsPrefix, "-c", LOCAL_HISTORY_SCRIPT, profile, sessionId], {
+    const child = spawn(python.executable, buildHermesPythonArgs(python, LOCAL_HISTORY_SCRIPT, [profile, sessionId]), {
       env: { ...process.env, ...(profile ? { HERMES_PROFILE: profile } : {}) },
       shell: false, stdio: ["ignore", "pipe", "pipe"],
     });

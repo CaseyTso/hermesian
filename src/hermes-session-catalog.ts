@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import { resolveHermesPythonCommand } from "./hermes-model-catalog";
+import { buildHermesPythonArgs, resolveHermesPythonCommand } from "./hermes-model-catalog";
 import type { HermesHistoryEntry } from "./types";
 
 const CATALOG_MARKER = "HERMESIAN_SESSION_CATALOG=";
@@ -153,7 +153,7 @@ export function loadHermesSessionCatalog(
   return new Promise<HermesHistoryEntry[]>((resolvePromise, rejectPromise) => {
     const child = spawn(
       python.executable,
-      [...python.argsPrefix, "-c", CATALOG_SCRIPT, profile],
+      buildHermesPythonArgs(python, CATALOG_SCRIPT, [profile]),
       {
         env: {
           ...process.env,

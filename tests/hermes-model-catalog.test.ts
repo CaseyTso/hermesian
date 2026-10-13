@@ -1,9 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  buildHermesPythonArgs,
   parseHermesModelCatalogOutput,
+  parseHermesRuntimeCommand,
   parseLauncherTarget,
   parsePythonShebang,
+  resolveHermesPythonCommand,
 } from "../src/hermes-model-catalog";
 import {
   mergeModelCatalogs,
@@ -31,6 +37,75 @@ describe("Hermes Python launcher parsing", () => {
         '#!/usr/bin/env bash\nunset PYTHONPATH\nexec "/opt/hermes-user/.hermes/venv/bin/hermes" "$@"\n',
       ),
     ).toBe("/opt/hermes-user/.hermes/venv/bin/hermes");
+  });
+});
+
+describe("managed Hermes runtime launchers", () => {
+  const bootstrap = "import runpy; BOOTSTRAP_READY = True;";
+  const nativeCode = `${bootstrap} runpy.run_module("hermes_cli.main", run_name="__main__", alter_sys=True)`;
+  const nativeCommand = ["/opt/Hermes Agent/tools/bin/python3", "-I", "-c", nativeCode];
+  const fixtures: string[] = [];
+  afterEach(() => {
+    for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function fixture(): string {
+    const dir = mkdtempSync(join(tmpdir(), "hermesian runtime "));
+    fixtures.push(dir);
+    return dir;
+  }
+
+  it("preserves installation bootstrap and replaces only the native CLI entry", () => {
+    const python = parseHermesRuntimeCommand(JSON.stringify(nativeCommand));
+    expect(python).toEqual({ executable: nativeCommand[0], argsPrefix: ["-I"], bootstrapCode: bootstrap });
+    expect(buildHermesPythonArgs(python, "print(BOOTSTRAP_READY)", ["work", "session-id"]))
+      .toEqual(["-I", "-c", `${bootstrap}\nprint(BOOTSTRAP_READY)`, "work", "session-id"]);
+  });
+
+  it("accepts the native single-quoted module entry", () => {
+    const code = `${bootstrap} runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)`;
+    expect(parseHermesRuntimeCommand(JSON.stringify(["python3", "-I", "-c", code])).bootstrapCode).toBe(bootstrap);
+  });
+
+  it("rejects malformed, non-isolated, or unexpected runtime entry points", () => {
+    for (const command of [null, {}, [], ["python3", 1, "-c", nativeCode],
+      ["python3", "-c", nativeCode], [...nativeCommand, "extra"],
+      ["python3", "-I", "-c", "print('not a launcher')"],
+      ["python3", "-I", "-c", nativeCode + "; print('extra')"]]) {
+      expect(() => parseHermesRuntimeCommand(JSON.stringify(command))).toThrow();
+    }
+  });
+
+  it("resolves an inline-Python shell launcher through its machine boundary", () => {
+    const dir = fixture();
+    const launcher = join(dir, "hermes");
+    writeFileSync(launcher, `#!/bin/sh\n[ "$1" = "--print-runtime-command" ] || exit 1\nprintf '%s\\n' '${JSON.stringify(nativeCommand)}'\n`);
+    chmodSync(launcher, 0o755);
+    const wrapper = join(dir, "user-hermes");
+    writeFileSync(wrapper, `#!/bin/sh\nexec "${launcher}" "$@"\n`);
+    chmodSync(wrapper, 0o755);
+    expect(resolveHermesPythonCommand(wrapper)).toEqual({
+      executable: nativeCommand[0], argsPrefix: ["-I"], bootstrapCode: bootstrap,
+    });
+  });
+
+  it("still resolves legacy venv entry points without running them", () => {
+    const dir = fixture();
+    const launcher = join(dir, "hermes");
+    writeFileSync(launcher, "#!/opt/hermes/venv/bin/python3\nraise RuntimeError('must not execute')\n");
+    const wrapper = join(dir, "user-hermes");
+    writeFileSync(wrapper, `#!/bin/sh\nexec "${launcher}" "$@"\n`);
+    expect(resolveHermesPythonCommand(wrapper)).toEqual({
+      executable: "/opt/hermes/venv/bin/python3", argsPrefix: [],
+    });
+  });
+
+  it("fails clearly when the runtime query cannot start", () => {
+    const dir = fixture();
+    const launcher = join(dir, "hermes");
+    writeFileSync(launcher, "#!/bin/sh\nexit 2\n");
+    chmodSync(launcher, 0o755);
+    expect(() => resolveHermesPythonCommand(launcher)).toThrow("Hermes Python runtime could not be resolved");
   });
 });
 

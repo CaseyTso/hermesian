@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import { resolveHermesPythonCommand } from "./hermes-model-catalog";
+import { buildHermesPythonArgs, resolveHermesPythonCommand } from "./hermes-model-catalog";
 import type { HermesSkillOption } from "./types";
 
 const CATALOG_MARKER = "HERMESIAN_SKILL_CATALOG=";
@@ -85,7 +85,7 @@ export function loadHermesSkillCatalog(
   return new Promise<HermesSkillOption[]>((resolvePromise, rejectPromise) => {
     const child = spawn(
       python.executable,
-      [...python.argsPrefix, "-c", CATALOG_SCRIPT, profile],
+      buildHermesPythonArgs(python, CATALOG_SCRIPT, [profile]),
       {
         env: {
           ...process.env,

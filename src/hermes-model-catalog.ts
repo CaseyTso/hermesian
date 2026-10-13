@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 
@@ -12,6 +12,43 @@ const MAX_OUTPUT_BYTES = 2_000_000;
 export interface PythonCommand {
   argsPrefix: string[];
   executable: string;
+  /** Installation-bound bootstrap; selects the current dependency generation at child start. */
+  bootstrapCode?: string;
+}
+
+/** Run helpers inside Hermes' own runtime, not bare store Python or vault-supplied imports. */
+export function buildHermesPythonArgs(
+  python: PythonCommand,
+  script: string,
+  args: string[] = [],
+): string[] {
+  const prefix = [...python.argsPrefix];
+  if (!prefix.includes("-I")) prefix.push("-I");
+  const code = python.bootstrapCode ? `${python.bootstrapCode}\n${script}` : script;
+  return [...prefix, "-c", code, ...args];
+}
+
+/** Consume the source launcher's machine boundary, retaining its bootstrap but not its CLI entry. */
+export function parseHermesRuntimeCommand(output: string): PythonCommand {
+  const command: unknown = JSON.parse(output.trim());
+  if (!Array.isArray(command) || command.length < 4 ||
+      !command.every((arg) => typeof arg === "string") || !command[0]) {
+    throw new Error("Hermes returned an invalid runtime command");
+  }
+  const codeIndex = command.indexOf("-c");
+  if (codeIndex < 2 || codeIndex !== command.length - 2 ||
+      !command.slice(1, codeIndex).includes("-I")) {
+    throw new Error("Unsupported Hermes runtime command");
+  }
+  const code: string = command[codeIndex + 1];
+  const entry = /runpy\.run_module\((['"])hermes_cli\.main\1,\s*run_name=(['"])__main__\2,\s*alter_sys=True\)\s*;?\s*$/;
+  const match = entry.exec(code);
+  if (!match) throw new Error("Unsupported Hermes runtime entry point");
+  return {
+    executable: command[0],
+    argsPrefix: command.slice(1, codeIndex),
+    bootstrapCode: code.slice(0, match.index).trim(),
+  };
 }
 
 const CATALOG_SCRIPT = String.raw`
@@ -182,7 +219,20 @@ export function resolveHermesPythonCommand(hermesExecutable: string): PythonComm
     current = realpathSync(isAbsolute(target) ? target : resolve(dirname(current), target));
   }
 
-  throw new Error("Hermes Python runtime could not be resolved");
+  // Managed source installs use a shell launcher with inline isolated Python,
+  // not a Python shebang. Ask that exact launcher for its installation-bound
+  // runtime instead of parsing shell quoting or pinning a dependency directory.
+  const runtime = spawnSync(hermesExecutable, ["--print-runtime-command"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    maxBuffer: 256_000,
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (!runtime.error && runtime.status === 0) {
+    return parseHermesRuntimeCommand(runtime.stdout);
+  }
+  throw new Error("Hermes Python runtime could not be resolved; check the Hermes executable and installation");
 }
 
 export function parseHermesModelCatalogOutput(stdout: string): HermesModelCatalog {
@@ -254,7 +304,7 @@ export function loadHermesModelCatalog(
   return new Promise<HermesModelCatalog>((resolvePromise, rejectPromise) => {
     const child = spawn(
       python.executable,
-      [...python.argsPrefix, "-c", CATALOG_SCRIPT, profile],
+      buildHermesPythonArgs(python, CATALOG_SCRIPT, [profile]),
       {
         env: {
           ...process.env,

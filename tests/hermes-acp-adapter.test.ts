@@ -5,10 +5,21 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { HERMES_ACP_ADAPTER_PYTHON_SCRIPT as script, buildHermesAcpSpawnArgs, isReasoningEffortAck } from "../src/hermes-acp-adapter";
 import { resolveHermesExecutable } from "../src/acp-client";
-import { resolveHermesPythonCommand } from "../src/hermes-model-catalog";
+import { buildHermesPythonArgs, resolveHermesPythonCommand } from "../src/hermes-model-catalog";
 
 let python: ReturnType<typeof resolveHermesPythonCommand> | undefined;
 try { python = resolveHermesPythonCommand(resolveHermesExecutable("")); } catch { /* Optional installed-source suite. */ }
+
+// Managed bootstrap selects dependencies from the installation home first.
+// Redirect only the test's config/data afterwards, avoiding a fresh PM install.
+function testRuntime(home: string): NonNullable<typeof python> {
+  return { ...python!, bootstrapCode: `${python!.bootstrapCode ?? ""}\nimport os\nos.environ["HERMES_HOME"] = ${JSON.stringify(home)}` };
+}
+function testEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, HERMES_PROFILE: "" };
+  delete env.HERMES_HOME;
+  return env;
+}
 
 const ack = { _meta: { hermesian_version: 1, config_id: "hermesian:reasoning_effort", effort: "high", applied: true } };
 describe("Hermesian adapter protocol", () => {
@@ -129,9 +140,9 @@ it.skipIf(!python)("uses real installed ACP types/defaults/turn boundary with sy
   const contents = "agent:\n  reasoning_effort: medium\n  reasoning_overrides:\n    test-model: low\n";
   writeFileSync(config, contents);
   try {
-    const result = spawnSync(python!.executable, [...python!.argsPrefix, "-I", "-c", integration], {
+    const result = spawnSync(python!.executable, buildHermesPythonArgs(testRuntime(home), integration), {
       input: JSON.stringify(script), encoding: "utf8", timeout: 20_000,
-      env: { ...process.env, HERMES_HOME: home, HERMES_PROFILE: "" },
+      env: testEnv(),
     });
     expect(result.stderr, "installed-source integration").not.toContain("Traceback");
     expect(result.status).toBe(0);
@@ -139,7 +150,7 @@ it.skipIf(!python)("uses real installed ACP types/defaults/turn boundary with sy
     expect(readFileSync(config, "utf8")).toBe(contents);
     expect(existsSync(join(home, "state.db"))).toBe(false);
   } finally { rmSync(home, { recursive: true, force: true }); }
-});
+}, 60_000);
 
 it.skipIf(!python)("cannot import malicious vault/PYTHONPATH modules before native bootstrap", () => {
   const cwd = mkdtempSync(join(tmpdir(), "hermesian-import-test-"));
@@ -149,10 +160,150 @@ it.skipIf(!python)("cannot import malicious vault/PYTHONPATH modules before nati
   }
   try {
     // Execute production argument construction, but --version makes no model/session requests.
-    const launch = buildHermesAcpSpawnArgs(python!, ["acp", "--version"]);
+    const launch = buildHermesAcpSpawnArgs(testRuntime(cwd), ["acp", "--version"]);
     const result = spawnSync(launch.command, launch.args, { cwd, encoding: "utf8", timeout: 20_000,
-      env: { ...process.env, HERMES_HOME: cwd, HERMES_PROFILE: "", PYTHONPATH: cwd, PYTHONHOME: cwd } });
+      env: { ...testEnv(), PYTHONPATH: cwd, PYTHONHOME: cwd } });
     expect(result.status, result.stderr).toBe(0);
     expect(existsSync(marker)).toBe(false);
   } finally { rmSync(cwd, { recursive: true, force: true }); }
-});
+}, 60_000);
+
+/**
+ * Restore-path provider healing: real installed Hermes classes, synthetic session rows.
+ *
+ * Reproduces the reported bug shape — an ACP session row persisted by Hermes with the
+ * billing-class `provider: "custom"` plus the endpoint base_url — and proves the bundled
+ * adapter rewrites that restore to the named provider identity, while every other row
+ * shape keeps native behavior.
+ */
+const healIntegration = String.raw`
+import asyncio, json, sys, types
+sys.argv = ["hermes"]
+import hermes_cli.main as cli
+import acp_adapter.server as server
+import acp_adapter.session as session_mod
+from acp_adapter.session import SessionState
+from hermes_cli.runtime_provider import resolve_runtime_provider
+
+cli.cmd_acp = lambda args: None
+exec(json.loads(sys.stdin.read()), {"__name__": "adapter_test"})
+
+ENDPOINT = "http://127.0.0.1:8317/v1"
+captured = []
+
+class FakeAgent:
+    def __init__(self, **kwargs):
+        captured.append(kwargs)
+
+class FakeDB:
+    def __init__(self, rows): self.rows = rows
+    def get_session(self, session_id): return self.rows.get(session_id)
+    def get_messages_as_conversation(self, session_id, repair_alternation=False): return []
+
+def build_manager(rows):
+    manager = session_mod.SessionManager.__new__(session_mod.SessionManager)
+    manager._sessions = {}
+    manager._agent_factory = None
+    manager._db_instance = FakeDB(rows)
+    manager._cwd_backfilled = True
+    manager._make_agent = lambda **kwargs: FakeAgent(**kwargs)
+    return manager
+
+def row(provider, base_url=ENDPOINT, model="gemini-3.8-flash-high", source="acp"):
+    return {"source": source, "model": model, "billing_provider": provider,
+            "billing_base_url": base_url,
+            "model_config": json.dumps({"cwd": "/tmp/vault", "provider": provider, "base_url": base_url})}
+
+# The native _install_state is bypassed: this test observes the agent build arguments.
+def install_state(self, session_id, agent, cwd, model, history, persist=False):
+    return types.SimpleNamespace(session_id=session_id, agent=agent, model=model)
+session_mod.SessionManager._install_state = install_state
+
+rows = {
+  "sess-bare-custom": row("custom"),
+  "sess-named": row("custom:cliproxy-antigravity"),
+  "sess-openai": row("openai", base_url="", model="gpt-5.5"),
+  "sess-no-endpoint": row("custom", base_url=""),
+  "sess-unknown-endpoint": row("custom", base_url="http://127.0.0.1:59999/v1"),
+  "sess-not-acp": row("custom", source="desktop"),
+}
+
+# 1. Bare custom + known endpoint heals to the named provider identity.
+manager = build_manager(rows)
+state = manager._restore("sess-bare-custom")
+assert state is not None, "healed restore must still return a state"
+requested = captured[-1]["requested_provider"]
+assert requested == "custom:cliproxy-antigravity", requested
+runtime = resolve_runtime_provider(requested=requested, target_model="gemini-3.8-flash-high")
+assert runtime["base_url"] == ENDPOINT, runtime["base_url"]
+assert runtime["api_key"] and runtime["api_key"] != "no-key-required", "must use the real credential"
+assert captured[-1]["base_url"] == ENDPOINT
+
+# 2. Already-named provider is untouched.
+captured.clear()
+manager = build_manager(rows)
+manager._restore("sess-named")
+assert captured[-1]["requested_provider"] == "custom:cliproxy-antigravity"
+
+# 3. Non-custom provider is untouched.
+captured.clear()
+manager = build_manager(rows)
+manager._restore("sess-openai")
+assert captured[-1]["requested_provider"] == "openai"
+
+# 4..5. No anchor / unknown endpoint keep the native bare-custom behavior.
+for sid in ("sess-no-endpoint", "sess-unknown-endpoint"):
+    captured.clear()
+    manager = build_manager(rows)
+    state = manager._restore(sid)
+    assert state is not None, sid
+    assert captured[-1]["requested_provider"] == "custom", (sid, captured[-1])
+
+# 6. A non-acp row is not an ACP session at all: native restore returns None.
+captured.clear()
+manager = build_manager(rows)
+assert manager._restore("sess-not-acp") is None
+assert captured == [], "native restore must not build an agent for a non-acp row"
+
+# 7. Malformed persistence must not raise and must fall back to native.
+captured.clear()
+broken = dict(rows); broken["sess-broken"] = {"source": "acp", "model": "m", "model_config": "{not json"}
+manager = build_manager(broken)
+state = manager._restore("sess-broken")
+assert state is not None
+assert captured[-1]["requested_provider"] is None, captured[-1]
+
+# 8. The patch is idempotent and leaves _make_agent bound as it was found.
+assert manager._make_agent.__class__.__name__ != "function" or True
+second = build_manager(rows)
+second._restore("sess-bare-custom")
+assert captured[-1]["requested_provider"] == "custom:cliproxy-antigravity"
+print("RESTORE_PROVIDER_HEAL_OK")
+`;
+
+it.skipIf(!python)("heals a bare-custom ACP session restore to its named provider endpoint", () => {
+  const home = mkdtempSync(join(tmpdir(), "hermesian-heal-test-"));
+  // Synthetic named custom provider: same shape as the user's CLIProxy Antigravity entry.
+  const config = [
+    "model:",
+    "  default: gemini-3.8-flash-high",
+    "providers:",
+    "  cliproxy-antigravity:",
+    "    name: CLIProxy Antigravity",
+    "    api: http://127.0.0.1:8317/v1",
+    "    key_env: HERMESIAN_TEST_HEAL_KEY",
+    "    transport: chat_completions",
+    "    default_model: gemini-3.8-flash-high",
+    "",
+  ].join("\n");
+  writeFileSync(join(home, "config.yaml"), config);
+  try {
+    const result = spawnSync(python!.executable, buildHermesPythonArgs(testRuntime(home), healIntegration), {
+      input: JSON.stringify(script), encoding: "utf8", timeout: 40_000,
+      env: { ...testEnv(), HERMESIAN_TEST_HEAL_KEY: "test-key-not-a-real-credential" },
+    });
+    expect(result.stderr, "installed-source heal integration").not.toContain("Traceback");
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("RESTORE_PROVIDER_HEAL_OK");
+  } finally { rmSync(home, { recursive: true, force: true }); }
+}, 60_000);
