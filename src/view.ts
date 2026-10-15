@@ -71,6 +71,7 @@ import {
 import {
   MessageRenderer,
   TurnManager,
+  shouldRecordSteer,
   type TurnCallbacks,
 } from "./ui/message-renderer";
 import { ScrollFollowController } from "./ui/scroll-lock";
@@ -335,6 +336,7 @@ export class HermesianSidebarView extends ItemView {
   private selectionBarEl!: HTMLElement;
   private sendButtonEl!: HTMLButtonElement;
   private steerButtonEl!: HTMLButtonElement;
+  private steerModeEl!: HTMLElement;
   private dictationButtonEl!: HTMLButtonElement;
   private filePickerButtonEl!: HTMLButtonElement;
   private fileInputEl!: HTMLInputElement;
@@ -824,6 +826,7 @@ export class HermesianSidebarView extends ItemView {
     this.reasoningLabelEl = composerElements.reasoningLabelEl;
     this.sendButtonEl = composerElements.sendButtonEl;
     this.steerButtonEl = composerElements.steerButtonEl;
+    this.steerModeEl = composerElements.steerModeEl;
     this.stopButtonEl = composerElements.stopButtonEl;
     this.dictationButtonEl = composerElements.dictationButtonEl;
     this.filePickerButtonEl = composerElements.filePickerButtonEl;
@@ -847,6 +850,7 @@ export class HermesianSidebarView extends ItemView {
     setIcon(composerElements.sendButtonEl.querySelector("span")!, "arrow-right");
     setIcon(composerElements.steerButtonEl.querySelector("span")!, "corner-down-left");
     setIcon(composerElements.stopButtonEl.querySelector("span")!, "square");
+    setIcon(composerElements.steerModeEl.querySelector(".hermesian-steer-mode-icon")!, "corner-down-left");
     this.setComposerSlashToken(null);
     this.renderComposerInlineDraft();
 
@@ -2321,8 +2325,10 @@ export class HermesianSidebarView extends ItemView {
       this.plugin.setConversationWorkspace(this.conversationWorkspace);
     }
     this.resetStreamingMessage(activeTab.id);
+    this.clearQueuedSteers(activeTab.id);
     runtime.busy = true;
     this.controller?.setPromptRunning(activeTab.id, true);
+    runtime.turnActivityEl = undefined;
     runtime.activeTurnEl = this.messageContainer(activeTab.id).createDiv({
       cls: "hermesian-turn",
     });
@@ -2460,6 +2466,10 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
     this.steerInFlight = false;
+    const steerDisposition = shouldRecordSteer(result);
+    if (steerDisposition.record) {
+      this.appendSteerRecord(activeTab.id, text, steerDisposition.queued);
+    }
     if (result.ok) {
       // Clear pure-text draft only after a verified steer success.
       this.composerDraft = {
@@ -2878,6 +2888,7 @@ export class HermesianSidebarView extends ItemView {
         sendButtonEl: this.sendButtonEl,
         stopButtonEl: this.stopButtonEl,
         steerButtonEl: this.steerButtonEl,
+        steerModeEl: this.steerModeEl,
         dictationButtonEl: this.dictationButtonEl,
         filePickerButtonEl: this.filePickerButtonEl,
         filePickerMenuEl: this.filePickerMenuEl,
@@ -3115,6 +3126,26 @@ export class HermesianSidebarView extends ItemView {
 
   private resetStreamingMessage(tabId: string): void {
     this.turnManager.resetStreaming(tabId);
+  }
+
+  private appendSteerRecord(
+    tabId: string,
+    text: string,
+    queued = false,
+  ): HTMLElement | undefined {
+    if (
+      this.viewClosed ||
+      !this.conversationWorkspace?.tabs.some((tab) => tab.id === tabId)
+    ) {
+      return undefined;
+    }
+    const el = this.turnManager.appendSteer(tabId, text, queued);
+    this.scrollToBottom(tabId);
+    return el;
+  }
+
+  private clearQueuedSteers(tabId: string): void {
+    this.turnManager.clearQueuedSteers(tabId);
   }
 
   private resetConversationView(tabId: string): void {

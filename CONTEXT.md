@@ -20,6 +20,14 @@ _Avoid_: Queue, follow-up message, interrupt
 A message submitted while an Active Turn is being cancelled, held until cancellation completes and then started as a normal new turn.
 _Avoid_: Queue, retry send
 
+**Steer Mode Indicator**:
+An Inset Floating Surface strip in the composer that appears while the draft qualifies as a Steer, telling the user the message will steer the Active Turn before it is sent. It disappears the moment the draft no longer qualifies. It is a status readout, not a choice surface: it does not offer queuing alternatives.
+_Avoid_: Steer banner, modal prompt, mode lock, queue button
+
+**Steer Record**:
+A Content Layer record of a successfully applied Steer, inserted into the conversation flow with a distinct marker so it is never mistaken for a normal user turn. Rendered as an Activity Row: compact, expandable, visually subordinate to messages. A queued Steer Record carries a "queued" marker that is cleared when the next turn begins, so the record always reflects the final outcome.
+_Avoid_: Normal user message, ephemeral confirmation toast, hidden steer
+
 **Connection-Waiting Message**:
 The single cancellable message a Conversation Tab holds while becoming ready to send. Its text and attachments remain recoverable if connection fails; it is distinct from Stop-and-send during cancellation of an Active Turn.
 _Avoid_: Automatic retry, Stop-and-send, message queue

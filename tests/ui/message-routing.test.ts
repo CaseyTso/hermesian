@@ -451,6 +451,86 @@ describe("TurnManager", () => {
       await expect(idle).rejects.toThrow(/Turn runtime deleted/);
     });
   });
+
+  describe("appendSteer", () => {
+    it("returns undefined and does not resurrect scaffold when no active turn", () => {
+      const { turns, messagesEl } = setupTurn();
+      const details = turns.appendSteer("tab-A", "steer after turn completed", false);
+      expect(details).toBeUndefined();
+      expect(messagesEl.querySelector(".hermesian-turn")).toBeNull();
+      expect(messagesEl.querySelector(".hermesian-steer-record")).toBeNull();
+    });
+
+    it("creates an activity row details element with text and default summary", () => {
+      const { turns } = setupTurn();
+      turns.ensureActivity("tab-A");
+      const details = turns.appendSteer("tab-A", "use typescript instead", false);
+      expect(details).toBeDefined();
+      expect(details!.tagName).toBe("DETAILS");
+      expect(details!.classList.contains("hermesian-steer-record")).toBe(true);
+      expect(details!.classList.contains("is-queued")).toBe(false);
+      const summary = details!.querySelector("summary");
+      expect(summary).not.toBeNull();
+      expect(summary!.textContent).toBe("Steer");
+      const content = details!.querySelector("pre.hermesian-steer-content");
+      expect(content).not.toBeNull();
+      expect(content!.textContent).toBe("use typescript instead");
+    });
+
+    it("creates a queued activity row with queued marker", () => {
+      const { turns } = setupTurn();
+      turns.ensureActivity("tab-A");
+      const details = turns.appendSteer("tab-A", "correction while queued", true);
+      expect(details).toBeDefined();
+      expect(details!.classList.contains("hermesian-steer-record")).toBe(true);
+      expect(details!.classList.contains("is-queued")).toBe(true);
+      const summary = details!.querySelector("summary");
+      expect(summary!.textContent).toContain("Steer");
+      expect(summary!.textContent).toContain("queued for next turn");
+      expect(summary!.querySelector(".hermesian-steer-marker")).not.toBeNull();
+      const content = details!.querySelector("pre.hermesian-steer-content");
+      expect(content!.textContent).toBe("correction while queued");
+    });
+  });
+
+  describe("clearQueuedSteers", () => {
+    it("clears queued marker and class from all pending queued steer records", () => {
+      const { turns } = setupTurn();
+      turns.ensureActivity("tab-A");
+      const steer1 = turns.appendSteer("tab-A", "steer one", true);
+      const steer2 = turns.appendSteer("tab-A", "steer two", true);
+      expect(steer1).toBeDefined();
+      expect(steer2).toBeDefined();
+      expect(steer1!.classList.contains("is-queued")).toBe(true);
+      expect(steer2!.classList.contains("is-queued")).toBe(true);
+
+      turns.clearQueuedSteers("tab-A");
+
+      expect(steer1!.classList.contains("is-queued")).toBe(false);
+      expect(steer2!.classList.contains("is-queued")).toBe(false);
+      expect(steer1!.querySelector(".hermesian-steer-marker")).toBeNull();
+      expect(steer2!.querySelector(".hermesian-steer-marker")).toBeNull();
+      expect(steer1!.querySelector("summary")!.textContent).toBe("Steer");
+      expect(steer2!.querySelector("summary")!.textContent).toBe("Steer");
+    });
+
+    it("does not affect unqueued steer records", () => {
+      const { turns } = setupTurn();
+      turns.ensureActivity("tab-A");
+      const normalSteer = turns.appendSteer("tab-A", "normal steer", false);
+      expect(normalSteer).toBeDefined();
+      turns.clearQueuedSteers("tab-A");
+      expect(normalSteer!.querySelector("summary")!.textContent).toBe("Steer");
+    });
+
+    it("resets queued records tracking on resetView", () => {
+      const { turns } = setupTurn();
+      turns.ensureActivity("tab-A");
+      turns.appendSteer("tab-A", "queued", true);
+      turns.resetView("tab-A");
+      expect(turns.ensure("tab-A").queuedSteerEls).toBeUndefined();
+    });
+  });
 });
 
 // ── Owner-scoping for Markdown/History rendering ───────────────

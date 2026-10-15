@@ -139,6 +139,27 @@ describe("createComposerView", () => {
     expect(elements.composerEl.contentEditable).toBe("false");
   });
 
+  it("renders the steer button with an icon and visible Steer text label while preserving aria-label", () => {
+    const { elements } = setup();
+    expect(elements.steerButtonEl.getAttribute("aria-label")).toBe("Steer active turn");
+    expect(elements.steerButtonEl.getAttribute("title")).toBe("Steer active turn");
+    const label = elements.steerButtonEl.querySelector(".hermesian-steer-label");
+    expect(label).not.toBeNull();
+    expect(label?.textContent).toBe("Steer");
+    expect(elements.steerLabelEl.textContent).toBe("Steer");
+    expect(elements.steerButtonEl.querySelector(".hermesian-steer-icon")).not.toBeNull();
+  });
+
+  it("renders the steer mode indicator with icon and text, initially hidden", () => {
+    const { elements } = setup();
+    expect(elements.steerModeEl.className).toContain("hermesian-steer-mode");
+    expect(elements.steerModeEl.style.display).toBe("none");
+    expect(elements.steerModeEl.querySelector(".hermesian-steer-mode-icon")).not.toBeNull();
+    const textEl = elements.steerModeEl.querySelector(".hermesian-steer-mode-text");
+    expect(textEl?.textContent).toBe("Steer active turn · Enter to send");
+    expect(elements.steerModeEl.textContent).toContain("Steer active turn · Enter to send");
+  });
+
   it("keeps the composer accessible with combobox/textbox semantics", () => {
     const { elements } = setup();
     expect(elements.composerEl.getAttribute("aria-label")).toBe("Message Hermes");
@@ -381,6 +402,57 @@ describe("applyComposerState", () => {
     expect(elements.stopButtonEl.style.display).not.toBe("none");
     expect(elements.steerButtonEl.style.display).not.toBe("none");
     expect(elements.steerButtonEl.disabled).toBe(false);
+    expect(elements.steerModeEl.style.display).not.toBe("none");
+  });
+
+  it("shows Steer mode indicator iff primaryMode is stop-steer", () => {
+    // Hidden in default send mode
+    applyComposerState(elements, defaultState({ primaryMode: "send" }));
+    expect(elements.steerModeEl.style.display).toBe("none");
+
+    // Visible in stop-steer mode
+    applyComposerState(
+      elements,
+      defaultState({
+        primaryMode: "stop-steer",
+        stopVisible: true,
+        steerEnabled: true,
+      }),
+    );
+    expect(elements.steerModeEl.style.display).not.toBe("none");
+    expect(elements.steerModeEl.textContent).toContain("Steer active turn · Enter to send");
+
+    // Hidden when mode transitions to stop
+    applyComposerState(
+      elements,
+      defaultState({
+        primaryMode: "stop",
+        stopVisible: true,
+      }),
+    );
+    expect(elements.steerModeEl.style.display).toBe("none");
+
+    // Hidden when mode transitions to stopping
+    applyComposerState(
+      elements,
+      defaultState({
+        primaryMode: "stopping",
+        stopVisible: true,
+        stopEnabled: false,
+      }),
+    );
+    expect(elements.steerModeEl.style.display).toBe("none");
+
+    // Hidden when back to send
+    applyComposerState(
+      elements,
+      defaultState({
+        primaryMode: "send",
+        sendEnabled: true,
+        stopVisible: false,
+      }),
+    );
+    expect(elements.steerModeEl.style.display).toBe("none");
   });
 
   it("disables Steer while a steer is in flight", () => {

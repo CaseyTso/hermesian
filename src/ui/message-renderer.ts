@@ -1,5 +1,6 @@
 import type { ScrollFollowController } from "./scroll-lock";
 import { readScrollGeometry } from "./scroll-lock";
+import type { SteerResult } from "../types";
 
 export interface MessageRendererOptions {
   /** Optional per-tab auto-follow lock. When set, scrollToBottom respects it. */
@@ -162,10 +163,26 @@ export interface TurnRuntime {
   assistantText: string;
   busy: boolean;
   completionPromise?: Promise<void>;
+  queuedSteerEls?: HTMLElement[];
   thoughtContentEl?: HTMLElement;
   thoughtDetailsEl?: HTMLDetailsElement;
   toolEls: Map<string, HTMLElement>;
   turnActivityEl?: HTMLElement;
+}
+
+export type SteerDisposition =
+  | { queued: false; record: true }
+  | { queued: true; record: true }
+  | { record: false };
+
+export function shouldRecordSteer(result: SteerResult): SteerDisposition {
+  if (result.ok) {
+    return { queued: false, record: true };
+  }
+  if (result.reason === "queued") {
+    return { queued: true, record: true };
+  }
+  return { record: false };
 }
 
 export interface TurnCallbacks {
@@ -255,6 +272,7 @@ export class TurnManager {
   ensureActivity(tabId: string): HTMLElement {
     const runtime = this.ensure(tabId);
     if (!runtime.activeTurnEl) {
+      this.clearQueuedSteers(tabId);
       runtime.activeTurnEl = this.#renderer.containerFor(tabId).createDiv({
         cls: "hermesian-turn",
       });
@@ -299,6 +317,59 @@ export class TurnManager {
       `${runtime.thoughtContentEl.textContent ?? ""}${text}`;
   }
 
+  /** Appends a steer record activity row to the turn. */
+  appendSteer(tabId: string, text: string, queued = false): HTMLElement | undefined {
+    const runtime = this.ensure(tabId);
+    if (!runtime.activeTurnEl) {
+      return undefined;
+    }
+    const parentEl = runtime.activeTurnEl.querySelector(
+      ".hermesian-message.is-assistant",
+    )
+      ? runtime.activeTurnEl
+      : this.ensureActivity(tabId);
+    if (runtime.assistantContentEl) {
+      runtime.assistantContentEl = undefined;
+      runtime.assistantText = "";
+    }
+    const details = parentEl.createEl("details", {
+      cls: `hermesian-steer-record${queued ? " is-queued" : ""}`,
+    }) as HTMLDetailsElement;
+    const summary = details.createEl("summary");
+    summary.createSpan({ cls: "hermesian-steer-record-label", text: "Steer" });
+    if (queued) {
+      summary.createSpan({
+        cls: "hermesian-steer-marker",
+        text: " · queued for next turn",
+      });
+      if (!runtime.queuedSteerEls) {
+        runtime.queuedSteerEls = [];
+      }
+      runtime.queuedSteerEls.push(details);
+    }
+    details.createEl("pre", {
+      cls: "hermesian-steer-content",
+      text,
+    });
+    return details;
+  }
+
+  /** Clears the queued marker from all pending queued steer records for a tab. */
+  clearQueuedSteers(tabId: string): void {
+    const runtime = this.ensure(tabId);
+    if (!runtime.queuedSteerEls || runtime.queuedSteerEls.length === 0) {
+      return;
+    }
+    for (const el of runtime.queuedSteerEls) {
+      el.classList.remove("is-queued");
+      const marker = el.querySelector(".hermesian-steer-marker");
+      if (marker) {
+        marker.remove();
+      }
+    }
+    runtime.queuedSteerEls = [];
+  }
+
   /** Resets streaming-only state for a new turn. */
   resetStreaming(tabId: string): void {
     const runtime = this.ensure(tabId);
@@ -313,6 +384,7 @@ export class TurnManager {
     this.#renderer.containerFor(tabId).empty();
     const runtime = this.ensure(tabId);
     runtime.toolEls.clear();
+    runtime.queuedSteerEls = undefined;
     this.resetStreaming(tabId);
     runtime.activeTurnEl = undefined;
     runtime.turnActivityEl = undefined;

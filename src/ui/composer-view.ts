@@ -49,6 +49,8 @@ export interface ComposerElements {
   slashTokenLabelEl: HTMLElement;
   statusEl: HTMLElement;
   steerButtonEl: HTMLButtonElement;
+  steerLabelEl: HTMLElement;
+  steerModeEl: HTMLElement;
   stopButtonEl: HTMLButtonElement;
 }
 
@@ -344,8 +346,12 @@ export function createComposerView(
     },
     cls: "clickable-icon hermesian-primary-action is-steer",
   });
-  const steerIcon = steerButtonEl.createSpan();
+  const steerIcon = steerButtonEl.createSpan({ cls: "hermesian-steer-icon" });
   steerIcon.empty();
+  const steerLabelEl = steerButtonEl.createSpan({
+    text: "Steer",
+    cls: "hermesian-steer-label",
+  });
 
   const stopButtonEl = controlRow.createEl("button", {
     attr: {
@@ -370,6 +376,20 @@ export function createComposerView(
   });
   hintEl.hide();
 
+  const steerModeEl = composerFooter.createDiv({
+    attr: { "aria-live": "polite", role: "status" },
+    cls: "hermesian-steer-mode",
+  });
+  const steerModeIconEl = steerModeEl.createSpan({
+    cls: "hermesian-steer-mode-icon",
+  });
+  steerModeIconEl.empty();
+  steerModeEl.createSpan({
+    cls: "hermesian-steer-mode-text",
+    text: "Steer active turn · Enter to send",
+  });
+  steerModeEl.hide();
+
   // Apply initial visibility
   applyComposerState(
     {
@@ -381,6 +401,7 @@ export function createComposerView(
       sendButtonEl,
       statusEl,
       steerButtonEl,
+      steerModeEl,
       stopButtonEl,
     },
     state,
@@ -484,6 +505,8 @@ export function createComposerView(
     slashTokenLabelEl,
     statusEl,
     steerButtonEl,
+    steerLabelEl,
+    steerModeEl,
     stopButtonEl,
   };
 }
@@ -494,6 +517,7 @@ export function applyComposerState(
     sendButtonEl: HTMLButtonElement;
     stopButtonEl: HTMLButtonElement;
     steerButtonEl?: HTMLButtonElement;
+    steerModeEl?: HTMLElement;
     dictationButtonEl?: HTMLButtonElement;
     filePickerButtonEl?: HTMLButtonElement;
     filePickerMenuEl?: HTMLElement;
@@ -539,6 +563,14 @@ export function applyComposerState(
       elements.steerButtonEl.hide();
     }
     elements.steerButtonEl.disabled = !steerEnabled;
+  }
+
+  if (elements.steerModeEl) {
+    if (showSteer) {
+      elements.steerModeEl.show();
+    } else {
+      elements.steerModeEl.hide();
+    }
   }
 
   elements.stopButtonEl.disabled = !stopEnabled;
