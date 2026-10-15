@@ -83,8 +83,8 @@ Hermesian's compact desktop layout rhythm for a narrow, continuously resizable O
 _Avoid_: iPad spacing, touch-first layout, mobile density
 
 **Quiet Motion**:
-Hermesian's short, interruptible feedback animation used only to explain state changes in the Visual Shell.
-_Avoid_: Decorative motion, ambient animation, continuous animation
+Hermesian's short, single-shot, interruptible motion that marks a state transition in the Visual Shell — content arriving, a task completing, a mode changing. Motion exists to explain *that something changed*; looped or ambient animation that merely decorates is forbidden.
+_Avoid_: Decorative motion, ambient animation, looping animation that does not indicate live work
 
 **Inset Floating Surface**:
 A Functional Layer surface that remains in normal layout flow while appearing elevated without covering conversation content.

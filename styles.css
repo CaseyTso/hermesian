@@ -1,28 +1,117 @@
+body,
 .hermesian-view {
+  /* 1. Accent & interactive tokens */
   --hermesian-accent: var(--interactive-accent);
   --hermesian-accent-hover: var(--interactive-accent-hover, var(--interactive-accent));
   --hermesian-accent-soft: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
   --hermesian-accent-soft-hover: color-mix(in srgb, var(--interactive-accent) 18%, transparent);
-  --hermesian-border: var(--background-modifier-border);
   --hermesian-motion: 140ms ease-out;
-  --hermesian-radius-sm: 6px;
-  --hermesian-radius-md: 9px;
-  --hermesian-radius-lg: 12px;
 
-  /* Theme-Adaptive Glass tokens */
+  /* 2. Alpha border ladder (CDS structural opacity ladder) */
+  --hermesian-alpha-2: color-mix(in srgb, var(--text-normal) 10%, transparent);
+  --hermesian-alpha-3: color-mix(in srgb, var(--text-normal) 20%, transparent);
+  --hermesian-alpha-4: color-mix(in srgb, var(--text-normal) 35%, transparent);
+
+  --hermesian-border: var(--hermesian-alpha-2);
+  --hermesian-border-strong: var(--hermesian-alpha-3);
+
+  /* 3. Radius hierarchy */
+  --hermesian-radius-sm: 4px;
+  --hermesian-radius-md: 6px;
+  --hermesian-radius-lg: 8px;
+  --hermesian-radius-card: 12px;
+  --hermesian-radius-bubble: 18px;
+  --hermesian-radius-composer: 20px;
+  --hermesian-radius-pill: 999px;
+
+  /* 4. Diffusion elevation shadows */
+  --hermesian-shadow-sm:
+    0 1px 2px 0 color-mix(in srgb, var(--text-normal) 5%, transparent),
+    0 2px 8px 0 color-mix(in srgb, var(--text-normal) 8%, transparent);
+  --hermesian-shadow-md:
+    0 2px 4px 0 color-mix(in srgb, var(--text-normal) 5%, transparent),
+    0 6px 16px 0 color-mix(in srgb, var(--text-normal) 8%, transparent);
+
+  /* Popover shadow (light mode: 1px outer border + diffuse elevation) */
+  --hermesian-shadow-popover:
+    0 2px 6px 0 color-mix(in srgb, var(--text-normal) 8%, transparent),
+    0 8px 24px 0 color-mix(in srgb, var(--text-normal) 12%, transparent);
+
+  /* Composer shadow hierarchy */
+  --hermesian-shadow-composer:
+    0 4px 20px 0 color-mix(in srgb, var(--text-normal) 4%, transparent),
+    inset 0 0 0 1px var(--hermesian-alpha-2);
+  --hermesian-shadow-composer-hover:
+    0 4px 24px 0 color-mix(in srgb, var(--text-normal) 6%, transparent),
+    inset 0 0 0 1px var(--hermesian-alpha-3);
+  --hermesian-shadow-composer-focus:
+    0 4px 24px 0 color-mix(in srgb, var(--text-normal) 8%, transparent),
+    inset 0 0 0 1px var(--hermesian-border-strong),
+    0 0 0 1px var(--hermesian-border-strong);
+
+  /* 5. Theme-Adaptive Glass tokens */
   --hermesian-glass-bg: color-mix(in srgb, var(--background-primary) 82%, transparent);
   --hermesian-glass-border: color-mix(in srgb, var(--background-modifier-border) 60%, transparent);
-  --hermesian-glass-shadow: 0 2px 8px rgb(0 0 0 / 0.04);
+  --hermesian-glass-shadow: var(--hermesian-shadow-sm);
   --hermesian-glass-blur: blur(16px);
 
-  /* Safety Surface tokens (opaque, high-contrast) */
+  /* 6. Safety Surface tokens (opaque, high-contrast) */
   --hermesian-safety-bg: var(--background-secondary);
   --hermesian-safety-border: color-mix(in srgb, var(--interactive-accent) 50%, var(--background-modifier-border));
 
-  /* Density rhythm */
+  /* 7. Density rhythm */
   --hermesian-density-gap: 6px;
   --hermesian-density-padding: 8px;
+}
 
+/* ==========================================================================
+   Dark Mode Overrides
+   ========================================================================== */
+
+.theme-dark,
+.theme-dark .hermesian-view {
+  /* Diffusion elevation shadows (deep neutral base from Obsidian theme tokens) */
+  --hermesian-shadow-sm:
+    0 1px 2px 0 color-mix(in srgb, var(--mono-0, var(--background-modifier-cover)) 40%, transparent),
+    0 2px 8px 0 color-mix(in srgb, var(--mono-0, var(--background-modifier-cover)) 40%, transparent);
+  --hermesian-shadow-md:
+    0 2px 4px 0 color-mix(in srgb, var(--mono-0, var(--background-modifier-cover)) 40%, transparent),
+    0 6px 16px 0 color-mix(in srgb, var(--mono-0, var(--background-modifier-cover)) 40%, transparent);
+
+  /* Popover dual-ring in dark mode: top-specular rim highlight + deep diffusion shadow */
+  --hermesian-popover-ring: color-mix(in srgb, var(--text-normal) 10%, transparent);
+  --hermesian-shadow-popover:
+    inset 0 0 0 1px var(--hermesian-popover-ring),
+    0 2px 8px 0 color-mix(in srgb, var(--mono-0, var(--background-modifier-cover)) 45%, transparent),
+    0 8px 28px 0 color-mix(in srgb, var(--mono-0, var(--background-modifier-cover)) 65%, transparent);
+
+  /* Composer shadow hierarchy in dark mode */
+  --hermesian-shadow-composer:
+    0 4px 20px 0 color-mix(in srgb, var(--mono-0, var(--background-modifier-cover)) 40%, transparent),
+    inset 0 0 0 1px var(--hermesian-alpha-2);
+  --hermesian-shadow-composer-hover:
+    0 4px 24px 0 color-mix(in srgb, var(--mono-0, var(--background-modifier-cover)) 55%, transparent),
+    inset 0 0 0 1px var(--hermesian-alpha-3);
+  --hermesian-shadow-composer-focus:
+    0 4px 24px 0 color-mix(in srgb, var(--mono-0, var(--background-modifier-cover)) 65%, transparent),
+    inset 0 0 0 1px var(--hermesian-border-strong),
+    0 0 0 1px var(--hermesian-border-strong);
+}
+
+/* Dark mode optical font weight compensation */
+.theme-dark .hermesian-message-content {
+  font-weight: 465;
+}
+
+.theme-dark .hermesian-message-content :is(strong, b, h1, h2, h3, h4, h5, h6) {
+  font-weight: 660;
+}
+
+.theme-dark .hermesian-message.is-assistant .hermesian-message-content th {
+  font-weight: 560;
+}
+
+.hermesian-view {
   background: var(--background-primary);
   display: flex;
   flex-direction: column;
@@ -110,7 +199,7 @@
   align-items: center;
   background: var(--background-secondary);
   border: 1px solid transparent;
-  border-radius: var(--hermesian-radius-sm);
+  border-radius: var(--hermesian-radius-pill);
   box-shadow: none;
   color: var(--text-muted);
   display: inline-flex;
@@ -311,7 +400,7 @@
 }
 
 .hermesian-message {
-  border-radius: var(--hermesian-radius-md);
+  border-radius: var(--hermesian-radius-bubble);
   max-width: 86%;
   min-width: 0;
   overflow-wrap: anywhere;
@@ -361,7 +450,7 @@
 
 .hermesian-message-images img {
   border: 1px solid var(--hermesian-border);
-  border-radius: var(--hermesian-radius-sm);
+  border-radius: var(--hermesian-radius-md);
   display: block;
   height: auto;
   max-height: 240px;
@@ -422,7 +511,7 @@
 }
 
 .hermesian-message.is-assistant .hermesian-message-content .table-wrapper > table {
-  border: 1px solid var(--background-modifier-border);
+  border: 1px solid var(--hermesian-border);
   border-collapse: collapse;
   display: table;
   max-width: none;
@@ -432,7 +521,7 @@
 }
 
 .hermesian-message.is-assistant .hermesian-message-content :is(th, td) {
-  border: 1px solid var(--background-modifier-border);
+  border: 1px solid var(--hermesian-border);
   max-width: 32rem;
   min-width: 8rem;
   overflow-wrap: break-word;
@@ -467,6 +556,8 @@
 .hermesian-message-context {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
   margin-bottom: 4px;
 }
 
@@ -494,7 +585,7 @@
 .hermesian-thought {
   background: var(--background-secondary);
   border: 1px solid var(--hermesian-border);
-  border-radius: var(--hermesian-radius-sm);
+  border-radius: var(--hermesian-radius-card);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   min-width: 0;
@@ -525,7 +616,7 @@
 .hermesian-steer-record {
   background: var(--background-secondary);
   border: 1px solid var(--hermesian-border);
-  border-radius: var(--hermesian-radius-sm);
+  border-radius: var(--hermesian-radius-card);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   min-width: 0;
@@ -570,7 +661,7 @@
   align-items: center;
   background: var(--background-secondary);
   border: 1px solid var(--hermesian-border);
-  border-radius: var(--hermesian-radius-sm);
+  border-radius: var(--hermesian-radius-card);
   color: var(--text-muted);
   display: flex;
   font-size: var(--font-ui-smaller);
@@ -607,8 +698,8 @@
 .hermesian-permission {
   background: var(--hermesian-safety-bg);
   border: 2px solid var(--hermesian-safety-border);
-  border-radius: var(--hermesian-radius-md);
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.12);
+  border-radius: var(--hermesian-radius-card);
+  box-shadow: var(--hermesian-shadow-md);
   padding: 10px;
 }
 
@@ -634,8 +725,10 @@
 .hermesian-diff,
 .hermesian-permission-raw {
   background: var(--code-background);
-  border-radius: var(--hermesian-radius-sm);
+  border-radius: var(--hermesian-radius-md);
   font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
   line-height: 1.45;
   margin: 0 0 9px;
   max-height: 340px;
@@ -650,12 +743,12 @@
 }
 
 .hermesian-diff-added {
-  background: rgba(var(--color-green-rgb), 0.16);
+  background: color-mix(in srgb, var(--color-green) 16%, transparent);
   color: var(--color-green);
 }
 
 .hermesian-diff-removed {
-  background: rgba(var(--color-red-rgb), 0.16);
+  background: color-mix(in srgb, var(--color-red) 16%, transparent);
   color: var(--color-red);
 }
 
@@ -696,8 +789,8 @@
 .hermesian-file-picker-menu {
   background: var(--background-primary);
   border: 1px solid var(--hermesian-border);
-  border-radius: var(--hermesian-radius-md);
-  box-shadow: 0 6px 18px rgb(0 0 0 / 0.12);
+  border-radius: var(--hermesian-radius-card);
+  box-shadow: var(--hermesian-shadow-popover);
   box-sizing: border-box;
   bottom: calc(100% + 4px);
   left: 0;
@@ -820,6 +913,8 @@
 .hermesian-context-label {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
   line-height: 1.4;
   margin-bottom: 3px;
   overflow: hidden;
@@ -838,7 +933,7 @@
 
 .hermesian-context-track {
   background: var(--hermesian-border);
-  border-radius: 999px;
+  border-radius: var(--hermesian-radius-pill);
   height: 2px;
   overflow: hidden;
   width: 100%;
@@ -901,13 +996,15 @@
 .hermesian-history-meta {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
 }
 
 .hermesian-current-file {
   align-items: center;
   background: var(--background-primary);
   border: 1px solid var(--hermesian-border);
-  border-radius: 999px;
+  border-radius: var(--hermesian-radius-pill);
   box-shadow: none;
   color: var(--text-muted);
   cursor: pointer;
@@ -971,13 +1068,17 @@
   backdrop-filter: var(--hermesian-glass-blur);
   -webkit-backdrop-filter: var(--hermesian-glass-blur);
   border: 1px solid var(--hermesian-glass-border);
-  border-radius: var(--hermesian-radius-lg);
-  box-shadow: 0 4px 20px rgb(0 0 0 / 0.07);
+  border-radius: var(--hermesian-radius-composer);
+  box-shadow: var(--hermesian-shadow-composer);
   margin: 8px 8px calc(8px + var(--status-bar-scroll-padding, 30px));
   padding: 8px 9px 7px;
   transition:
     border-color var(--hermesian-motion),
     box-shadow var(--hermesian-motion);
+}
+
+.hermesian-composer:hover:not(:focus-within) {
+  box-shadow: var(--hermesian-shadow-composer-hover);
 }
 
 .is-mobile .hermesian-composer {
@@ -986,7 +1087,7 @@
 
 .hermesian-composer:focus-within {
   border-color: color-mix(in srgb, var(--hermesian-accent) 50%, var(--hermesian-glass-border));
-  box-shadow: 0 4px 20px rgb(0 0 0 / 0.08), 0 0 0 1px var(--hermesian-accent-soft);
+  box-shadow: var(--hermesian-shadow-composer-focus);
 }
 
 .hermesian-composer-contexts {
@@ -1003,7 +1104,7 @@
 .hermesian-selection-bar {
   background: var(--background-primary);
   border: 1px solid var(--hermesian-border);
-  border-radius: 999px;
+  border-radius: var(--hermesian-radius-pill);
   color: var(--text-muted);
   box-sizing: border-box;
   flex: 1 1 100%;
@@ -1039,7 +1140,7 @@
 .hermesian-image-attachment-bar {
   background: var(--background-primary);
   border: 1px solid var(--hermesian-border);
-  border-radius: var(--hermesian-radius-sm);
+  border-radius: var(--hermesian-radius-lg);
   box-sizing: border-box;
   flex: 1 1 100%;
   min-height: 42px;
@@ -1064,7 +1165,7 @@
 
 .hermesian-image-attachment img {
   border: 1px solid var(--hermesian-border);
-  border-radius: var(--hermesian-radius-sm);
+  border-radius: var(--hermesian-radius-md);
   display: block;
   height: 32px;
   object-fit: cover;
@@ -1119,7 +1220,7 @@
   align-items: center;
   background: color-mix(in srgb, var(--hermesian-accent) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--hermesian-accent) 40%, transparent);
-  border-radius: 6px;
+  border-radius: var(--hermesian-radius-pill);
   box-sizing: border-box;
   color: var(--text-normal);
   display: inline-flex;
@@ -1209,7 +1310,7 @@
 .hermesian-slash-token.is-capsule {
   background: color-mix(in srgb, var(--hermesian-accent) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--hermesian-accent) 45%, transparent);
-  border-radius: 999px;
+  border-radius: var(--hermesian-radius-pill);
   box-sizing: border-box;
   max-height: 26px;
   padding: 2px 8px 2px 6px;
@@ -1267,8 +1368,8 @@
 .hermesian-ref-token {
   align-items: center;
   background: color-mix(in srgb, var(--text-muted) 14%, transparent);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 999px;
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-pill);
   box-sizing: border-box;
   color: var(--text-normal);
   cursor: pointer;
@@ -1332,8 +1433,8 @@
 .hermesian-slash-menu {
   background: var(--background-primary-alt, var(--background-primary));
   border: 1px solid var(--hermesian-border);
-  border-radius: var(--hermesian-radius-md);
-  box-shadow: 0 6px 18px rgb(0 0 0 / 0.12);
+  border-radius: var(--hermesian-radius-card);
+  box-shadow: var(--hermesian-shadow-popover);
   box-sizing: border-box;
   margin: 0 0 8px;
   max-height: 240px;
@@ -1659,8 +1760,8 @@
   align-items: stretch;
   background: var(--background-primary);
   border: 1px solid var(--hermesian-border);
-  border-radius: var(--hermesian-radius-lg);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16), 0 12px 40px rgba(0, 0, 0, 0.14);
+  border-radius: var(--hermesian-radius-card);
+  box-shadow: var(--hermesian-shadow-popover);
   display: flex;
   flex-direction: column;
   font-size: var(--font-ui-small);
@@ -1686,7 +1787,7 @@
 .hermesian-model-popover-header,
 .hermesian-model-popover-manage-header {
   align-items: center;
-  border-bottom: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--hermesian-border);
   display: flex;
   flex: 0 0 auto;
   gap: 6px;
@@ -1707,8 +1808,8 @@
 
 .hermesian-model-popover-search {
   background: var(--background-secondary);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--hermesian-radius-sm);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-lg);
   color: var(--text-normal);
   flex: 1 1 auto;
   font-size: var(--font-ui-small);
@@ -1807,7 +1908,7 @@
 
 .hermesian-model-option-current {
   background: var(--hermesian-accent-soft);
-  border-radius: 999px;
+  border-radius: var(--hermesian-radius-pill);
   color: var(--hermesian-accent);
   flex: 0 0 auto;
   font-size: var(--font-ui-smaller);
@@ -1867,8 +1968,8 @@
   align-items: stretch;
   background: var(--background-primary);
   border: 1px solid var(--hermesian-border);
-  border-radius: var(--hermesian-radius-lg);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16), 0 12px 40px rgba(0, 0, 0, 0.14);
+  border-radius: var(--hermesian-radius-card);
+  box-shadow: var(--hermesian-shadow-popover);
   display: flex;
   flex-direction: column;
   font-size: var(--font-ui-small);
@@ -1893,7 +1994,7 @@
 
 .hermesian-reasoning-popover-header {
   align-items: center;
-  border-bottom: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--hermesian-border);
   display: flex;
   flex: 0 0 auto;
   gap: 6px;
@@ -1966,7 +2067,7 @@
 
 .hermesian-reasoning-option-current {
   background: var(--hermesian-accent-soft);
-  border-radius: 999px;
+  border-radius: var(--hermesian-radius-pill);
   color: var(--hermesian-accent);
   flex: 0 0 auto;
   font-size: var(--font-ui-smaller);
