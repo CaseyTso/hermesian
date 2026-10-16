@@ -436,6 +436,7 @@ export class HermesianSidebarView extends ItemView {
     this.loadedMessageTabIds.clear();
     this.composerDispose?.();
     this.composerDispose = undefined;
+    this.messageRenderer?.destroy();
     this.modelPicker?.detach();
     this.modelPicker = null;
     this.reasoningPicker?.detach();

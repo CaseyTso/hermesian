@@ -383,8 +383,63 @@ body,
   overflow-x: hidden;
   overflow-y: auto;
   padding: 14px 12px 18px;
+  position: relative;
   -webkit-user-select: text;
   user-select: text;
+}
+
+.hermesian-messages::before,
+.hermesian-messages::after {
+  content: "";
+  display: block;
+  flex-shrink: 0;
+  height: 24px;
+  left: 0;
+  margin-left: -12px;
+  margin-right: -12px;
+  min-height: 24px;
+  opacity: 0;
+  pointer-events: none;
+  position: sticky;
+  right: 0;
+  transition: opacity var(--hermesian-motion);
+  z-index: 2;
+}
+
+.hermesian-messages::before {
+  background: linear-gradient(to bottom, var(--background-primary), transparent);
+  /*
+   * Numeric offset breakdown for ::before:
+   * - top: -14px anchors sticky position to scrollport top (negates 14px container top padding).
+   * - margin-top: -14px pulls element into container top padding box.
+   * - margin-bottom: -24px offsets remaining height (24px - 14px = 10px) plus 14px flex gap (-10px - 14px = -24px),
+   *   preventing phantom scroll height when content does not overflow.
+   */
+  margin-bottom: -24px;
+  margin-top: -14px;
+  top: -14px;
+}
+
+.hermesian-messages::after {
+  background: linear-gradient(to top, var(--background-primary), transparent);
+  /*
+   * Numeric offset breakdown for ::after:
+   * - bottom: -18px anchors sticky position to scrollport bottom (negates 18px container bottom padding).
+   * - margin-bottom: -18px pulls element into container bottom padding box.
+   * - margin-top: -20px offsets remaining height (24px - 18px = 6px) plus 14px flex gap (-6px - 14px = -20px),
+   *   preventing phantom scroll height when content does not overflow.
+   */
+  bottom: -18px;
+  margin-bottom: -18px;
+  margin-top: -20px;
+}
+
+.hermesian-messages.has-more-above::before {
+  opacity: 1;
+}
+
+.hermesian-messages.has-more-below::after {
+  opacity: 1;
 }
 
 .hermesian-turn,

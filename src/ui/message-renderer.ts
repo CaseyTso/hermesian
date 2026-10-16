@@ -1,10 +1,15 @@
 import type { ScrollFollowController } from "./scroll-lock";
-import { readScrollGeometry } from "./scroll-lock";
+import { distanceFromBottom, readScrollGeometry } from "./scroll-lock";
 import type { SteerResult } from "../types";
+
+export const SCROLL_FADE_THRESHOLD_PX = 8;
+export const USER_SCROLL_INTENT_WINDOW_MS = 100;
 
 export interface MessageRendererOptions {
   /** Optional per-tab auto-follow lock. When set, scrollToBottom respects it. */
   scrollFollow?: ScrollFollowController;
+  /** Clock source for user input timestamps. Defaults to Date.now. */
+  now?: () => number;
 }
 
 export interface ScrollToBottomOptions {
@@ -20,21 +25,39 @@ export class MessageRenderer {
   readonly #document: Document;
   readonly #messagesEl: HTMLElement;
   readonly #scrollFollow?: ScrollFollowController;
+  readonly #now: () => number;
   /** Last user/programmatic scrollTop per tab — restored when revisiting a locked tab. */
   readonly #scrollTopByTab = new Map<string, number>();
   /** True while we programmatically set scrollTop so the scroll listener ignores it. */
   #programmaticScroll = false;
   #visibleTabId: string | undefined;
 
+  #lastUserInputAt = 0;
+  #fadeUpdatePending = false;
+  #fadeUpdateRaf: number | null = null;
+  #lastHasMoreAbove: boolean | null = null;
+  #lastHasMoreBelow: boolean | null = null;
+
   constructor(messagesEl: HTMLElement, options: MessageRendererOptions = {}) {
     this.#messagesEl = messagesEl;
     this.#document = messagesEl.ownerDocument;
     this.#scrollFollow = options.scrollFollow;
-    if (this.#scrollFollow) {
-      this.#messagesEl.addEventListener("scroll", () => {
-        this.#onUserScroll();
-      }, { passive: true });
-    }
+    this.#now = options.now ?? Date.now;
+
+    this.#messagesEl.addEventListener("wheel", () => {
+      this.#lastUserInputAt = this.#now();
+    }, { passive: true });
+    this.#messagesEl.addEventListener("touchmove", () => {
+      this.#lastUserInputAt = this.#now();
+    }, { passive: true });
+    this.#messagesEl.addEventListener("keydown", () => {
+      this.#lastUserInputAt = this.#now();
+    }, { passive: true });
+
+    this.#messagesEl.addEventListener("scroll", () => {
+      this.#onUserScroll();
+    }, { passive: true });
+    this.updateScrollFadeMasks();
   }
 
   /** Expose follow controller for view/send paths that need explicit unlock. */
@@ -43,14 +66,64 @@ export class MessageRenderer {
   }
 
   #onUserScroll(): void {
-    if (this.#programmaticScroll || !this.#scrollFollow || !this.#visibleTabId) {
+    if (this.#programmaticScroll) {
       return;
     }
-    this.#scrollTopByTab.set(this.#visibleTabId, this.#messagesEl.scrollTop);
-    this.#scrollFollow.syncFromGeometry(
-      this.#visibleTabId,
-      readScrollGeometry(this.#messagesEl),
-    );
+    if (this.#scrollFollow && this.#visibleTabId) {
+      this.#scrollTopByTab.set(this.#visibleTabId, this.#messagesEl.scrollTop);
+      const isUserInitiated =
+        this.#now() - this.#lastUserInputAt <= USER_SCROLL_INTENT_WINDOW_MS;
+      this.#scrollFollow.syncFromGeometry(
+        this.#visibleTabId,
+        readScrollGeometry(this.#messagesEl),
+        { userInitiated: isUserInitiated },
+      );
+    }
+    this.updateScrollFadeMasks();
+  }
+
+  /**
+   * Updates `has-more-above` and `has-more-below` classes on the messages element
+   * to drive the top/bottom fade gradient masks.
+   * Coalesced via requestAnimationFrame so streaming append calls run at most once per frame.
+   */
+  updateScrollFadeMasks(options: { immediate?: boolean } = {}): void {
+    if (options.immediate) {
+      this.#cancelFadeUpdate();
+      this.#applyScrollFadeMasks();
+      return;
+    }
+    if (this.#fadeUpdatePending) {
+      return;
+    }
+    this.#fadeUpdatePending = true;
+    this.#fadeUpdateRaf = window.requestAnimationFrame(() => {
+      this.#fadeUpdatePending = false;
+      this.#fadeUpdateRaf = null;
+      this.#applyScrollFadeMasks();
+    });
+  }
+
+  #applyScrollFadeMasks(): void {
+    const geometry = readScrollGeometry(this.#messagesEl);
+    const hasMoreAbove = geometry.scrollTop > SCROLL_FADE_THRESHOLD_PX;
+    const hasMoreBelow = distanceFromBottom(geometry) > SCROLL_FADE_THRESHOLD_PX;
+    if (this.#lastHasMoreAbove !== hasMoreAbove) {
+      this.#lastHasMoreAbove = hasMoreAbove;
+      this.#messagesEl.classList.toggle("has-more-above", hasMoreAbove);
+    }
+    if (this.#lastHasMoreBelow !== hasMoreBelow) {
+      this.#lastHasMoreBelow = hasMoreBelow;
+      this.#messagesEl.classList.toggle("has-more-below", hasMoreBelow);
+    }
+  }
+
+  #cancelFadeUpdate(): void {
+    if (this.#fadeUpdateRaf !== null) {
+      window.cancelAnimationFrame(this.#fadeUpdateRaf);
+      this.#fadeUpdateRaf = null;
+      this.#fadeUpdatePending = false;
+    }
   }
 
   /** Returns the DOM container where messages for `tabId` should be inserted. */
@@ -86,11 +159,14 @@ export class MessageRenderer {
     this.#messagesEl.replaceChildren(...Array.from(targetCache.childNodes));
 
     this.#visibleTabId = tabId;
+    this.#lastHasMoreAbove = null;
+    this.#lastHasMoreBelow = null;
     if (this.#scrollFollow?.isLocked(tabId)) {
       this.#setScrollTop(this.#scrollTopByTab.get(tabId) ?? 0);
       return;
     }
     this.scrollToBottom(tabId);
+    this.updateScrollFadeMasks();
   }
 
   /** Discards the cached messages for `tabId`. */
@@ -98,6 +174,14 @@ export class MessageRenderer {
     this.#caches.delete(tabId);
     this.#scrollTopByTab.delete(tabId);
     this.#scrollFollow?.forget(tabId);
+    if (this.#visibleTabId === tabId) {
+      this.#cancelFadeUpdate();
+    }
+  }
+
+  /** Disposes resources and cancels pending animation frames. */
+  destroy(): void {
+    this.#cancelFadeUpdate();
   }
 
   /** Returns true when `tabId` messages are currently displayed. */
@@ -108,6 +192,9 @@ export class MessageRenderer {
   /** Clears all messages currently shown in the messagesEl. */
   clearVisible(): void {
     this.#messagesEl.empty();
+    this.#lastHasMoreAbove = null;
+    this.#lastHasMoreBelow = null;
+    this.updateScrollFadeMasks();
   }
 
   /**
@@ -139,9 +226,11 @@ export class MessageRenderer {
   #setScrollTop(value: number): void {
     this.#programmaticScroll = true;
     this.#messagesEl.scrollTop = value;
+    this.updateScrollFadeMasks();
     // Re-enable user-scroll tracking after the browser delivers any synthetic scroll.
     window.requestAnimationFrame(() => {
       this.#programmaticScroll = false;
+      this.updateScrollFadeMasks();
     });
   }
 
@@ -299,6 +388,9 @@ export class TurnManager {
     }
     runtime.assistantText += text;
     runtime.assistantContentEl.setText(runtime.assistantText);
+    if (this.#renderer.isVisible(tabId)) {
+      this.#renderer.updateScrollFadeMasks();
+    }
   }
 
   /** Appends a streaming thought delta. */
@@ -315,6 +407,9 @@ export class TurnManager {
     }
     runtime.thoughtContentEl.textContent =
       `${runtime.thoughtContentEl.textContent ?? ""}${text}`;
+    if (this.#renderer.isVisible(tabId)) {
+      this.#renderer.updateScrollFadeMasks();
+    }
   }
 
   /** Appends a steer record activity row to the turn. */
@@ -351,6 +446,9 @@ export class TurnManager {
       cls: "hermesian-steer-content",
       text,
     });
+    if (this.#renderer.isVisible(tabId)) {
+      this.#renderer.updateScrollFadeMasks();
+    }
     return details;
   }
 
@@ -388,6 +486,9 @@ export class TurnManager {
     this.resetStreaming(tabId);
     runtime.activeTurnEl = undefined;
     runtime.turnActivityEl = undefined;
+    if (this.#renderer.isVisible(tabId)) {
+      this.#renderer.updateScrollFadeMasks();
+    }
   }
 
   /** Removes the runtime for a tab. */
