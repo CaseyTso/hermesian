@@ -6,6 +6,8 @@ body,
   --hermesian-accent-soft: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
   --hermesian-accent-soft-hover: color-mix(in srgb, var(--interactive-accent) 18%, transparent);
   --hermesian-motion: 140ms ease-out;
+  --hermesian-motion-spring: cubic-bezier(0.34, 1.3, 0.64, 1);
+  --hermesian-motion-decel: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* 2. Alpha border ladder (CDS structural opacity ladder) */
   --hermesian-alpha-2: color-mix(in srgb, var(--text-normal) 10%, transparent);
@@ -128,7 +130,7 @@ body,
     box-shadow var(--hermesian-motion),
     color var(--hermesian-motion),
     opacity var(--hermesian-motion),
-    transform var(--hermesian-motion);
+    transform 140ms var(--hermesian-motion-spring);
 }
 
 .hermesian-view button:not(:disabled):active {
@@ -480,6 +482,54 @@ body,
   max-width: 100%;
   padding: 2px 2px 4px 10px;
   position: relative;
+}
+
+/* ── Message entrance & stream reveal animations ──────────────────────── */
+
+@keyframes hermesian-bubble-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes hermesian-message-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes hermesian-stream-reveal {
+  from {
+    filter: blur(6px);
+    opacity: 0;
+  }
+  to {
+    filter: blur(0);
+    opacity: 1;
+  }
+}
+
+.hermesian-message.is-user.is-entering {
+  animation: hermesian-bubble-enter 240ms var(--hermesian-motion-spring) both;
+}
+
+.hermesian-message.is-assistant.is-entering {
+  animation: hermesian-message-enter 250ms var(--hermesian-motion-decel) both;
+}
+
+.hermesian-stream-reveal {
+  display: inline;
+  animation: hermesian-stream-reveal 350ms ease-out backwards;
 }
 
 .hermesian-message-copy-button {
@@ -1855,6 +1905,19 @@ body,
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
+
+  .hermesian-message.is-entering,
+  .hermesian-stream-reveal {
+    animation: none !important;
+    filter: none !important;
+    transform: none !important;
+  }
+
+  .hermesian-model-popover,
+  .hermesian-reasoning-popover {
+    transform: none !important;
+    transition: none !important;
+  }
 }
 
 /* ── Model picker popover ─────────────────────────────────────────────── */
@@ -1871,19 +1934,20 @@ body,
   opacity: 0;
   overflow: hidden;
   position: fixed;
-  transform: translateY(4px);
+  transform: translateY(4px) scale(0.95);
   transition:
-    opacity var(--hermesian-motion),
-    transform var(--hermesian-motion);
+    opacity 200ms var(--hermesian-motion-decel),
+    transform 200ms var(--hermesian-motion-spring);
   z-index: 1000;
 }
 
 .hermesian-model-popover--open {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
 }
 
 .hermesian-reduced-motion .hermesian-model-popover {
+  transform: none;
   transition: none;
 }
 
@@ -2079,20 +2143,28 @@ body,
   opacity: 0;
   overflow: hidden;
   position: fixed;
-  transform: translateY(4px);
+  transform: translateY(4px) scale(0.95);
   transition:
-    opacity var(--hermesian-motion),
-    transform var(--hermesian-motion);
+    opacity 200ms var(--hermesian-motion-decel),
+    transform 200ms var(--hermesian-motion-spring);
   z-index: 1000;
 }
 
 .hermesian-reasoning-popover--open {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
 }
 
 .hermesian-reduced-motion .hermesian-reasoning-popover {
+  transform: none;
   transition: none;
+}
+
+.hermesian-reduced-motion .hermesian-message.is-entering,
+.hermesian-reduced-motion .hermesian-stream-reveal {
+  animation: none;
+  filter: none;
+  transform: none;
 }
 
 .hermesian-reasoning-popover-header {

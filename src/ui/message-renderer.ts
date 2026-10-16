@@ -381,16 +381,42 @@ export class TurnManager {
     const runtime = this.ensure(tabId);
     this.ensureActivity(tabId);
     if (!runtime.assistantContentEl) {
+      const isVisible = this.#renderer.isVisible(tabId);
       const message = runtime.activeTurnEl!.createDiv({
-        cls: "hermesian-message is-assistant",
+        cls: `hermesian-message is-assistant${isVisible ? " is-entering" : ""}`,
       });
+      if (isVisible) {
+        let cleaned = false;
+        const cleanup = () => {
+          if (cleaned) return;
+          cleaned = true;
+          message.classList.remove("is-entering");
+        };
+        message.addEventListener?.("animationend", cleanup, { once: true });
+        setTimeout(cleanup, 300);
+      }
       runtime.assistantContentEl = message.createDiv({
         cls: "hermesian-message-content is-streaming",
       });
       this.#callbacks?.onAssistantMessageCreated?.(message);
     }
     runtime.assistantText += text;
-    runtime.assistantContentEl.setText(runtime.assistantText);
+    if (text) {
+      const createSpanFn =
+        typeof runtime.assistantContentEl.createSpan === "function"
+          ? runtime.assistantContentEl.createSpan.bind(runtime.assistantContentEl)
+          : typeof runtime.assistantContentEl.createEl === "function"
+            ? runtime.assistantContentEl.createEl.bind(runtime.assistantContentEl, "span")
+            : undefined;
+      if (createSpanFn) {
+        createSpanFn({
+          cls: "hermesian-stream-reveal",
+          text,
+        });
+      } else {
+        runtime.assistantContentEl.setText(runtime.assistantText);
+      }
+    }
     if (this.#renderer.isVisible(tabId)) {
       this.#renderer.updateScrollFadeMasks();
     }

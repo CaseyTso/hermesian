@@ -2316,6 +2316,7 @@ export class HermesianSidebarView extends ItemView {
       noteContextInjection === "changed"
         ? `${notePath} · note changed (not re-sent)`
         : undefined,
+      { animate: true },
     );
     if (visible()) {
       this.setComposerSlashToken(null);
@@ -2981,11 +2982,26 @@ export class HermesianSidebarView extends ItemView {
     tabId = this.conversationWorkspace?.activeTabId,
     images: readonly PastedImageAttachment[] = [],
     contextChip?: string,
-  ): void {
+    options?: { animate?: boolean },
+  ): HTMLElement {
     const parent = tabId ? this.messageContainer(tabId) : this.messagesEl;
+    const isVisibleTab = this.messageRenderer
+      ? (tabId ? this.messageRenderer.isVisible(tabId) : true)
+      : (this.conversationWorkspace ? tabId === this.conversationWorkspace.activeTabId : true);
+    const shouldAnimate = (options?.animate ?? false) && isVisibleTab;
     const message = parent.createDiv({
-      cls: "hermesian-message is-user",
+      cls: `hermesian-message is-user${shouldAnimate ? " is-entering" : ""}`,
     });
+    if (shouldAnimate) {
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        message.classList.remove("is-entering");
+      };
+      message.addEventListener?.("animationend", cleanup, { once: true });
+      setTimeout(cleanup, 290);
+    }
     if (selection) {
       message.createDiv({
         text: `${selection.filePath} · L${selection.startLine}–${selection.endLine}`,
@@ -3025,6 +3041,7 @@ export class HermesianSidebarView extends ItemView {
     }
     // Sending / replaying a user bubble means intent to follow the latest output.
     this.scrollToBottom(tabId, { force: true });
+    return message;
   }
 
   private appendAssistantDelta(tabId: string, text: string): void {
