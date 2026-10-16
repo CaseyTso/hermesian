@@ -479,6 +479,54 @@ body,
   border-radius: 0;
   max-width: 100%;
   padding: 2px 2px 4px 10px;
+  position: relative;
+}
+
+.hermesian-message-copy-button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--hermesian-radius-sm);
+  box-shadow: none;
+  box-sizing: border-box;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  margin: 0;
+  opacity: 0;
+  padding: 0;
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  transition:
+    opacity var(--hermesian-motion),
+    color var(--hermesian-motion),
+    background-color var(--hermesian-motion),
+    border-color var(--hermesian-motion);
+  width: 24px;
+  z-index: 1;
+}
+
+.hermesian-message.is-assistant:hover .hermesian-message-copy-button,
+.hermesian-message-copy-button:focus-visible {
+  opacity: 1;
+}
+
+.hermesian-message-copy-button:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.hermesian-message-copy-button.is-copied {
+  color: var(--color-green);
+}
+
+.hermesian-message-copy-button svg {
+  display: block;
+  height: 14px;
+  width: 14px;
 }
 
 .hermesian-message-content {

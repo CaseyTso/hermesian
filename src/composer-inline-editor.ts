@@ -441,7 +441,12 @@ export function handleInlineEditorKeydown(
   draft: ComposerInlineDraft,
   options: InlineEditorRenderOptions = {},
 ): InlineKeydownResult {
-  if (event.isComposing) {
+  // IME double-guard: Some IMEs (notably macOS Chinese Pinyin) emit an
+  // Enter keydown event upon confirming candidate selection where `isComposing`
+  // has already transitioned to `false` but `keyCode === 229` persists.
+  // Although `KeyboardEvent.keyCode` is deprecated in the W3C spec, `keyCode === 229`
+  // remains the de facto standard and only reliable signal for IME composition across browsers.
+  if (event.isComposing || event.keyCode === 229) {
     return { handled: false };
   }
   const caret = getCaretOffset(editorEl);

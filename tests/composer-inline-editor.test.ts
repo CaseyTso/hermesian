@@ -556,6 +556,34 @@ describe("handleInlineEditorKeydown", () => {
     expect(backspace.draft).toBeUndefined();
   });
 
+  it("Enter with isComposing=false but keyCode=229 (macOS IME candidate confirm) does not send", () => {
+    const { editorEl } = setup();
+    const original = draft({ text: "请总结" });
+    renderInlineDraft(editorEl, original);
+    setCaretOffset(editorEl, 3);
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "Enter", { isComposing: false, keyCode: 229 }),
+      original,
+    );
+    expect(result.sendRequested).toBeUndefined();
+    expect(result.handled).toBe(false);
+  });
+
+  it("normal Enter (isComposing=false, keyCode=13) requests send and is handled", () => {
+    const { editorEl } = setup();
+    const original = draft({ text: "请总结" });
+    renderInlineDraft(editorEl, original);
+    setCaretOffset(editorEl, 3);
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "Enter", { isComposing: false, keyCode: 13 }),
+      original,
+    );
+    expect(result.sendRequested).toBe(true);
+    expect(result.handled).toBe(true);
+  });
+
   it("Backspace adjacent to a capsule is ignored while composing", () => {
     const { editorEl } = setup();
     const original = draft({

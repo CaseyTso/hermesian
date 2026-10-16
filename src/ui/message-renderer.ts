@@ -277,6 +277,8 @@ export function shouldRecordSteer(result: SteerResult): SteerDisposition {
 export interface TurnCallbacks {
   /** Called after every turn completes (success or failure). */
   onTurnComplete(tabId: string): void;
+  /** Optional callback invoked when an assistant message container is created. */
+  onAssistantMessageCreated?(messageEl: HTMLElement): void;
 }
 
 type IdleWaiter = {
@@ -385,6 +387,7 @@ export class TurnManager {
       runtime.assistantContentEl = message.createDiv({
         cls: "hermesian-message-content is-streaming",
       });
+      this.#callbacks?.onAssistantMessageCreated?.(message);
     }
     runtime.assistantText += text;
     runtime.assistantContentEl.setText(runtime.assistantText);

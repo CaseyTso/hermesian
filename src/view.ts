@@ -33,6 +33,11 @@ import {
   type ConversationControlAvailability,
   type SteerableDraftFacts,
 } from "./conversation-runtime";
+import {
+  createDebugLogger,
+  safeErrorFields,
+  type DebugLogger,
+} from "./debug-logger";
 import { linkifyExternalUrls } from "./external-links";
 import { HERMESIAN_ICON_ID } from "./hermes-icon";
 import {
@@ -375,12 +380,14 @@ export class HermesianSidebarView extends ItemView {
   private dictationBridge: DictationBridge | undefined;
   private stopAndSend: StopAndSendCoordinator | undefined;
   private escapeKeyBound = false;
+  private readonly logger: DebugLogger;
 
   constructor(
     leaf: WorkspaceLeaf,
     private readonly plugin: HermesianPlugin,
   ) {
     super(leaf);
+    this.logger = createDebugLogger(Boolean(plugin?.settings?.debugLogging));
   }
 
   getViewType(): string {
@@ -690,6 +697,9 @@ export class HermesianSidebarView extends ItemView {
         if (this.conversationWorkspace?.activeTabId === tabId) {
           this.updateControls(false);
         }
+      },
+      onAssistantMessageCreated: (messageEl: HTMLElement) => {
+        this.attachMessageCopyButton(messageEl);
       },
     };
     this.turnManager = new TurnManager(this.messageRenderer, turnCallbacks);
@@ -1635,6 +1645,7 @@ export class HermesianSidebarView extends ItemView {
     if (assistantText) {
       const message = turn.createDiv({ cls: "hermesian-message is-assistant" });
       const content = message.createDiv({ cls: "hermesian-message-content" });
+      this.attachMessageCopyButton(message);
       await this.renderMarkdown(content, assistantText);
     }
   }
@@ -1853,6 +1864,9 @@ export class HermesianSidebarView extends ItemView {
     if (this.slashMenuItems.length === 0) {
       return false;
     }
+    if (event.isComposing || event.keyCode === 229) {
+      return false;
+    }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       this.setSlashMenuIndex(
@@ -1866,9 +1880,6 @@ export class HermesianSidebarView extends ItemView {
       return true;
     }
     if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
-      if (event.isComposing) {
-        return false;
-      }
       event.preventDefault();
       this.chooseSlashMenuItem(this.slashMenuIndex);
       return true;
@@ -3381,6 +3392,15 @@ export class HermesianSidebarView extends ItemView {
     this.messageRenderer.scrollToBottom(sourceTabId, options);
   }
 
+  private attachMessageCopyButton(
+    messageEl: HTMLElement,
+  ): HTMLButtonElement | undefined {
+    return attachMessageCopyButton(messageEl, {
+      iconRenderer: (element, icon) => setIcon(element, icon),
+      logger: this.logger,
+    });
+  }
+
   private messageFor(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
   }
@@ -3388,4 +3408,112 @@ export class HermesianSidebarView extends ItemView {
 
 function requestHasRawContent(contents: ToolCallContent[]): boolean {
   return contents.length > 0;
+}
+
+export interface AttachMessageCopyButtonOptions {
+  iconRenderer?: (element: HTMLElement, iconId: string) => void;
+  clipboard?: { writeText(text: string): Promise<void> };
+  timeoutMs?: number;
+  logger?: DebugLogger;
+}
+
+/**
+ * Attaches a hover-activated copy button to an assistant message bubble.
+ * Fails gracefully (no-op) for non-assistant or user messages, or if already attached.
+ */
+export function attachMessageCopyButton(
+  messageEl: HTMLElement,
+  options: AttachMessageCopyButtonOptions = {},
+): HTMLButtonElement | undefined {
+  if (
+    !messageEl.classList.contains("is-assistant") ||
+    messageEl.classList.contains("is-user")
+  ) {
+    return undefined;
+  }
+  if (messageEl.querySelector(".hermesian-message-copy-button")) {
+    return undefined;
+  }
+
+  const renderIcon = options.iconRenderer ?? ((el, icon) => setIcon(el, icon));
+  const clipboard =
+    options.clipboard ??
+    (typeof navigator !== "undefined" ? navigator.clipboard : undefined);
+  const timeoutMs = options.timeoutMs ?? 2500;
+  const logger = options.logger ?? createDebugLogger(false);
+
+  const button =
+    typeof messageEl.createEl === "function"
+      ? (messageEl.createEl("button", {
+          cls: "hermesian-message-copy-button",
+          attr: {
+            type: "button",
+            "aria-label": "Copy message",
+            title: "Copy message",
+          },
+        }) as HTMLButtonElement)
+      : (() => {
+          const btn = messageEl.ownerDocument.createElement("button");
+          btn.className = "hermesian-message-copy-button";
+          btn.type = "button";
+          btn.setAttribute("aria-label", "Copy message");
+          btn.title = "Copy message";
+          messageEl.appendChild(btn);
+          return btn;
+        })();
+
+  renderIcon(button, "copy");
+
+  let resetTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const setCopied = () => {
+    if (resetTimer !== null) {
+      clearTimeout(resetTimer);
+      resetTimer = null;
+    }
+    button.classList.add("is-copied");
+    button.setAttribute("aria-label", "Copied");
+    button.title = "Copied";
+    renderIcon(button, "check");
+
+    resetTimer = setTimeout(() => {
+      button.classList.remove("is-copied");
+      button.setAttribute("aria-label", "Copy message");
+      button.title = "Copy message";
+      renderIcon(button, "copy");
+      resetTimer = null;
+    }, timeoutMs);
+  };
+
+  button.addEventListener("click", async (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const contentEl = messageEl.querySelector<HTMLElement>(
+      ".hermesian-message-content",
+    );
+    if (!contentEl) {
+      return;
+    }
+    const text =
+      contentEl.innerText?.trim() ? contentEl.innerText : (contentEl.textContent ?? "");
+    if (!text) {
+      return;
+    }
+
+    try {
+      if (!clipboard || typeof clipboard.writeText !== "function") {
+        throw new Error("Clipboard API not available");
+      }
+      await clipboard.writeText(text);
+      setCopied();
+    } catch (error) {
+      logger.warn("controller.background.failure", {
+        operation: "copy-message",
+        ...safeErrorFields(error),
+      });
+    }
+  });
+
+  return button;
 }
