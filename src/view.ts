@@ -50,7 +50,6 @@ import {
 import {
   extractMermaidBlocks,
   replaceMermaidPlaceholders,
-  type MermaidBlock,
 } from "./markdown-mermaid";
 import { normalizeMathDelimiters } from "./markdown-math";
 import { normalizeTableSpacing } from "./markdown-table";
@@ -3449,12 +3448,6 @@ export interface AttachMessageCopyButtonOptions {
  * Attaches a hover-activated copy button to an assistant message bubble.
  * Fails gracefully (no-op) for non-assistant or user messages, or if already attached.
  */
-export {
-  extractMermaidBlocks,
-  replaceMermaidPlaceholders,
-  type MermaidBlock,
-};
-
 export function attachMessageCopyButton(
   messageEl: HTMLElement,
   options: AttachMessageCopyButtonOptions = {},

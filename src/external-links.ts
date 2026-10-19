@@ -76,7 +76,7 @@ export function linkifyExternalUrls(root: HTMLElement): void {
 
   for (const textNode of textNodes) {
     const parent = textNode.parentElement;
-    if (!parent || parent.closest("a,script,style,textarea")) {
+    if (!parent || parent.closest("a,script,style,textarea,svg")) {
       continue;
     }
     const matches = findExternalLinks(textNode.data);
