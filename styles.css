@@ -2302,3 +2302,413 @@ body,
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
 }
+
+/* ── Diagram Surface (Mermaid / pele) ────────────────────────────────── */
+
+.hermesian-diagram-surface,
+.hermesian-diagram-modal {
+  --pele-bg: var(--background-primary);
+  --pele-fg: var(--text-normal);
+  --pele-muted: var(--text-muted);
+  --pele-line: var(--text-muted);
+  --pele-surface: var(--background-secondary);
+  --pele-surface-alt: var(--background-primary-alt, var(--background-secondary));
+  --pele-border: var(--background-modifier-border);
+  --pele-accent: var(--interactive-accent);
+  --pele-error: var(--text-error);
+  --pele-critical: var(--text-error);
+  --pele-radius: var(--hermesian-radius-sm);
+  --pele-font: var(--font-text, sans-serif);
+  --pele-font-mono: var(--font-monospace, monospace);
+}
+
+.hermesian-diagram-surface {
+  background: var(--background-secondary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-card);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  margin: 8px 0;
+  max-width: 100%;
+  overflow: hidden;
+  position: relative;
+  transition: border-color var(--hermesian-motion);
+}
+
+.hermesian-diagram-surface:hover {
+  border-color: var(--hermesian-border-strong);
+}
+
+.theme-dark .hermesian-diagram-surface,
+.theme-dark .hermesian-diagram-modal {
+  --pele-bg: var(--background-secondary);
+  --pele-surface: var(--background-primary);
+  --pele-line: var(--text-muted);
+  --pele-border: var(--background-modifier-border);
+}
+
+.hermesian-diagram-viewport {
+  align-items: center;
+  box-sizing: border-box;
+  display: flex;
+  justify-content: center;
+  min-height: 48px;
+  overflow: hidden;
+  padding: 12px;
+  position: relative;
+  width: 100%;
+}
+
+.hermesian-diagram-surface.is-simple .hermesian-diagram-viewport svg,
+.hermesian-diagram-surface[data-diagram-category="simple"] .hermesian-diagram-viewport svg {
+  display: block;
+  height: auto !important;
+  max-width: 100% !important;
+  width: 100% !important;
+}
+
+.hermesian-diagram-surface.is-wide .hermesian-diagram-viewport,
+.hermesian-diagram-surface[data-diagram-category="wide"] .hermesian-diagram-viewport {
+  align-items: flex-start;
+  justify-content: flex-start;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.hermesian-diagram-surface.is-wide .hermesian-diagram-viewport svg,
+.hermesian-diagram-surface[data-diagram-category="wide"] .hermesian-diagram-viewport svg {
+  display: block;
+  flex-shrink: 0;
+  height: auto;
+  max-width: none !important;
+}
+
+.hermesian-diagram-toolbar {
+  align-items: center;
+  background: color-mix(in srgb, var(--background-secondary) 85%, transparent);
+  border-top: 1px solid var(--hermesian-border);
+  box-sizing: border-box;
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  padding: 4px 8px;
+  width: 100%;
+}
+
+.hermesian-diagram-button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--hermesian-radius-sm);
+  box-shadow: none;
+  box-sizing: border-box;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  transition:
+    opacity var(--hermesian-motion),
+    color var(--hermesian-motion),
+    background-color var(--hermesian-motion),
+    border-color var(--hermesian-motion);
+  width: 24px;
+}
+
+.hermesian-diagram-button:hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.hermesian-diagram-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.hermesian-diagram-button.is-copied {
+  color: var(--color-green);
+}
+
+.hermesian-diagram-button svg {
+  display: block;
+  height: 14px;
+  width: 14px;
+}
+
+/* ── Diagram Surface: Error state ────────────────────────────────────── */
+
+.hermesian-diagram-surface.is-error {
+  border-color: color-mix(in srgb, var(--text-error) 30%, var(--hermesian-border));
+}
+
+.hermesian-diagram-error {
+  align-items: center;
+  box-sizing: border-box;
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.hermesian-diagram-error-icon {
+  align-items: center;
+  color: var(--color-yellow, var(--text-error));
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.hermesian-diagram-error-icon svg {
+  display: block;
+  height: 16px;
+  width: 16px;
+}
+
+.hermesian-diagram-error-text {
+  color: var(--text-muted);
+  flex: 1 1 auto;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+}
+
+.hermesian-diagram-toggle-source {
+  background: transparent;
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: var(--font-ui-smaller);
+  line-height: 1;
+  padding: 3px 8px;
+  transition:
+    color var(--hermesian-motion),
+    background-color var(--hermesian-motion),
+    border-color var(--hermesian-motion);
+}
+
+.hermesian-diagram-toggle-source:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--hermesian-border-strong);
+  color: var(--text-normal);
+}
+
+.hermesian-diagram-source {
+  background: color-mix(in srgb, var(--background-primary) 50%, var(--background-secondary));
+  border-top: 1px solid var(--hermesian-border);
+  box-sizing: border-box;
+  max-height: 200px;
+  overflow: auto;
+  padding: 8px 12px;
+  width: 100%;
+}
+
+.hermesian-diagram-source pre {
+  background: transparent;
+  box-sizing: border-box;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.45;
+  margin: 0;
+  padding: 0;
+  user-select: text;
+  -webkit-user-select: text;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.hermesian-diagram-source code {
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  margin: 0;
+  padding: 0;
+}
+
+/* ── Diagram Modal (Full-size Preview & Export) ─────────────────────── */
+
+.hermesian-diagram-modal {
+  --modal-width: 960px;
+  --modal-max-width: 92vw;
+  --modal-height: 85vh;
+  --modal-max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  height: var(--modal-height);
+  max-height: var(--modal-max-height);
+  max-width: var(--modal-max-width);
+  width: var(--modal-width);
+}
+
+.hermesian-diagram-modal .modal-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 0 16px 0;
+}
+
+.hermesian-diagram-modal-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  width: 100%;
+}
+
+.hermesian-diagram-modal-zoom-bar {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  justify-content: flex-end;
+  padding: 0 20px;
+}
+
+.hermesian-diagram-modal-zoom-btn {
+  align-items: center;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--font-ui-smaller);
+  height: 26px;
+  justify-content: center;
+  line-height: 1;
+  min-width: 26px;
+  padding: 0 8px;
+  transition:
+    color var(--hermesian-motion),
+    background-color var(--hermesian-motion),
+    border-color var(--hermesian-motion);
+}
+
+.hermesian-diagram-modal-zoom-btn:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--hermesian-border-strong);
+  color: var(--text-normal);
+}
+
+.hermesian-diagram-modal-zoom-btn svg {
+  display: block;
+  height: 14px;
+  width: 14px;
+}
+
+.hermesian-diagram-modal-zoom-text {
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  min-width: 48px;
+  text-align: center;
+  user-select: none;
+}
+
+.hermesian-diagram-modal-viewport {
+  align-items: center;
+  background: var(--background-secondary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-md);
+  box-sizing: border-box;
+  display: flex;
+  flex: 1 1 auto;
+  justify-content: center;
+  margin: 0 20px;
+  min-height: 280px;
+  overflow: auto;
+  padding: 24px;
+  position: relative;
+}
+
+.hermesian-diagram-modal-svg-wrap {
+  align-items: center;
+  display: inline-flex;
+  flex-shrink: 0;
+  justify-content: center;
+  margin: auto;
+}
+
+.hermesian-diagram-modal-svg-wrap svg {
+  display: block;
+  max-height: none;
+  max-width: none;
+}
+
+.hermesian-diagram-modal-toolbar {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 0 20px;
+}
+
+.hermesian-diagram-modal-actions-left,
+.hermesian-diagram-modal-actions-right {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.hermesian-diagram-modal-btn {
+  align-items: center;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  color: var(--text-normal);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--font-ui-small);
+  gap: 6px;
+  height: 32px;
+  justify-content: center;
+  line-height: 1;
+  padding: 0 12px;
+  transition:
+    color var(--hermesian-motion),
+    background-color var(--hermesian-motion),
+    border-color var(--hermesian-motion);
+}
+
+.hermesian-diagram-modal-btn:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--hermesian-border-strong);
+}
+
+.hermesian-diagram-modal-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.hermesian-diagram-modal-btn.mod-cta {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.hermesian-diagram-modal-btn.mod-cta:hover {
+  background: var(--interactive-accent-hover);
+}
+
+.hermesian-diagram-modal-btn.is-copied {
+  border-color: var(--color-green);
+  color: var(--color-green);
+}
+
+.hermesian-diagram-modal-btn svg {
+  display: block;
+  height: 16px;
+  width: 16px;
+}
+
+

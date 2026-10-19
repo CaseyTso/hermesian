@@ -9,6 +9,7 @@ vi.mock("obsidian", () => ({
       this.app = leaf.app;
     }
   },
+  Modal: class {},
   SuggestModal: class {},
   MarkdownView: class {},
   WorkspaceLeaf: class {},

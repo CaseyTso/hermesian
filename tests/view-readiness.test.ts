@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("obsidian", () => ({
   ItemView: class { app: any; containerEl = document.createElement("div"); constructor(leaf: any) { this.app = leaf.app; } },
+  Modal: class {},
   SuggestModal: class {}, MarkdownView: class {}, WorkspaceLeaf: class {},
   MarkdownRenderer: { render: vi.fn(async () => undefined) },
   Notice: vi.fn(), setIcon: vi.fn(),

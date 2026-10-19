@@ -118,6 +118,10 @@ _Avoid_: Glass permission card, decorative card, subdued approval
 A compact, expandable record of a completed permission decision that preserves access to the original diff and outcome.
 _Avoid_: Pending permission, hidden audit trail, deleted approval
 
+**Diagram Surface**:
+A Content Layer surface that presents a Mermaid diagram in the conversation flow, rendered as theme-adaptive SVG sized to the Sidebar Density, with actions to inspect it at full size, export it as an image (copy to clipboard or save to filesystem via system dialog), and copy its Mermaid source.
+_Avoid_: Mermaid block, code block, chart bubble
+
 **Preview Build**:
 An uncommitted Hermesian build deployed to a test Vault for visual review in the real Obsidian environment.
 _Avoid_: Static mockup, release build, approved design

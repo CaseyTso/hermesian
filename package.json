@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.2.1",
-    "diff": "8.0.4"
+    "diff": "8.0.4",
+    "pele": "^1.6.0"
   },
   "devDependencies": {
     "@types/node": "24.10.0",

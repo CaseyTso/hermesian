@@ -47,6 +47,11 @@ import {
   MAX_PASTED_IMAGE_BYTES,
   type PastedImageAttachment,
 } from "./image-attachments";
+import {
+  extractMermaidBlocks,
+  replaceMermaidPlaceholders,
+  type MermaidBlock,
+} from "./markdown-mermaid";
 import { normalizeMathDelimiters } from "./markdown-math";
 import { normalizeTableSpacing } from "./markdown-table";
 import {
@@ -3077,13 +3082,19 @@ export class HermesianSidebarView extends ItemView {
     target.removeClass("is-streaming");
     const sourcePath = sourceFilePath ?? this.currentFilePath ?? "";
     target.dataset.sourcePath = sourcePath;
+
+    const { processedText, mermaidBlocks } = extractMermaidBlocks(text);
+
     await MarkdownRenderer.render(
       this.app,
-      normalizeTableSpacing(normalizeMathDelimiters(text)),
+      normalizeTableSpacing(normalizeMathDelimiters(processedText)),
       target,
       sourcePath,
       this,
     );
+
+    replaceMermaidPlaceholders(target, mermaidBlocks, this.app);
+
     linkifyExternalUrls(target);
   }
 
@@ -3438,6 +3449,12 @@ export interface AttachMessageCopyButtonOptions {
  * Attaches a hover-activated copy button to an assistant message bubble.
  * Fails gracefully (no-op) for non-assistant or user messages, or if already attached.
  */
+export {
+  extractMermaidBlocks,
+  replaceMermaidPlaceholders,
+  type MermaidBlock,
+};
+
 export function attachMessageCopyButton(
   messageEl: HTMLElement,
   options: AttachMessageCopyButtonOptions = {},
