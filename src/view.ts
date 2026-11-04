@@ -70,6 +70,10 @@ import {
 } from "./selection-context";
 import { reasoningEffortLabel } from "./session-history";
 import { HermesHistorySuggestModal } from "./ui/conversation-modals";
+import {
+  TableModal,
+  handleRenderedLinkClick,
+} from "./ui/table-modal";
 import { HermesModelPickerPopover } from "./ui/model-picker-popover";
 import { HermesReasoningPickerPopover } from "./ui/reasoning-picker-popover";
 import {
@@ -3143,51 +3147,65 @@ export class HermesianSidebarView extends ItemView {
     replaceMermaidPlaceholders(target, mermaidBlocks, this.app);
 
     linkifyExternalUrls(target);
+
+    if (this.isAssistantMessageTarget(target)) {
+      this.enhanceAssistantTables(target, sourcePath);
+    }
+  }
+
+  private isAssistantMessageTarget(target: HTMLElement): boolean {
+    const messageEl = target.closest(".hermesian-message");
+    if (messageEl) {
+      return messageEl.classList.contains("is-assistant");
+    }
+    return !target.classList.contains("is-user") && !target.closest(".is-user");
+  }
+
+  private enhanceAssistantTables(target: HTMLElement, sourcePath: string): void {
+    const tables = Array.from(target.querySelectorAll<HTMLTableElement>("table"));
+    for (const table of tables) {
+      if (table.parentElement?.classList.contains("hermesian-table-frame")) {
+        continue;
+      }
+
+      const frame = document.createElement("div");
+      frame.className = "hermesian-table-frame";
+
+      const expandBtn = document.createElement("button");
+      expandBtn.type = "button";
+      expandBtn.className = "hermesian-table-expand-button";
+      expandBtn.setAttribute("aria-label", "展开看全表");
+      expandBtn.setAttribute("title", "展开看全表");
+      try {
+        setIcon(expandBtn, "maximize-2");
+      } catch {
+        // Fallback for non-Obsidian environments
+      }
+
+      expandBtn.addEventListener("click", (event: MouseEvent) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const clonedTable = table.cloneNode(true) as HTMLTableElement;
+        const modal = new TableModal(this.app, clonedTable, {
+          sourcePath: target.dataset.sourcePath ?? sourcePath ?? this.currentFilePath,
+          onLinkClick: (linkEvent: MouseEvent) => {
+            this.openRenderedLink(linkEvent);
+          },
+        });
+        modal.open();
+      });
+
+      const parent = table.parentElement;
+      if (parent) {
+        parent.insertBefore(frame, table);
+      }
+      frame.appendChild(expandBtn);
+      frame.appendChild(table);
+    }
   }
 
   private openRenderedLink(event: MouseEvent): void {
-    const eventTarget = event.target;
-    const anchor = eventTarget instanceof Element
-      ? eventTarget.closest<HTMLAnchorElement>("a")
-      : null;
-    if (!anchor) {
-      return;
-    }
-
-    if (!anchor.hasClass("internal-link")) {
-      const href = anchor.getAttribute("href");
-      if (!href) {
-        return;
-      }
-      try {
-        const url = new URL(href);
-        if (url.protocol !== "http:" && url.protocol !== "https:") {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        window.open(url.toString(), "_blank", "noopener,noreferrer");
-      } catch {
-        return;
-      }
-      return;
-    }
-
-    const linkText = anchor?.dataset.href ?? anchor?.getAttribute("href");
-    if (!linkText) {
-      return;
-    }
-    const sourcePath =
-      anchor.closest<HTMLElement>(".hermesian-message-content")?.dataset.sourcePath ??
-      this.currentFilePath ??
-      "";
-    event.preventDefault();
-    event.stopPropagation();
-    void this.app.workspace.openLinkText(
-      linkText,
-      sourcePath,
-      event.metaKey || event.ctrlKey,
-    );
+    handleRenderedLinkClick(event, this.app, this.currentFilePath);
   }
 
   private messageContainer(tabId: string): HTMLElement {

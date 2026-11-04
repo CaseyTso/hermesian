@@ -703,10 +703,60 @@ body,
   word-break: keep-all;
 }
 
-.hermesian-message.is-assistant .hermesian-message-content > table {
+.hermesian-message.is-assistant .hermesian-message-content :is(> table, .hermesian-table-frame > table) {
   display: block;
   max-width: 100%;
   overflow-x: auto;
+}
+
+.hermesian-table-frame {
+  box-sizing: border-box;
+  max-width: 100%;
+  position: relative;
+}
+
+.hermesian-table-expand-button {
+  align-items: center;
+  background: var(--background-primary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  left: 6px;
+  min-height: 24px;
+  min-width: 24px;
+  opacity: 0.35;
+  padding: 0;
+  position: absolute;
+  top: 6px;
+  transition:
+    opacity var(--hermesian-motion),
+    background-color var(--hermesian-motion),
+    color var(--hermesian-motion),
+    border-color var(--hermesian-motion);
+  width: 24px;
+  z-index: 5;
+}
+
+.hermesian-table-frame:hover .hermesian-table-expand-button,
+.hermesian-table-expand-button:focus-visible {
+  opacity: 0.85;
+}
+
+.hermesian-table-expand-button:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--hermesian-border-strong);
+  color: var(--text-normal);
+  opacity: 1;
+}
+
+.hermesian-table-expand-button svg {
+  display: block;
+  height: 14px;
+  width: 14px;
 }
 
 .hermesian-message.is-assistant .hermesian-message-content img {
@@ -2724,6 +2774,139 @@ body,
   display: block;
   height: 16px;
   width: 16px;
+}
+
+/* ── Table Modal (Full-size View & Sticky Headers) ──────────────────── */
+
+.hermesian-table-modal {
+  --modal-width: 960px;
+  --modal-max-width: 92vw;
+  --modal-height: 85vh;
+  --modal-max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  height: var(--modal-height);
+  max-height: var(--modal-max-height);
+  max-width: var(--modal-max-width);
+  width: var(--modal-width);
+}
+
+.hermesian-table-modal .modal-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 0 16px 0;
+}
+
+.hermesian-table-modal-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  width: 100%;
+}
+
+.hermesian-table-modal-viewport {
+  background: var(--background-primary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-md);
+  box-sizing: border-box;
+  display: block;
+  flex: 1 1 auto;
+  margin: 0 20px;
+  min-height: 280px;
+  overflow: auto;
+  padding: 0;
+  position: relative;
+}
+
+.hermesian-table-modal-viewport table {
+  border-collapse: separate;
+  border-spacing: 0;
+  box-sizing: border-box;
+  display: table;
+  min-width: 100%;
+  table-layout: auto;
+  width: max-content;
+}
+
+.hermesian-table-modal-viewport :is(th, td) {
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--hermesian-border);
+  border-right: 1px solid var(--hermesian-border);
+  box-sizing: border-box;
+  max-width: 32rem;
+  min-width: 8rem;
+  overflow-wrap: break-word;
+  padding: 8px 12px;
+  vertical-align: top;
+  white-space: normal;
+  word-break: normal;
+}
+
+/* Modal header sticky freeze: top: 0, z-index: 2 */
+.hermesian-table-modal-viewport thead th {
+  background: var(--background-secondary-alt);
+  border-bottom: 2px solid var(--hermesian-border);
+  font-weight: var(--font-semibold);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* Modal first column sticky freeze: left: 0, z-index: 1 */
+.hermesian-table-modal-viewport tbody tr > :first-child,
+.hermesian-table-modal-viewport thead tr > :first-child {
+  background: var(--background-primary);
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+/* Top-left corner intersecting cell: sticky top & left, z-index: 3 */
+.hermesian-table-modal-viewport thead tr > :first-child {
+  background: var(--background-secondary-alt);
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 3;
+}
+
+.hermesian-table-modal-footer {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  justify-content: flex-end;
+  padding: 0 20px;
+}
+
+.hermesian-table-modal-btn {
+  align-items: center;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  color: var(--text-normal);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  height: 28px;
+  justify-content: center;
+  line-height: 1;
+  padding: 0 14px;
+  transition:
+    color var(--hermesian-motion),
+    background-color var(--hermesian-motion),
+    border-color var(--hermesian-motion);
+}
+
+.hermesian-table-modal-btn:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--hermesian-border-strong);
 }
 
 

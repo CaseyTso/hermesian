@@ -110,6 +110,14 @@ _Avoid_: L-range caption, path-and-line citation, selection banner
 The short, recognizable extract of a Selection's text shown inside a Selection Reference so the reader knows what was quoted. Whitespace is normalized; overflow is clamped rather than guessed at.
 _Avoid_: Line numbers as the primary identifier, raw multi-paragraph dump
 
+**Table Expand Action**:
+The small floating ⤢ button at the top-left corner of an assistant-message table that opens the Expanded Table View. It sits at the top-left because the table's left edge is always visible even when a wide table overflows to the right, so the action is reachable without scrolling.
+_Avoid_: Top-right expand button (scrolls out of reach on wide tables), full-width toolbar row, text-labeled expand button
+
+**Expanded Table View**:
+The enlarged, scrollable surface that presents one assistant-message table in full for reading. Unlike the cramped in-sidebar table, it has room to keep the first row and first column pinned while scrolling, so the reader never loses track of which row and column a cell belongs to.
+_Avoid_: Inline sidebar zoom, freezing rows/columns in the cramped in-sidebar table, plain scroll-only large view
+
 **Picker Width Bound**:
 The rule that a Picker Popover's width is measured from the sidebar's own content box (never the window, never the trigger button) so it can never spill past the sidebar edge into the editor. It bounds width only; different pickers are not required to be equally wide.
 _Avoid_: Per-picker width, trigger-matched width, window-measured width, popover bleeding into the editor, equal-width mandate
