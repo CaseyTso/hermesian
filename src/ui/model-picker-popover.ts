@@ -1,4 +1,5 @@
 import type { HermesModelOption, HermesProviderModels } from "../types";
+import { resolvePickerPlacement } from "./picker-geometry";
 
 /**
  * Normalize a persisted "hidden model switch ids" value.
@@ -97,15 +98,13 @@ export interface HermesModelPickerOptions {
   onClose?: () => void;
   onSaveHidden: (switchIds: string[]) => void | Promise<void>;
   getViewport?: () => { height: number; width: number };
+  /** Sidebar content box (`.hermesian-view`) in viewport coordinates. */
+  getContainerRect?: () => { left: number; width: number };
   /** Renders an icon into an element; Obsidian's setIcon is passed by the host. */
   iconRenderer?: (element: HTMLElement, icon: string) => void;
 }
 
-const POPOVER_WIDTH_MIN = 240;
-const POPOVER_WIDTH_MAX = 420;
 const POPOVER_HEIGHT_MAX = 480;
-const GAP_ABOVE_ANCHOR = 8;
-const EDGE_PADDING = 8;
 const OPEN_ANIMATION_DELAY_MS = 20;
 
 /**
@@ -507,29 +506,29 @@ export class HermesModelPickerPopover {
   private position(): void {
     const viewport =
       this.options.getViewport?.() ?? { height: window.innerHeight, width: window.innerWidth };
+    // Without a host-provided sidebar rect, fall back to "the whole window is
+    // the container" so the popover still positions sensibly outside Obsidian.
+    const containerRect = this.options.getContainerRect?.() ?? {
+      left: 0,
+      width: viewport.width,
+    };
     const rect = this.options.anchorEl.getBoundingClientRect();
-    const width = Math.min(
-      POPOVER_WIDTH_MAX,
-      Math.max(POPOVER_WIDTH_MIN, Math.round(rect.width)),
-      viewport.width - EDGE_PADDING * 2,
-    );
-    const left = Math.max(
-      EDGE_PADDING,
-      Math.min(rect.left, viewport.width - width - EDGE_PADDING),
-    );
-    const spaceAbove = rect.top - GAP_ABOVE_ANCHOR;
-    // Never exceed the space between the anchor and the viewport top, so the
-    // panel top stays inside the viewport even when the button sits near the
-    // top edge. There is intentionally no minimum height floor: a tiny anchor
-    // top must shrink the panel rather than push it out of bounds.
-    const maxHeight = Math.min(
-      POPOVER_HEIGHT_MAX,
-      Math.max(0, spaceAbove - EDGE_PADDING),
-    );
-    this.containerEl.style.width = `${width}px`;
-    this.containerEl.style.left = `${left}px`;
-    this.containerEl.style.bottom = `${viewport.height - rect.top + GAP_ABOVE_ANCHOR}px`;
-    this.containerEl.style.maxHeight = `${maxHeight}px`;
+    // Shared geometry: one width/left/height resolution for both composer
+    // pickers. The width follows the sidebar, never the anchor button, so the
+    // panel never spills past the sidebar edge. Never
+    // exceed the space between the anchor and the viewport top, so the panel top
+    // stays inside the viewport even when the button sits near the top edge;
+    // there is intentionally no minimum height floor.
+    const placement = resolvePickerPlacement({
+      anchorRect: { top: rect.top },
+      containerRect,
+      viewport,
+      popoverHeightMax: POPOVER_HEIGHT_MAX,
+    });
+    this.containerEl.style.width = `${placement.width}px`;
+    this.containerEl.style.left = `${placement.left}px`;
+    this.containerEl.style.bottom = `${placement.bottom}px`;
+    this.containerEl.style.maxHeight = `${placement.height}px`;
   }
 
   private applyReducedMotion(add: boolean): void {

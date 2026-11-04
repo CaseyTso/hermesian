@@ -59,7 +59,10 @@ import {
   formatContextUsage,
 } from "./session-state";
 import {
+  buildDocumentCaption,
   buildOutboundPrompt,
+  buildSelectionCaption,
+  noteTitle,
   resolveNoteContextInjection,
   validateSelectionEdit,
   type NoteContextFingerprint,
@@ -325,6 +328,8 @@ export class HermesianSidebarView extends ItemView {
   private historyButtonEl!: HTMLButtonElement;
   private imageAttachmentBarEl!: HTMLElement;
   private messagesEl!: HTMLElement;
+  /** `createSidebarShell` root: the `.hermesian-view` element itself. */
+  private sidebarRootEl!: HTMLElement;
   private modelButtonEl!: HTMLButtonElement;
   private modelLabelEl!: HTMLElement;
   private modelPicker: HermesModelPickerPopover | null = null;
@@ -687,6 +692,7 @@ export class HermesianSidebarView extends ItemView {
     this.historyButtonEl = shell.historyButtonEl;
     this.conversationTabsEl = shell.conversationTabsEl;
     this.messagesEl = shell.messagesEl;
+    this.sidebarRootEl = shell.root;
     this.scrollFollow = new ScrollFollowController();
     this.messageRenderer = new MessageRenderer(this.messagesEl, {
       scrollFollow: this.scrollFollow,
@@ -1478,6 +1484,14 @@ export class HermesianSidebarView extends ItemView {
       hiddenSwitchIds: this.plugin.settings.hiddenModelSwitchIds,
       currentSwitchId: state.currentModel?.switchId,
       iconRenderer: (element, icon) => setIcon(element, icon),
+      // The popover width follows the sidebar content box, not the trigger
+      // button. `this.sidebarRootEl` is the element `createSidebarShell` returns
+      // and tags `.hermesian-view`, so this measures the sidebar itself without
+      // relying on any Obsidian-internal DOM structure.
+      getContainerRect: () => {
+        const rect = this.sidebarRootEl.getBoundingClientRect();
+        return { left: rect.left, width: rect.width };
+      },
       onChoose: (model) => {
         if (settled) {
           return;
@@ -1677,6 +1691,13 @@ export class HermesianSidebarView extends ItemView {
       anchorEl: this.reasoningButtonEl,
       current: currentEffort,
       iconRenderer: (element, icon) => setIcon(element, icon),
+      // Same sidebar content box as the model picker: the width is bounded by
+      // the sidebar, never by this trigger button (the two pickers share one
+      // formula but are not required to be equally wide).
+      getContainerRect: () => {
+        const rect = this.sidebarRootEl.getBoundingClientRect();
+        return { left: rect.left, width: rect.width };
+      },
       onChoose: (effort) => {
         if (settled) {
           return;
@@ -1720,9 +1741,12 @@ export class HermesianSidebarView extends ItemView {
     const client = activeTab ? this.plugin.peekClient(activeTab.id) : undefined;
     const applied = client?.appliedReasoningEffort;
     const nextTurn = Boolean(activeTab && this.isTabBusy(activeTab.id) && applied !== undefined && applied !== effort);
-    const label = `Thinking: ${reasoningEffortLabel(effort)}${nextTurn ? " (next turn)" : ""}`;
+    // Compact control capsule: the visible label is the bare effort word only
+    // (no "Thinking: " prefix, no " (next turn)" suffix). The next-turn pending
+    // state is preserved in the tooltip and accessible name below.
+    const label = reasoningEffortLabel(effort);
     this.reasoningLabelEl.setText(label);
-    const description = nextTurn ? `Active: ${reasoningEffortLabel(applied!)} · Next turn: ${reasoningEffortLabel(effort)}` : label;
+    const description = nextTurn ? `Active: ${reasoningEffortLabel(applied!)} · Next turn: ${label}` : label;
     this.reasoningButtonEl.setAttribute("title", description);
     this.reasoningButtonEl.setAttribute("aria-label", description);
   }
@@ -1740,10 +1764,12 @@ export class HermesianSidebarView extends ItemView {
     this.renderReasoningButton();
     this.renderConversationTabs();
     const current = state.currentModel;
+    // Compact control capsule: the visible label is the model's own id only;
+    // provider identity moves to the tooltip (and stays in the accessible name).
     const label = state.switchingModel
       ? "Switching model…"
       : current
-        ? `${current.providerName} · ${current.name}`
+        ? current.modelId
         : state.catalogLoading
           ? "Loading models…"
           : "Model unavailable";
@@ -1751,9 +1777,12 @@ export class HermesianSidebarView extends ItemView {
     this.modelButtonEl.disabled = !availability.model || state.models.length === 0;
     this.modelButtonEl.setAttribute(
       "aria-label",
-      current ? `Current model: ${current.providerName} ${current.name}` : label,
+      current ? `Current model: ${current.providerName} ${current.modelId}` : label,
     );
-    this.modelButtonEl.setAttribute("title", label);
+    this.modelButtonEl.setAttribute(
+      "title",
+      current ? `${current.providerName} · ${current.modelId}` : label,
+    );
 
     const usageText = formatContextUsage(state.contextUsage);
     this.contextUsageEl.setText(usageText);
@@ -1927,7 +1956,9 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private renderCurrentFile(): void {
-    const label = this.currentFilePath ?? "No Markdown note";
+    const label = this.currentFilePath
+      ? noteTitle(this.currentFilePath)
+      : "No Markdown note";
     this.currentFileLabelEl.setText(label);
     this.currentFileBarEl.disabled = !this.currentFilePath;
     this.currentFileBarEl.toggleClass(
@@ -2072,9 +2103,9 @@ export class HermesianSidebarView extends ItemView {
     this.selectionBarEl.show();
     const icon = this.selectionBarEl.createSpan();
     setIcon(icon, "text-select");
-    this.selectionBarEl.createSpan({
-      text: `${this.pendingSelection.filePath} · L${this.pendingSelection.startLine}–${this.pendingSelection.endLine}`,
-    });
+    const caption = buildSelectionCaption(this.pendingSelection);
+    const label = this.selectionBarEl.createSpan({ text: caption.text });
+    label.setAttribute("title", caption.title);
     const remove = this.selectionBarEl.createEl("button", {
       attr: { "aria-label": "Remove selection context" },
       cls: "clickable-icon",
@@ -2318,8 +2349,9 @@ export class HermesianSidebarView extends ItemView {
       activeTab.id,
       pendingImages,
       noteContextInjection === "changed"
-        ? `${notePath} · note changed (not re-sent)`
+        ? `${noteTitle(notePath)} · note changed (not re-sent)`
         : undefined,
+      noteContextInjection === "changed" ? notePath : undefined,
       { animate: true },
     );
     if (visible()) {
@@ -2986,6 +3018,7 @@ export class HermesianSidebarView extends ItemView {
     tabId = this.conversationWorkspace?.activeTabId,
     images: readonly PastedImageAttachment[] = [],
     contextChip?: string,
+    contextChipTitle?: string,
     options?: { animate?: boolean },
   ): HTMLElement {
     const parent = tabId ? this.messageContainer(tabId) : this.messagesEl;
@@ -3007,21 +3040,36 @@ export class HermesianSidebarView extends ItemView {
       setTimeout(cleanup, 290);
     }
     if (selection) {
-      message.createDiv({
-        text: `${selection.filePath} · L${selection.startLine}–${selection.endLine}`,
+      const caption = buildSelectionCaption(selection);
+      const chip = message.createDiv({
+        text: caption.text,
         cls: "hermesian-message-context",
       });
+      chip.setAttribute("title", caption.title);
     } else if (documentContext) {
-      message.createDiv({
-        text: contextChip ?? `${documentContext.filePath} · full note context`,
-        cls: "hermesian-message-context",
-      });
+      // A caller-supplied contextChip carries the note-changed marker and is
+      // rendered verbatim; the plain full-note chip is a display caption.
+      if (contextChip) {
+        const chip = message.createDiv({
+          text: contextChip,
+          cls: "hermesian-message-context",
+        });
+        chip.setAttribute("title", contextChipTitle ?? contextChip);
+      } else {
+        const caption = buildDocumentCaption(documentContext.filePath);
+        const chip = message.createDiv({
+          text: caption.text,
+          cls: "hermesian-message-context",
+        });
+        chip.setAttribute("title", caption.title);
+      }
     } else if (contextChip) {
       // changed-note marker with only an active-note path (no captured body)
-      message.createDiv({
+      const chip = message.createDiv({
         text: contextChip,
         cls: "hermesian-message-context",
       });
+      chip.setAttribute("title", contextChipTitle ?? contextChip);
     }
     // Display-layer safety net: any user text that is exactly an outbound
     // prompt product (envelope and/or context wrapper from resume/load

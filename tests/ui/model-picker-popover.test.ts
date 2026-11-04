@@ -276,30 +276,37 @@ describe("HermesModelPickerPopover", () => {
   });
 
   describe("positioning", () => {
-    it("anchors above the button, aligned left, capped at 480px tall", async () => {
-      const { container } = openPopover();
+    it("anchors above the button, hugging the sidebar edge, capped at 480px tall", async () => {
+      const { container } = openPopover({
+        getContainerRect: () => ({ left: 100, width: 300 }),
+      });
       await sleep(30);
-      expect(container.style.width).toBe("240px");
-      expect(container.style.left).toBe("100px");
+      expect(container.style.width).toBe("284px"); // 300px sidebar - 2 x 8px padding
+      expect(container.style.left).toBe("108px"); // sidebar left 100 + 8
       expect(container.style.bottom).toBe("176px"); // viewport 768 - anchor top 600 + 8
       expect(container.style.maxHeight).toBe("480px");
     });
 
-    it("clamps left edge and width on narrow viewports", async () => {
+    it("keeps the panel inside the viewport right edge in a narrow window", async () => {
       vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue(rect({ left: 490, right: 690 }));
       const { container } = openPopover({
         getViewport: () => ({ height: 768, width: 500 }),
+        getContainerRect: () => ({ left: 300, width: 200 }),
       });
       await sleep(30);
-      expect(container.style.width).toBe("240px");
-      expect(container.style.left).toBe("252px"); // min(490, 500 - 240 - 8)
+      expect(container.style.width).toBe("184px"); // 200px sidebar - 2 x 8px padding
+      // sidebar left 300 + 8 = 308, which is exactly the right-edge ceiling
+      // (500 - 184 - 8): both bounds agree, so nothing spills off-screen.
+      expect(container.style.left).toBe("308px");
     });
 
-    it("caps width at 420px for wide anchors", async () => {
+    it("caps width at the shared 360px maximum for wide sidebars", async () => {
       vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue(rect({ width: 600, right: 700 }));
-      const { container } = openPopover();
+      const { container } = openPopover({
+        getContainerRect: () => ({ left: 100, width: 1000 }),
+      });
       await sleep(30);
-      expect(container.style.width).toBe("420px");
+      expect(container.style.width).toBe("360px");
     });
 
     it("shrinks max-height when little space remains above the button", async () => {
@@ -327,13 +334,15 @@ describe("HermesModelPickerPopover", () => {
       vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue(rect({ left: 150, right: 350 }));
       const { container } = openPopover({
         getViewport: () => ({ height: 768, width: 300 }),
+        getContainerRect: () => ({ left: 50, width: 200 }),
       });
       await sleep(30);
       const left = Number.parseFloat(container.style.left);
       const width = Number.parseFloat(container.style.width);
+      expect(width).toBe(184);
       expect(left).toBeGreaterThanOrEqual(8);
       expect(left + width).toBeLessThanOrEqual(300 - 8);
-      expect(left).toBe(52); // min(150, 300 - 240 - 8)
+      expect(left).toBe(58); // sidebar left 50 + 8, inside the ceiling 300 - 184 - 8 = 108
     });
 
     it("re-validates the top invariant after resize", async () => {
@@ -349,15 +358,23 @@ describe("HermesModelPickerPopover", () => {
       expect(768 - bottom - maxHeight).toBeGreaterThanOrEqual(0);
     });
 
-    it("repositions on window resize", async () => {
+    it("repositions on window resize when the sidebar width changes", async () => {
       const viewport = { height: 768, width: 1024 };
-      const { container } = openPopover({ getViewport: () => viewport });
+      const containerRect = { left: 300, width: 300 };
+      const { container } = openPopover({
+        getViewport: () => viewport,
+        getContainerRect: () => containerRect,
+      });
       await sleep(30);
-      vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue(rect({ left: 500, right: 700 }));
+      expect(container.style.width).toBe("284px");
+      expect(container.style.left).toBe("308px");
+      // Dragging the sidebar narrower must re-resolve the whole box on resize.
+      containerRect.left = 200;
+      containerRect.width = 200;
       viewport.width = 600;
       window.dispatchEvent(new Event("resize"));
-      expect(container.style.width).toBe("240px");
-      expect(container.style.left).toBe("352px"); // min(500, 600 - 240 - 8)
+      expect(container.style.width).toBe("184px");
+      expect(container.style.left).toBe("208px");
     });
   });
 

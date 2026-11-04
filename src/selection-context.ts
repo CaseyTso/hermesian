@@ -133,6 +133,81 @@ function block(name: string, content: string): string {
   return `<${name}>\n${content}\n</${name}>`;
 }
 
+export interface NoteContextCaption {
+  /** Visible label, e.g. "📄 雅思口语精炼-第01轮全Part高分示范与实战答卷 · Self-discipline isn't just about willpower; it".
+   *  Overflow past the 60-code-point summary is cut by CSS ellipsis, never by
+   *  an appended character. */
+  text: string;
+  /** Hover tooltip: full vault path plus (for a selection) the line range and
+   *  the complete selected text. */
+  title: string;
+}
+
+export interface SelectionCaptionInput {
+  endLine: number;
+  filePath: string;
+  selectedText: string;
+  startLine: number;
+}
+
+/** Visible summary budget, counted in code points so emoji never split. */
+const CAPTION_SUMMARY_MAX_CODE_POINTS = 60;
+/** Native `title` tooltips degrade badly past this length. */
+const CAPTION_TOOLTIP_MAX_CODE_POINTS = 2000;
+
+function takeCodePoints(text: string, max: number): string {
+  const codePoints = Array.from(text);
+  return codePoints.length <= max ? text : codePoints.slice(0, max).join("");
+}
+
+/** Joins the caption parts with the fixed separator, dropping empty parts so a
+ *  blank title or summary never leaves a dangling ` · `. */
+function joinCaptionParts(parts: readonly string[]): string {
+  const visible = parts.filter(Boolean);
+  return visible.length === 0 ? "📄" : `📄 ${visible.join(" · ")}`;
+}
+
+/**
+ * Note title reference: only the file name without its `.md` suffix is ever
+ * visible; the vault path belongs in the tooltip.
+ */
+export function noteTitle(filePath: string | undefined): string {
+  const raw = (filePath ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  const segments = raw.split("/");
+  const basename = segments[segments.length - 1] ?? "";
+  return basename.replace(/\.md$/i, "") || basename;
+}
+
+export function buildSelectionCaption(
+  selection: SelectionCaptionInput,
+): NoteContextCaption {
+  const summary = takeCodePoints(
+    (selection.selectedText ?? "").replace(/\s+/g, " ").trim(),
+    CAPTION_SUMMARY_MAX_CODE_POINTS,
+  );
+  return {
+    text: joinCaptionParts([noteTitle(selection.filePath), summary]),
+    title: takeCodePoints(
+      [
+        selection.filePath,
+        `L${selection.startLine}–L${selection.endLine}`,
+        selection.selectedText ?? "",
+      ].join("\n"),
+      CAPTION_TOOLTIP_MAX_CODE_POINTS,
+    ),
+  };
+}
+
+export function buildDocumentCaption(filePath: string): NoteContextCaption {
+  return {
+    text: joinCaptionParts([noteTitle(filePath), "full note context"]),
+    title: takeCodePoints(filePath, CAPTION_TOOLTIP_MAX_CODE_POINTS),
+  };
+}
+
 export function buildSelectionPrompt(
   context: SelectionContext,
   request: string,

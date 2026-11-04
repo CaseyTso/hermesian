@@ -168,11 +168,13 @@ describe("HermesReasoningPickerPopover", () => {
     expect(current?.classList.contains("is-active")).toBe(true);
   });
 
-  it("anchors above the button and caps its dimensions", async () => {
-    const { container } = openPopover();
+  it("anchors above the button, hugging the sidebar edge, and caps its dimensions", async () => {
+    const { container } = openPopover({
+      getContainerRect: () => ({ left: 620, width: 300 }),
+    });
     await sleep(30);
-    expect(container.style.width).toBe("240px");
-    expect(container.style.left).toBe("500px");
+    expect(container.style.width).toBe("284px"); // 300px sidebar - 2 x 8px padding
+    expect(container.style.left).toBe("628px"); // sidebar left 620 + 8
     expect(container.style.bottom).toBe("176px");
     expect(container.style.maxHeight).toBe("420px");
   });
@@ -194,23 +196,39 @@ describe("HermesReasoningPickerPopover", () => {
     );
     const { container } = openPopover({
       getViewport: () => ({ height: 768, width: 300 }),
+      getContainerRect: () => ({ left: 50, width: 200 }),
     });
     const left = Number.parseFloat(container.style.left);
     const width = Number.parseFloat(container.style.width);
+    expect(width).toBe(184);
     expect(left).toBeGreaterThanOrEqual(8);
     expect(left + width).toBeLessThanOrEqual(292);
+    expect(left).toBe(58); // sidebar left 50 + 8, under the ceiling 300 - 184 - 8 = 108
   });
 
-  it("repositions after resize", () => {
+  it("repositions after resize when the sidebar geometry changes", () => {
     const viewport = { height: 768, width: 1024 };
-    const { container } = openPopover({ getViewport: () => viewport });
+    const containerRect = { left: 620, width: 300 };
+    const { container } = openPopover({
+      getViewport: () => viewport,
+      getContainerRect: () => containerRect,
+    });
     vi.spyOn(anchor, "getBoundingClientRect").mockReturnValue(
       rect({ left: 500, right: 655, top: 100, bottom: 130 }),
     );
+    window.dispatchEvent(new Event("resize"));
+    // A narrow sidebar on the right of a wide window: the panel hugs the
+    // sidebar, not the anchor or the screen edge.
+    expect(container.style.left).toBe("628px");
+    expect(container.style.width).toBe("284px");
+    expect(container.style.maxHeight).toBe("84px");
+    // Vertical logic must still re-validate on resize.
+    containerRect.left = 200;
+    containerRect.width = 200;
     viewport.width = 600;
     window.dispatchEvent(new Event("resize"));
-    expect(container.style.left).toBe("352px");
-    expect(container.style.maxHeight).toBe("84px");
+    expect(container.style.left).toBe("208px");
+    expect(container.style.width).toBe("184px");
   });
 
   it("uses arrow keys and Enter to choose exactly once without a search box", () => {

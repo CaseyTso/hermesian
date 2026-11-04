@@ -3,6 +3,7 @@ import {
   reasoningEffortLabel,
 } from "../session-history";
 import type { ReasoningEffort } from "../types";
+import { resolvePickerPlacement } from "./picker-geometry";
 
 export interface HermesReasoningPickerOptions {
   anchorEl: HTMLElement;
@@ -11,14 +12,12 @@ export interface HermesReasoningPickerOptions {
   onChoose: (effort: ReasoningEffort) => void;
   onClose?: () => void;
   getViewport?: () => { height: number; width: number };
+  /** Sidebar content box (`.hermesian-view`) in viewport coordinates. */
+  getContainerRect?: () => { left: number; width: number };
   iconRenderer?: (element: HTMLElement, icon: string) => void;
 }
 
-const POPOVER_WIDTH_MIN = 240;
-const POPOVER_WIDTH_MAX = 340;
 const POPOVER_HEIGHT_MAX = 420;
-const GAP_ABOVE_ANCHOR = 8;
-const EDGE_PADDING = 8;
 const OPEN_ANIMATION_DELAY_MS = 20;
 
 const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
@@ -275,24 +274,23 @@ export class HermesReasoningPickerPopover {
         height: window.innerHeight,
         width: window.innerWidth,
       };
+    // Without a host-provided sidebar rect, fall back to "the whole window is
+    // the container" so the popover still positions sensibly outside Obsidian.
+    const containerRect = this.options.getContainerRect?.() ?? {
+      left: 0,
+      width: viewport.width,
+    };
     const rect = this.options.anchorEl.getBoundingClientRect();
-    const width = Math.min(
-      POPOVER_WIDTH_MAX,
-      Math.max(POPOVER_WIDTH_MIN, Math.round(rect.width)),
-      viewport.width - EDGE_PADDING * 2,
-    );
-    const left = Math.max(
-      EDGE_PADDING,
-      Math.min(rect.left, viewport.width - width - EDGE_PADDING),
-    );
-    const maxHeight = Math.min(
-      POPOVER_HEIGHT_MAX,
-      Math.max(0, rect.top - GAP_ABOVE_ANCHOR - EDGE_PADDING),
-    );
-    this.containerEl.style.width = `${width}px`;
-    this.containerEl.style.left = `${left}px`;
-    this.containerEl.style.bottom = `${viewport.height - rect.top + GAP_ABOVE_ANCHOR}px`;
-    this.containerEl.style.maxHeight = `${maxHeight}px`;
+    const placement = resolvePickerPlacement({
+      anchorRect: { top: rect.top },
+      containerRect,
+      viewport,
+      popoverHeightMax: POPOVER_HEIGHT_MAX,
+    });
+    this.containerEl.style.width = `${placement.width}px`;
+    this.containerEl.style.left = `${placement.left}px`;
+    this.containerEl.style.bottom = `${placement.bottom}px`;
+    this.containerEl.style.maxHeight = `${placement.height}px`;
   }
 
   private applyReducedMotion(add: boolean): void {

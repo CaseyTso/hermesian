@@ -98,6 +98,30 @@ _Avoid_: Stacked headers, separate tab bar, navigation card
 The composer region that presents current-note, Selection, image, URL, file, and folder context as compact capsules.
 _Avoid_: Note bar, attachment bar, upload area
 
+**Note Title Reference**:
+The canonical way Hermesian names a note in the Visual Shell: the note's title without folders or extension. The full vault path lives only in the hover tooltip, never in the visible label.
+_Avoid_: Full-path label, truncated path display, breadcrumb in place of title
+
+**Selection Reference**:
+The compact display of a quoted Selection, shown in the Context Tray while drafting and in the sent user turn. It always names the note by its Note Title Reference and identifies the quoted content itself, not just its coordinates.
+_Avoid_: L-range caption, path-and-line citation, selection banner
+
+**Selection Preview**:
+The short, recognizable extract of a Selection's text shown inside a Selection Reference so the reader knows what was quoted. Whitespace is normalized; overflow is clamped rather than guessed at.
+_Avoid_: Line numbers as the primary identifier, raw multi-paragraph dump
+
+**Picker Width Bound**:
+The rule that a Picker Popover's width is measured from the sidebar's own content box (never the window, never the trigger button) so it can never spill past the sidebar edge into the editor. It bounds width only; different pickers are not required to be equally wide.
+_Avoid_: Per-picker width, trigger-matched width, window-measured width, popover bleeding into the editor, equal-width mandate
+
+**Compact Control Capsule**:
+The pill-shaped form of the composer model and thinking-depth controls. The model capsule shows only the model's own id; provider identity appears on hover and inside the picker. The thinking-depth capsule shows only the effort word, with any next-turn pending state carried in the tooltip rather than in the visible label.
+_Avoid_: Provider prefix in the visible label, "Thinking:" prefix, pending state printed in the button, unequal visual weight between the two capsules
+
+**Narrow Control Priority**:
+The ordering rule for the composer control row at its narrowest: Thinking Depth keeps its effort word, Model Selection degrades to icon-only, and the chevron yields first. Identity of both choices always survives in tooltips.
+_Avoid_: Dropping the Thinking Depth effort word, showing a chopped model prefix, hiding either control
+
 **Adaptive Control Label**:
 A control label that can shorten or become icon-only as the sidebar narrows while preserving the same action, tooltip, and accessible name.
 _Avoid_: Hidden control, overflow-only action, removed functionality

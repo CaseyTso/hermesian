@@ -113,8 +113,11 @@ describe("Reasoning effort UI integration", () => {
 
     view.renderReasoningButton();
 
-    expect(view.reasoningLabelEl.textContent).toBe("Thinking: high");
-    expect(view.reasoningButtonEl.getAttribute("title")).toBe("Thinking: high");
+    // Compact control capsule: the visible label is the bare effort word, with
+    // no "Thinking: " prefix; the tooltip/accessible name carry the same value.
+    expect(view.reasoningLabelEl.textContent).toBe("high");
+    expect(view.reasoningButtonEl.getAttribute("title")).toBe("high");
+    expect(view.reasoningButtonEl.getAttribute("aria-label")).toBe("high");
   });
 
   it("updates reasoning button label when switching between tabs with different efforts", () => {
@@ -122,7 +125,7 @@ describe("Reasoning effort UI integration", () => {
 
     // Initially tab-1 (effort: 'high')
     view.renderReasoningButton();
-    expect(view.reasoningLabelEl.textContent).toBe("Thinking: high");
+    expect(view.reasoningLabelEl.textContent).toBe("high");
 
     // Switch active tab to tab-2 (effort: 'low')
     view.conversationWorkspace = {
@@ -131,7 +134,7 @@ describe("Reasoning effort UI integration", () => {
     };
 
     view.renderReasoningButton();
-    expect(view.reasoningLabelEl.textContent).toBe("Thinking: low");
+    expect(view.reasoningLabelEl.textContent).toBe("low");
   });
 
   it("chooses a new reasoning effort for a tab and persists it without disconnecting clients", async () => {
@@ -141,7 +144,7 @@ describe("Reasoning effort UI integration", () => {
 
     expect(plugin.setReasoningEffort).toHaveBeenCalledWith("tab-1", "ultra");
     expect(getWorkspace().tabs.find((t) => t.id === "tab-1")?.reasoningEffort).toBe("ultra");
-    expect(view.reasoningLabelEl.textContent).toBe("Thinking: ultra");
+    expect(view.reasoningLabelEl.textContent).toBe("ultra");
 
     // Tab 2 remains unchanged
     expect(getWorkspace().tabs.find((t) => t.id === "tab-2")?.reasoningEffort).toBe("low");
@@ -154,13 +157,16 @@ describe("Reasoning effort UI integration", () => {
     clients.get("tab-1")!.isBusy = true;
     await view.chooseReasoningEffort("tab-1", "low");
     expect((await controller.ensureClientForTab("tab-1")).workspace.tabs[0].reasoningEffort).toBe("low");
-    expect(view.reasoningLabelEl.textContent).toBe("Thinking: low (next turn)");
+    expect(view.reasoningLabelEl.textContent).toBe("low");
+    // The next-turn pending state no longer lives in the visible label; it is
+    // carried by the tooltip and the accessible name instead.
     expect(view.reasoningButtonEl.getAttribute("title")).toBe("Active: high · Next turn: low");
+    expect(view.reasoningButtonEl.getAttribute("aria-label")).toBe("Active: high · Next turn: low");
     expect(clients.get("tab-1")!.disconnect).not.toHaveBeenCalled();
     controller.setPromptRunning("tab-1", false);
     clients.get("tab-1")!.isBusy = false;
     view.renderReasoningButton();
-    expect(view.reasoningLabelEl.textContent).toBe("Thinking: low");
+    expect(view.reasoningLabelEl.textContent).toBe("low");
   });
 
   it("serializes preference saves and rolls back only owned fields, preserving concurrent typing", async () => {

@@ -283,6 +283,7 @@ describe("Message entrance and streaming reveal behavior", () => {
       "tab-1",
       [],
       undefined,
+      undefined,
       { animate: true },
     );
 
@@ -310,6 +311,7 @@ describe("Message entrance and streaming reveal behavior", () => {
       "tab-2",
       [],
       undefined,
+      undefined,
       { animate: true },
     );
 
@@ -332,6 +334,7 @@ describe("Message entrance and streaming reveal behavior", () => {
         undefined,
         "tab-1",
         [],
+        undefined,
         undefined,
         { animate: true },
       );
@@ -399,6 +402,7 @@ describe("Message entrance and streaming reveal behavior", () => {
       undefined,
       "tab-1",
       [],
+      undefined,
       undefined,
       { animate: true },
     );

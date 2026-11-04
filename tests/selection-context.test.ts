@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildActiveNotePrompt,
+  buildDocumentCaption,
   buildDocumentPrompt,
   buildNoteChangedPrompt,
+  buildSelectionCaption,
   buildSelectionPrompt,
   createDocumentContext,
   createSelectionContext,
+  noteTitle,
   stripOutboundPromptToRequest,
   validateSelectionEdit,
 } from "../src/selection-context";
@@ -182,6 +185,181 @@ describe("validateSelectionEdit", () => {
         },
       ]).allowed,
     ).toBe(false);
+  });
+});
+
+describe("noteTitle", () => {
+  it("shows only the file name for a deep path with a Chinese title", () => {
+    expect(
+      noteTitle("IELTS/口语/雅思口语精炼-第01轮全Part高分示范与实战答卷.md"),
+    ).toBe("雅思口语精炼-第01轮全Part高分示范与实战答卷");
+  });
+
+  it("strips the .md suffix case-insensitively", () => {
+    expect(noteTitle("Research/note.MD")).toBe("note");
+    expect(noteTitle("Research/note.md")).toBe("note");
+  });
+
+  it("keeps a name without a .md extension intact", () => {
+    expect(noteTitle("Research/notes.txt")).toBe("notes.txt");
+    expect(noteTitle("note")).toBe("note");
+    expect(noteTitle("note.md.md")).toBe("note.md");
+  });
+
+  it("is safe for empty and undefined input", () => {
+    expect(noteTitle("")).toBe("");
+    expect(noteTitle(undefined)).toBe("");
+    expect(noteTitle("   ")).toBe("");
+    expect(noteTitle("/leading/slash.md")).toBe("slash");
+  });
+});
+
+describe("buildSelectionCaption", () => {
+  it("collapses a multiline selection into one line within 60 code points", () => {
+    const caption = buildSelectionCaption({
+      endLine: 4,
+      filePath: "IELTS/口语/雅思口语精炼-第01轮全Part高分示范与实战答卷.md",
+      selectedText: "first line\n\n   second   line\n\nthird line",
+      startLine: 1,
+    });
+
+    expect(caption.text).toBe(
+      "📄 雅思口语精炼-第01轮全Part高分示范与实战答卷 · first line second line third line",
+    );
+    expect(caption.text).not.toContain("\n");
+    expect(caption.text).not.toContain("IELTS/口语/");
+    expect(caption.title).toContain("IELTS/口语/雅思口语精炼-第01轮全Part高分示范与实战答卷.md");
+    expect(caption.title).toContain("L1–L4");
+    expect(caption.title).toContain("first line\n\n   second   line\n\nthird line");
+  });
+
+  it("keeps exactly 60 code points and cuts only beyond that (CSS adds the ellipsis)", () => {
+    const exactly = "a".repeat(60);
+    const caption = buildSelectionCaption({
+      endLine: 1,
+      filePath: "note.md",
+      selectedText: exactly,
+      startLine: 1,
+    });
+    expect(caption.text).toBe(`📄 note · ${exactly}`);
+
+    const longer = "b".repeat(80);
+    const truncated = buildSelectionCaption({
+      endLine: 1,
+      filePath: "note.md",
+      selectedText: longer,
+      startLine: 1,
+    });
+    expect(truncated.text).toBe(`📄 note · ${"b".repeat(60)}`);
+    expect(truncated.text).not.toContain("…");
+    expect(truncated.text).not.toContain("b".repeat(61));
+  });
+
+  it("counts summary budget in code points so emoji survive", () => {
+    const emoji = "🧘‍♀️".repeat(40);
+    const caption = buildSelectionCaption({
+      endLine: 1,
+      filePath: "note.md",
+      selectedText: emoji,
+      startLine: 1,
+    });
+    const summary = caption.text.slice("📄 note · ".length);
+    expect(Array.from(summary).length).toBeLessThanOrEqual(60);
+    // No lone surrogates: every code point of the summary round-trips.
+    expect(summary).toBe(Array.from(summary).join(""));
+    expect(summary).not.toContain("\uFFFD");
+  });
+
+  it("never splits a surrogate pair at the 60 code point boundary", () => {
+    const caption = buildSelectionCaption({
+      endLine: 1,
+      filePath: "note.md",
+      // 61 astral-plane emoji: a UTF-16 slice would cut one in half.
+      selectedText: "😀".repeat(61),
+      startLine: 1,
+    });
+    expect(caption.text).toBe(`📄 note · ${"😀".repeat(60)}`);
+    // A half-cut surrogate would surface as a replacement char or leave an
+    // odd UTF-16 tail after the prefix.
+    expect(caption.text).not.toContain("\uFFFD");
+    expect(caption.text.length).toBe("📄 note · ".length + 60 * 2);
+  });
+
+  it("drops the separator entirely when the selection is blank", () => {
+    for (const blank of ["", "   ", "\n\n\t"]) {
+      const caption = buildSelectionCaption({
+        endLine: 3,
+        filePath: "Research/note.md",
+        selectedText: blank,
+        startLine: 2,
+      });
+      expect(caption.text).toBe("📄 note");
+      expect(caption.text).not.toContain("·");
+      expect(caption.title).toContain("L2–L3");
+    }
+  });
+
+  it("truncates a tooltip longer than 2000 code points", () => {
+    const longText = "长".repeat(3000);
+    const caption = buildSelectionCaption({
+      endLine: 1,
+      filePath: "Research/note.md",
+      selectedText: longText,
+      startLine: 1,
+    });
+    expect(Array.from(caption.title).length).toBe(2000);
+    expect(caption.title.startsWith("Research/note.md\nL1–L1\n")).toBe(true);
+  });
+
+  it("tolerates a file path without directory or extension", () => {
+    const caption = buildSelectionCaption({
+      endLine: 1,
+      filePath: "note",
+      selectedText: "text",
+      startLine: 1,
+    });
+    expect(caption.text).toBe("📄 note · text");
+    expect(caption.title).toContain("note");
+    expect(noteTitle("")).toBe("");
+  });
+
+  it("does not throw or leave a dangling separator for an empty file path", () => {
+    const caption = buildSelectionCaption({
+      endLine: 1,
+      filePath: "",
+      selectedText: "only summary",
+      startLine: 1,
+    });
+    expect(caption.text).toBe("📄 only summary");
+    expect(caption.text.startsWith("📄 ·")).toBe(false);
+
+    const blank = buildSelectionCaption({
+      endLine: 1,
+      filePath: "",
+      selectedText: "  ",
+      startLine: 1,
+    });
+    expect(blank.text).toBe("📄");
+  });
+});
+
+describe("buildDocumentCaption", () => {
+  it("shows only the note title and keeps the full path in the tooltip", () => {
+    const caption = buildDocumentCaption(
+      "IELTS/口语/雅思口语精炼-第01轮全Part高分示范与实战答卷.md",
+    );
+    expect(caption.text).toBe(
+      "📄 雅思口语精炼-第01轮全Part高分示范与实战答卷 · full note context",
+    );
+    expect(caption.title).toContain(
+      "IELTS/口语/雅思口语精炼-第01轮全Part高分示范与实战答卷.md",
+    );
+  });
+
+  it("never leaks a vault path into the visible text", () => {
+    const caption = buildDocumentCaption("deep/a/b/c/note.md");
+    expect(caption.text).toBe("📄 note · full note context");
+    expect(caption.text).not.toContain("deep/a/b/c");
   });
 });
 

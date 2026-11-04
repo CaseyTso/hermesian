@@ -115,6 +115,14 @@ body,
 
 .hermesian-view {
   background: var(--background-primary);
+  /* Container query root for the narrow-sidebar ladder: queries must measure
+     the sidebar content width, not the browser window width. inline-size
+     containment makes the element's inline size independent of its content
+     (it is already height:100%/width-auto inside Obsidian's flex view, and
+     `overflow: hidden` keeps descendants clipped, so no content-driven
+     sizing is lost). */
+  container-name: hermesian;
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -708,10 +716,15 @@ body,
 
 .hermesian-message-context {
   color: var(--text-muted);
+  display: block;
   font-size: var(--font-ui-smaller);
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
   margin-bottom: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hermesian-system {
@@ -976,7 +989,7 @@ body,
   align-items: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--hermesian-radius-sm);
+  border-radius: var(--hermesian-radius-pill);
   box-shadow: none;
   display: flex;
   flex: 1 1 0;
@@ -1028,15 +1041,15 @@ body,
   align-items: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--hermesian-radius-sm);
+  border-radius: var(--hermesian-radius-pill);
   box-shadow: none;
   display: flex;
-  flex: 0 1 155px;
+  flex: 0 1 auto;
   gap: 5px;
   justify-content: flex-start;
-  max-width: 155px;
+  max-width: 112px;
   min-height: 30px;
-  min-width: 90px;
+  min-width: 0;
   padding: 4px 7px;
 }
 
@@ -1824,7 +1837,7 @@ body,
   text-overflow: ellipsis;
 }
 
-@media (max-width: 480px) {
+@container hermesian (max-width: 480px) {
   .hermesian-message {
     max-width: 94%;
   }
@@ -1855,19 +1868,10 @@ body,
   }
 }
 
-@media (max-width: 360px) {
-  .hermesian-reasoning-button {
-    flex-basis: 30px;
-    min-width: 30px;
-  }
-
-  .hermesian-reasoning-label,
-  .hermesian-model-chevron {
-    display: none;
-  }
-}
-
-@media (max-width: 300px) {
+@container hermesian (max-width: 360px) {
+  /* Narrow control priority: the model button degrades to an icon first, the
+     thinking-depth label stays readable (its text is never cut before the
+     model label). */
   .hermesian-model-button {
     flex: 0 0 30px;
     max-width: 30px;
@@ -1875,7 +1879,18 @@ body,
     padding: 4px 7px;
   }
 
-  .hermesian-model-label {
+  .hermesian-model-label,
+  .hermesian-model-chevron {
+    display: none;
+  }
+
+  .hermesian-reasoning-button {
+    width: auto;
+  }
+}
+
+@container hermesian (max-width: 300px) {
+  .hermesian-reasoning-icon {
     display: none;
   }
 
