@@ -824,7 +824,7 @@ export class HermesianSidebarView extends ItemView {
     const initialComposerState: ComposerState = {
       disabled: true,
       draft: { token: null, text: "", references: [] },
-      placeholder: "Ask Hermes…  ↵ to send · Shift+↵ for new line",
+      placeholder: "",
       sendEnabled: false,
       stopVisible: false,
       primaryMode: "send",
@@ -1782,7 +1782,7 @@ export class HermesianSidebarView extends ItemView {
     this.modelButtonEl.disabled = !availability.model || state.models.length === 0;
     this.modelButtonEl.setAttribute(
       "aria-label",
-      current ? `Current model: ${current.providerName} ${current.modelId}` : label,
+      current ? `${current.providerName} ${current.modelId}` : label,
     );
     this.modelButtonEl.setAttribute(
       "title",
@@ -3479,15 +3479,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private composerPlaceholder(): string {
-    const activeTabId = this.conversationWorkspace?.activeTabId;
-    if (this.composerDraft.token) {
-      return activeTabId && this.isTabLoading(activeTabId)
-        ? "Add a task for this command…"
-        : "Add a task…  ↵ to send · Shift+↵ for new line";
-    }
-    return activeTabId && this.isTabLoading(activeTabId)
-      ? "Draft here — this conversation is starting"
-      : "Ask Hermes…  ↵ to send · Shift+↵ for new line";
+    return "";
   }
 
   private updateComposerPlaceholder(): void {

@@ -150,7 +150,7 @@ describe("Compact control capsule — model button label", () => {
     expect(modelButtonEl.getAttribute("title")).toBe("Google · gemini-3.8-flash-high");
     // The accessible name keeps the provider too (screen readers get it).
     expect(modelButtonEl.getAttribute("aria-label")).toBe(
-      "Current model: Google gemini-3.8-flash-high",
+      "Google gemini-3.8-flash-high",
     );
   });
 

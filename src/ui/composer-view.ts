@@ -529,7 +529,7 @@ export function applyComposerState(
   elements.composerEl.contentEditable = state.disabled ? "false" : "true";
   elements.composerEl.setAttribute(
     "data-placeholder",
-    state.placeholder || elements.composerEl.getAttribute("data-placeholder") || "",
+    state.placeholder ?? elements.composerEl.getAttribute("data-placeholder") ?? "",
   );
 
   const mode = resolvePrimaryMode(state);
