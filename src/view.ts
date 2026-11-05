@@ -23,6 +23,7 @@ import {
   type ConversationHistory,
 } from "./conversation-controller";
 import {
+  cycleConversationTabId,
   isActiveConversationSession,
   updateConversationTab,
   type PersistedConversationTab,
@@ -3012,6 +3013,21 @@ export class HermesianSidebarView extends ItemView {
       new Notice(`Hermesian: ${this.messageFor(error)}`);
     } finally {
       this.updateControls(false);
+    }
+  }
+
+  async cycleConversationTab(direction: 1 | -1 = 1): Promise<void> {
+    if (!this.controlAvailability().tabNavigation) {
+      return;
+    }
+    const targetTabId = cycleConversationTabId(
+      this.conversationWorkspace,
+      direction,
+      (tabId) => !this.isTabClosing(tabId),
+    );
+    if (targetTabId) {
+      await this.switchConversation(targetTabId);
+      this.composerEl?.focus();
     }
   }
 

@@ -170,6 +170,52 @@ export default class HermesianPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "next-conversation-tab",
+      name: "Switch to next conversation tab",
+      hotkeys: [
+        {
+          modifiers: ["Alt"],
+          key: "Tab",
+        },
+      ],
+      checkCallback: (checking) => {
+        const canCycle =
+          this.sidebarView !== undefined &&
+          (this.conversationWorkspace?.tabs.length ?? 0) > 1;
+        if (!canCycle) {
+          return false;
+        }
+        if (!checking) {
+          void this.cycleConversationTab(1);
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "previous-conversation-tab",
+      name: "Switch to previous conversation tab",
+      hotkeys: [
+        {
+          modifiers: ["Alt", "Shift"],
+          key: "Tab",
+        },
+      ],
+      checkCallback: (checking) => {
+        const canCycle =
+          this.sidebarView !== undefined &&
+          (this.conversationWorkspace?.tabs.length ?? 0) > 1;
+        if (!canCycle) {
+          return false;
+        }
+        if (!checking) {
+          void this.cycleConversationTab(-1);
+        }
+        return true;
+      },
+    });
+
     this.addSettingTab(new HermesianSettingTab(this.app, this));
   }
 
@@ -525,6 +571,20 @@ export default class HermesianPlugin extends Plugin {
     }
     try {
       await view.startNewSession();
+    } catch (error) {
+      new Notice(
+        `Hermesian: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async cycleConversationTab(direction: 1 | -1): Promise<void> {
+    const view = await this.activateView();
+    if (!view) {
+      return;
+    }
+    try {
+      await view.cycleConversationTab(direction);
     } catch (error) {
       new Notice(
         `Hermesian: ${error instanceof Error ? error.message : String(error)}`,

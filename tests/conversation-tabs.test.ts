@@ -10,6 +10,7 @@ import {
   conversationControlAvailability,
   conversationControlsBusy,
   createConversationWorkspace,
+  cycleConversationTabId,
   isActiveConversationSession,
   normalizeConversationWorkspace,
   removeConversationTab,
@@ -1117,6 +1118,53 @@ describe("inline reference persistence (start placements)", () => {
       // Explicitly clearing selectedModel
       const cleared = updateConversationTab(withDraft, "tab-1", { selectedModel: undefined });
       expect(cleared.tabs[0].selectedModel).toBeUndefined();
+    });
+  });
+
+  describe("cycleConversationTabId", () => {
+    it("returns undefined for undefined or single-tab workspace", () => {
+      expect(cycleConversationTabId(undefined, 1)).toBeUndefined();
+
+      const single = createConversationWorkspace("tab-1", "session-1");
+      expect(cycleConversationTabId(single, 1)).toBeUndefined();
+      expect(cycleConversationTabId(single, -1)).toBeUndefined();
+    });
+
+    it("cycles forward and backward through tabs", () => {
+      const ws1 = createConversationWorkspace("tab-1", "session-1");
+      const ws2 = addConversationTab(ws1, "tab-2", "session-2");
+      const ws3 = addConversationTab(ws2, "tab-3", "session-3");
+      const ws = activateConversationTab(ws3, "tab-1");
+
+      // From tab-1:
+      expect(cycleConversationTabId(ws, 1)).toBe("tab-2");
+      expect(cycleConversationTabId(ws, -1)).toBe("tab-3");
+
+      // From tab-2:
+      const wsActive2 = activateConversationTab(ws, "tab-2");
+      expect(cycleConversationTabId(wsActive2, 1)).toBe("tab-3");
+      expect(cycleConversationTabId(wsActive2, -1)).toBe("tab-1");
+
+      // From tab-3:
+      const wsActive3 = activateConversationTab(ws, "tab-3");
+      expect(cycleConversationTabId(wsActive3, 1)).toBe("tab-1");
+      expect(cycleConversationTabId(wsActive3, -1)).toBe("tab-2");
+    });
+
+    it("skips unavailable tabs when a filter predicate is provided", () => {
+      const ws1 = createConversationWorkspace("tab-1", "session-1");
+      const ws2 = addConversationTab(ws1, "tab-2", "session-2");
+      const ws3 = addConversationTab(ws2, "tab-3", "session-3");
+      const ws = activateConversationTab(ws3, "tab-1");
+
+      expect(cycleConversationTabId(ws, 1, (id) => id !== "tab-2")).toBe("tab-3");
+      expect(cycleConversationTabId(ws, -1, (id) => id !== "tab-3")).toBe("tab-2");
+    });
+
+    it("returns undefined if all candidate tabs are unavailable", () => {
+      const ws1 = createConversationWorkspace("tab-1", "session-1");
+      const ws2 = addConversationTab(ws1, "tab-2", "session-2");
+      expect(cycleConversationTabId(ws2, 1, () => false)).toBeUndefined();
     });
   });
 });

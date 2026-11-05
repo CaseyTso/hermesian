@@ -248,6 +248,32 @@ export function activateConversationTab(
     : { ...workspace, activeTabId: tabId };
 }
 
+export function cycleConversationTabId(
+  workspace: PersistedConversationWorkspace | undefined,
+  direction: 1 | -1,
+  isTabAvailable?: (tabId: string) => boolean,
+): string | undefined {
+  if (!workspace || workspace.tabs.length <= 1) {
+    return undefined;
+  }
+  const currentIndex = workspace.tabs.findIndex(
+    (tab) => tab.id === workspace.activeTabId,
+  );
+  if (currentIndex === -1) {
+    return undefined;
+  }
+  const count = workspace.tabs.length;
+  for (let step = 1; step < count; step++) {
+    const offset = (direction * step) % count;
+    const candidateIndex = (currentIndex + offset + count) % count;
+    const candidate = workspace.tabs[candidateIndex];
+    if (candidate && (!isTabAvailable || isTabAvailable(candidate.id))) {
+      return candidate.id;
+    }
+  }
+  return undefined;
+}
+
 export function removeConversationTab(
   workspace: PersistedConversationWorkspace,
   tabId: string,
