@@ -23,8 +23,6 @@ export interface ComposerElements {
   composerEl: HTMLElement;
   composerHostEl: HTMLElement;
   composerInputRowEl: HTMLElement;
-  contextProgressEl: HTMLElement;
-  contextUsageEl: HTMLElement;
   currentFileBarEl: HTMLButtonElement;
   currentFileLabelEl: HTMLElement;
   dictationButtonEl: HTMLButtonElement;
@@ -134,7 +132,11 @@ export function createComposerView(
   const composerHostEl = parent.createDiv({ cls: "hermesian-composer" });
   const composerContexts = composerHostEl.createDiv({ cls: "hermesian-composer-contexts" });
 
-  const currentFileBarEl = composerContexts.createEl("button", {
+  const currentFileRowEl = composerContexts.createDiv({
+    cls: "hermesian-current-file-row",
+  });
+
+  const currentFileBarEl = currentFileRowEl.createEl("button", {
     attr: { type: "button" },
     cls: "hermesian-current-file",
   }) as HTMLButtonElement;
@@ -145,6 +147,94 @@ export function createComposerView(
   const currentFileLabelEl = currentFileBarEl.createSpan({
     cls: "hermesian-current-file-label",
   });
+
+  const filePickerContainerEl = currentFileRowEl.createDiv({
+    cls: "hermesian-file-picker-container",
+  });
+
+  const filePickerButtonEl = filePickerContainerEl.createEl("button", {
+    attr: {
+      "aria-label": "Attach file or folder",
+      title: "Attach file or folder",
+      type: "button",
+    },
+    cls: "clickable-icon hermesian-file-picker",
+  }) as HTMLButtonElement;
+  const filePickerIcon = filePickerButtonEl.createSpan();
+  filePickerIcon.empty();
+
+  // Hidden native inputs: the host wires `change` and reads File.path.
+  // Single-select file input (no `multiple`), folder input with webkitdirectory.
+  const fileInputEl = composerHostEl.createEl("input", {
+    attr: {
+      "aria-hidden": "true",
+      tabindex: "-1",
+      type: "file",
+    },
+  }) as HTMLInputElement;
+  fileInputEl.style.display = "none";
+
+  const folderInputEl = composerHostEl.createEl("input", {
+    attr: {
+      "aria-hidden": "true",
+      tabindex: "-1",
+      type: "file",
+      webkitdirectory: "",
+    },
+  }) as HTMLInputElement;
+  folderInputEl.style.display = "none";
+
+  // Dropdown menu: plain div (no Obsidian Menu) toggled by the button; menu
+  // items trigger the matching hidden input and close; outside clicks close.
+  const filePickerMenuEl = filePickerContainerEl.createDiv({ cls: "hermesian-file-picker-menu" });
+  filePickerMenuEl.hide();
+  const pickFileOptionEl = filePickerMenuEl.createEl("button", {
+    attr: { type: "button" },
+    cls: "hermesian-file-picker-option",
+    text: "Select file…",
+  });
+  const pickFolderOptionEl = filePickerMenuEl.createEl("button", {
+    attr: { type: "button" },
+    cls: "hermesian-file-picker-option",
+    text: "Select folder…",
+  });
+  pickFileOptionEl.addEventListener("click", () => {
+    callbacks.onFilePickerOpen?.("file");
+    fileInputEl.click();
+    filePickerMenuEl.hide();
+  });
+  pickFolderOptionEl.addEventListener("click", () => {
+    callbacks.onFilePickerOpen?.("folder");
+    folderInputEl.click();
+    filePickerMenuEl.hide();
+  });
+  filePickerButtonEl.addEventListener("click", () => {
+    if (filePickerMenuEl.style.display === "none") {
+      filePickerMenuEl.show();
+    } else {
+      filePickerMenuEl.hide();
+    }
+  });
+  const outsideClickHandler = (event: MouseEvent): void => {
+    if (
+      !filePickerButtonEl.contains(event.target as Node) &&
+      !filePickerMenuEl.contains(event.target as Node)
+    ) {
+      filePickerMenuEl.hide();
+    }
+  };
+  filePickerMenuEl.ownerDocument.addEventListener("click", outsideClickHandler);
+
+  const addSelectionButtonEl = currentFileRowEl.createEl("button", {
+    attr: {
+      "aria-label": "Add selection",
+      title: "Add selection",
+      type: "button",
+    },
+    cls: "clickable-icon hermesian-add-selection",
+  }) as HTMLButtonElement;
+  const addSelectionIcon = addSelectionButtonEl.createSpan();
+  addSelectionIcon.empty();
 
   const selectionBarEl = composerContexts.createDiv({ cls: "hermesian-selection-bar" });
   selectionBarEl.hide();
@@ -211,79 +301,6 @@ export function createComposerView(
   const composerFooter = composerHostEl.createDiv({ cls: "hermesian-composer-footer" });
   const controlRow = composerFooter.createDiv({ cls: "hermesian-control-row" });
 
-  const filePickerButtonEl = controlRow.createEl("button", {
-    attr: {
-      "aria-label": "Attach file or folder",
-      title: "Attach file or folder",
-      type: "button",
-    },
-    cls: "clickable-icon hermesian-file-picker",
-  });
-  const filePickerIcon = filePickerButtonEl.createSpan();
-  filePickerIcon.empty();
-
-  // Hidden native inputs: the host wires `change` and reads File.path.
-  // Single-select file input (no `multiple`), folder input with webkitdirectory.
-  const fileInputEl = composerHostEl.createEl("input", {
-    attr: {
-      "aria-hidden": "true",
-      tabindex: "-1",
-      type: "file",
-    },
-  }) as HTMLInputElement;
-  fileInputEl.style.display = "none";
-
-  const folderInputEl = composerHostEl.createEl("input", {
-    attr: {
-      "aria-hidden": "true",
-      tabindex: "-1",
-      type: "file",
-      webkitdirectory: "",
-    },
-  }) as HTMLInputElement;
-  folderInputEl.style.display = "none";
-
-  // Dropdown menu: plain div (no Obsidian Menu) toggled by the button; menu
-  // items trigger the matching hidden input and close; outside clicks close.
-  const filePickerMenuEl = controlRow.createDiv({ cls: "hermesian-file-picker-menu" });
-  filePickerMenuEl.hide();
-  const pickFileOptionEl = filePickerMenuEl.createEl("button", {
-    attr: { type: "button" },
-    cls: "hermesian-file-picker-option",
-    text: "Select file…",
-  });
-  const pickFolderOptionEl = filePickerMenuEl.createEl("button", {
-    attr: { type: "button" },
-    cls: "hermesian-file-picker-option",
-    text: "Select folder…",
-  });
-  pickFileOptionEl.addEventListener("click", () => {
-    callbacks.onFilePickerOpen?.("file");
-    fileInputEl.click();
-    filePickerMenuEl.hide();
-  });
-  pickFolderOptionEl.addEventListener("click", () => {
-    callbacks.onFilePickerOpen?.("folder");
-    folderInputEl.click();
-    filePickerMenuEl.hide();
-  });
-  filePickerButtonEl.addEventListener("click", () => {
-    if (filePickerMenuEl.style.display === "none") {
-      filePickerMenuEl.show();
-    } else {
-      filePickerMenuEl.hide();
-    }
-  });
-  const outsideClickHandler = (event: MouseEvent): void => {
-    if (
-      !filePickerButtonEl.contains(event.target as Node) &&
-      !filePickerMenuEl.contains(event.target as Node)
-    ) {
-      filePickerMenuEl.hide();
-    }
-  };
-  filePickerMenuEl.ownerDocument.addEventListener("click", outsideClickHandler);
-
   const modelButtonEl = controlRow.createEl("button", {
     attr: { "aria-label": "Select Hermes model" },
     cls: "hermesian-model-button",
@@ -305,16 +322,7 @@ export function createComposerView(
   reasoningIcon.empty();
   const reasoningLabelEl = reasoningButtonEl.createSpan({ cls: "hermesian-reasoning-label" });
 
-  const addSelectionButtonEl = controlRow.createEl("button", {
-    attr: {
-      "aria-label": "Add selection",
-      title: "Add selection",
-      type: "button",
-    },
-    cls: "clickable-icon hermesian-add-selection",
-  });
-  const addSelectionIcon = addSelectionButtonEl.createSpan();
-  addSelectionIcon.empty();
+  controlRow.createDiv({ cls: "hermesian-control-spacer" });
 
   const dictationButtonEl = controlRow.createEl("button", {
     attr: {
@@ -463,23 +471,11 @@ export function createComposerView(
     }
   });
 
-  const context = composerFooter.createDiv({ cls: "hermesian-context" });
-  const contextUsageEl = context.createDiv({
-    text: "Context —",
-    cls: "hermesian-context-label",
-  });
-  const contextTrack = context.createDiv({ cls: "hermesian-context-track" });
-  const contextProgressEl = contextTrack.createDiv({
-    cls: "hermesian-context-progress",
-  });
-
   return {
     addSelectionButtonEl,
     composerEl,
     composerHostEl,
     composerInputRowEl,
-    contextProgressEl,
-    contextUsageEl,
     currentFileBarEl,
     currentFileLabelEl,
     dictationButtonEl,

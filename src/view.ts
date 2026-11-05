@@ -324,8 +324,8 @@ export class HermesianSidebarView extends ItemView {
   private readonly displayedHistories = new Map<string, ConversationHistory>();
   private readonly historyRendering = new Map<string, Promise<void>>();
   private controllerUnsubscribe: (() => void) | undefined;
-  private contextProgressEl!: HTMLElement;
-  private contextUsageEl!: HTMLElement;
+  private contextGaugeEl!: HTMLElement;
+  private contextGaugeFillEl!: SVGCircleElement;
   private currentFileBarEl!: HTMLButtonElement;
   private currentFileLabelEl!: HTMLElement;
   private currentFilePath: string | undefined;
@@ -695,6 +695,8 @@ export class HermesianSidebarView extends ItemView {
     this.statusEl = shell.statusEl;
     this.addConversationButtonEl = shell.addConversationButtonEl;
     this.historyButtonEl = shell.historyButtonEl;
+    this.contextGaugeEl = shell.contextGaugeEl;
+    this.contextGaugeFillEl = shell.contextGaugeFillEl;
     this.conversationTabsEl = shell.conversationTabsEl;
     this.messagesEl = shell.messagesEl;
     this.sidebarRootEl = shell.root;
@@ -862,8 +864,6 @@ export class HermesianSidebarView extends ItemView {
     this.composerDispose = composerElements.dispose;
     this.composerHintEl = composerElements.hintEl;
     this.composerStatusEl = composerElements.statusEl;
-    this.contextProgressEl = composerElements.contextProgressEl;
-    this.contextUsageEl = composerElements.contextUsageEl;
 
     // Wire icons (needs Obsidian's setIcon)
     setIcon(composerElements.currentFileBarEl.querySelector(".hermesian-current-file-icon")!, "file-text");
@@ -1790,16 +1790,19 @@ export class HermesianSidebarView extends ItemView {
     );
 
     const usageText = formatContextUsage(state.contextUsage);
-    this.contextUsageEl.setText(usageText);
-    this.contextUsageEl.dataset.level = contextUsageLevel(state.contextUsage);
-    this.contextUsageEl.setAttribute(
-      "title",
-      state.contextUsage
-        ? `Hermes estimated context usage: ${state.contextUsage.used.toLocaleString("en-US")} of ${state.contextUsage.size.toLocaleString("en-US")} tokens`
-        : "Hermes has not reported context usage for this session yet",
-    );
-    this.contextProgressEl.dataset.level = contextUsageLevel(state.contextUsage);
-    this.contextProgressEl.style.width = `${contextUsagePercent(state.contextUsage)}%`;
+    const level = contextUsageLevel(state.contextUsage);
+    const percent = contextUsagePercent(state.contextUsage);
+
+    this.contextGaugeEl.setAttribute("aria-label", usageText);
+    this.contextGaugeEl.setAttribute("title", usageText);
+    this.contextGaugeEl.dataset.level = level;
+    if (this.contextGaugeFillEl) {
+      // Circumference for r=7 is 2 * π * 7 ≈ 43.98
+      const circumference = 43.98;
+      const offset = (circumference * (1 - percent / 100)).toFixed(2);
+      this.contextGaugeFillEl.style.strokeDashoffset = `${offset}`;
+      this.contextGaugeFillEl.style.opacity = percent === 0 ? "0" : "1";
+    }
     if (this.composerInlineDraftIsSlashCommand()) {
       this.renderSlashMenu(false);
     }

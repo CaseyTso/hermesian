@@ -96,6 +96,13 @@ describe("createSidebarShell", () => {
       );
     });
 
+    it("renders the context gauge in header actions with progressbar role and 0% initial label", () => {
+      const { shell } = setup();
+      expect(shell.contextGaugeEl.getAttribute("role")).toBe("progressbar");
+      expect(shell.contextGaugeEl.getAttribute("aria-label")).toBe("上下文: 0%");
+      expect(shell.contextGaugeFillEl).not.toBeNull();
+    });
+
     it("renders the conversation tabs container with tablist role", () => {
       const { shell } = setup();
       expect(shell.conversationTabsEl.getAttribute("role")).toBe("tablist");

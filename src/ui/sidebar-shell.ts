@@ -1,5 +1,7 @@
 export interface SidebarShellElements {
   addConversationButtonEl: HTMLButtonElement;
+  contextGaugeEl: HTMLElement;
+  contextGaugeFillEl: SVGCircleElement;
   conversationTabsEl: HTMLElement;
   historyButtonEl: HTMLButtonElement;
   messagesEl: HTMLElement;
@@ -42,6 +44,23 @@ export function createSidebarShell(
 
   const headerActions = header.createDiv({ cls: "hermesian-header-actions" });
 
+  const contextGaugeEl = headerActions.createDiv({
+    attr: {
+      "aria-label": "上下文: 0%",
+      role: "progressbar",
+    },
+    cls: "hermesian-context-gauge",
+  });
+  contextGaugeEl.innerHTML = `
+    <svg viewBox="0 0 20 20" class="hermesian-context-gauge-svg">
+      <circle class="hermesian-context-gauge-track" cx="10" cy="10" r="7"></circle>
+      <circle class="hermesian-context-gauge-fill" cx="10" cy="10" r="7"></circle>
+    </svg>
+  `.trim();
+  const contextGaugeFillEl = contextGaugeEl.querySelector(
+    ".hermesian-context-gauge-fill",
+  ) as SVGCircleElement;
+
   const historyButtonEl = headerActions.createEl("button", {
     attr: {
       "aria-label": "View Hermes history",
@@ -82,6 +101,8 @@ export function createSidebarShell(
 
   return {
     addConversationButtonEl,
+    contextGaugeEl,
+    contextGaugeFillEl,
     conversationTabsEl,
     historyButtonEl,
     messagesEl,

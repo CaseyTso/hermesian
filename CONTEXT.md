@@ -94,8 +94,12 @@ _Avoid_: Overlay, scroll-under surface, floating window
 The shared Theme-Adaptive Glass container at the top of the Visual Shell that holds identity, connection state, conversation actions, and Conversation Tabs.
 _Avoid_: Stacked headers, separate tab bar, navigation card
 
+**Context Ring Gauge**:
+A compact circular visual indicator in the Top Dock header actions row that reflects the active Conversation Tab's context window usage ratio. It uses an outline track with a proportional stroke fill colored by consumption tier (normal, warning at 70%, danger at 90%), and reveals a compact percentage and token breakdown on hover. It supersedes the in-composer horizontal context track.
+_Avoid_: Context bar, context progress line, context percentage label, bottom context meter
+
 **Context Tray**:
-The composer region that presents current-note, Selection, image, URL, file, and folder context as compact capsules.
+The upper composer region containing the active note reference capsule, the file and selection attachment actions on its right, and any active selection or image attachment bars.
 _Avoid_: Note bar, attachment bar, upload area
 
 **Note Title Reference**:

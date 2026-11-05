@@ -183,7 +183,7 @@ describe("createComposerView", () => {
     expect(elements.stopButtonEl.style.display).not.toBe("none");
   });
 
-  it("includes a file picker button placed before the model button", () => {
+  it("includes a file picker button placed in the current file row before the add selection button", () => {
     const { elements } = setup();
     expect(elements.filePickerButtonEl).toBeTruthy();
     expect(elements.filePickerButtonEl.classList.contains("hermesian-file-picker")).toBe(
@@ -192,10 +192,15 @@ describe("createComposerView", () => {
     expect(elements.filePickerButtonEl.getAttribute("aria-label")).toBe(
       "Attach file or folder",
     );
-    const row = elements.modelButtonEl.parentElement!;
+    const row = elements.currentFileBarEl.parentElement!;
+    expect(row.contains(elements.filePickerButtonEl)).toBe(true);
+    expect(row.contains(elements.addSelectionButtonEl)).toBe(true);
     const children = Array.from(row.children);
-    expect(children.indexOf(elements.filePickerButtonEl)).toBeLessThan(
-      children.indexOf(elements.modelButtonEl),
+    expect(children.indexOf(elements.currentFileBarEl)).toBeLessThan(
+      children.indexOf(elements.filePickerButtonEl.parentElement!),
+    );
+    expect(children.indexOf(elements.filePickerButtonEl.parentElement!)).toBeLessThan(
+      children.indexOf(elements.addSelectionButtonEl),
     );
   });
 

@@ -338,10 +338,10 @@ function validUsage(usage: SessionContextUsage | undefined): usage is SessionCon
 
 export function formatContextUsage(usage: SessionContextUsage | undefined): string {
   if (!validUsage(usage)) {
-    return "Context —";
+    return "上下文: 0%";
   }
   const percent = Math.max(0, Math.round((usage.used / usage.size) * 100));
-  return `≈${compactTokens(usage.used)} / ${compactTokens(usage.size)} · ${percent}%`;
+  return `上下文: ${percent}% (≈${compactTokens(usage.used)} / ${compactTokens(usage.size)} tokens)`;
 }
 
 export function contextUsageLevel(

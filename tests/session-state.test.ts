@@ -352,15 +352,15 @@ describe("contextUsagePercent", () => {
 describe("formatContextUsage", () => {
   it("formats Hermes estimated usage and percentage", () => {
     expect(formatContextUsage({ used: 18_432, size: 262_144 })).toBe(
-      "≈18.4k / 262k · 7%",
+      "上下文: 7% (≈18.4k / 262k tokens)",
     );
     expect(formatContextUsage({ used: 500, size: 1000 })).toBe(
-      "≈500 / 1k · 50%",
+      "上下文: 50% (≈500 / 1k tokens)",
     );
   });
 
   it("does not invent usage for invalid data", () => {
-    expect(formatContextUsage(undefined)).toBe("Context —");
-    expect(formatContextUsage({ used: 10, size: 0 })).toBe("Context —");
+    expect(formatContextUsage(undefined)).toBe("上下文: 0%");
+    expect(formatContextUsage({ used: 10, size: 0 })).toBe("上下文: 0%");
   });
 });

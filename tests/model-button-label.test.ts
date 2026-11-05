@@ -118,8 +118,8 @@ function modelHarness() {
 
   view.addConversationButtonEl = document.createElement("button");
   view.historyButtonEl = document.createElement("button");
-  view.contextUsageEl = document.createElement("span");
-  view.contextProgressEl = document.createElement("span");
+  view.contextGaugeEl = document.createElement("div");
+  view.contextGaugeFillEl = document.createElement("span");
 
   return { view, modelLabelEl, modelButtonEl };
 }
