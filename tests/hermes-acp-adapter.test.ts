@@ -307,3 +307,92 @@ it.skipIf(!python)("heals a bare-custom ACP session restore to its named provide
     expect(result.stdout).toContain("RESTORE_PROVIDER_HEAL_OK");
   } finally { rmSync(home, { recursive: true, force: true }); }
 }, 60_000);
+
+const gatewayIntegration = String.raw`
+import asyncio, json, sys, types
+sys.argv = ["hermes"]
+import hermes_cli.main as cli
+import acp_adapter.gateway_server as gateway_mod
+from acp.schema import SetSessionConfigOptionResponse
+from acp.exceptions import RequestError
+
+cli.cmd_acp = lambda args: None
+exec(json.loads(sys.stdin.read()), {"__name__": "adapter_test"})
+
+mutations_applied = []
+class FakeMutations:
+    async def apply(self, client, session_id, operation, payload, **kwargs):
+        mutations_applied.append((session_id, operation, payload))
+        if payload.get("effort") == "busy":
+            raise RuntimeError("session_busy")
+    def acknowledge(self, session_id, operation, payload):
+        pass
+
+agent = gateway_mod.GatewayACPAgent.__new__(gateway_mod.GatewayACPAgent)
+agent._aliases = {}
+agent._snapshots = {"sess-1": {}}
+agent._unacked = {}
+async def fake_client():
+    return types.SimpleNamespace()
+agent._client = fake_client
+agent._mutations = FakeMutations()
+
+async def exercise():
+    # 1. Unknown config option delegates to original method
+    res = await agent.set_config_option("unrelated", "sess-1", "val")
+    assert res.config_options == []
+    assert not hasattr(res, "_meta") or res._meta is None
+
+    # 2. hermesian:reasoning_effort high applies and acknowledges
+    res2 = await agent.set_config_option("hermesian:reasoning_effort", "sess-1", "high")
+    wire2 = res2.model_dump(by_alias=True)
+    assert wire2["_meta"] == {"hermesian_version": 1, "config_id": "hermesian:reasoning_effort", "effort": "high", "applied": True}
+    assert mutations_applied[-1] == ("sess-1", "reasoning", {"effort": "high"})
+
+    # 3. default sets effort to None
+    res3 = await agent.set_config_option("hermesian:reasoning_effort", "sess-1", "default")
+    wire3 = res3.model_dump(by_alias=True)
+    assert wire3["_meta"] == {"hermesian_version": 1, "config_id": "hermesian:reasoning_effort", "effort": "default", "applied": True}
+    assert mutations_applied[-1] == ("sess-1", "reasoning", {"effort": None})
+
+    # 4. invalid effort rejects with RequestError
+    try:
+        await agent.set_config_option("hermesian:reasoning_effort", "sess-1", "bogus")
+        raise AssertionError("must reject")
+    except RequestError as e:
+        assert e.code == -32602
+
+    # 5. unknown session rejects with RequestError
+    try:
+        await agent.set_config_option("hermesian:reasoning_effort", "missing", "high")
+        raise AssertionError("must reject")
+    except RequestError as e:
+        assert e.code == -32602
+
+    # 6. session_busy rejects with -32600
+    try:
+        await agent.set_config_option("hermesian:reasoning_effort", "sess-1", "high")
+        mutations_applied.clear()
+        # trigger busy
+        old_apply = agent._mutations.apply
+        async def busy_apply(*args, **kwargs):
+            raise RuntimeError("session_busy")
+        agent._mutations.apply = busy_apply
+        await agent.set_config_option("hermesian:reasoning_effort", "sess-1", "high")
+        raise AssertionError("must reject")
+    except RequestError as e:
+        assert e.code == -32600
+
+asyncio.run(exercise())
+print("GATEWAY_REASONING_ADAPTER_OK")
+`;
+
+it.skipIf(!python)("adapts reasoning effort on the gateway ACP agent path", () => {
+  const result = spawnSync(python!.executable, buildHermesPythonArgs(testRuntime(tmpdir()), gatewayIntegration), {
+    input: JSON.stringify(script), encoding: "utf8", timeout: 40_000,
+    env: testEnv(),
+  });
+  expect(result.stderr, "installed-source gateway reasoning integration").not.toContain("Traceback");
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout).toContain("GATEWAY_REASONING_ADAPTER_OK");
+}, 60_000);

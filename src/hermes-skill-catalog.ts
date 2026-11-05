@@ -7,27 +7,30 @@ const CATALOG_MARKER = "HERMESIAN_SKILL_CATALOG=";
 const CATALOG_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_BYTES = 2_000_000;
 
-const CATALOG_SCRIPT = String.raw`
+export const HERMES_SKILL_CATALOG_SCRIPT = String.raw`
 import json
 import os
 import sys
+
+CATALOG_MARKER = "HERMESIAN_SKILL_CATALOG="
 
 profile = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
 if profile:
     from hermes_cli.profiles import resolve_profile_env
     os.environ["HERMES_HOME"] = resolve_profile_env(profile)
 
-from tools.skills_tool import _find_all_skills
+# Hermes renamed this public plugin API and removed the legacy alias.
+from tools.skills_tool import find_all_skills
 
 skills = []
-for item in _find_all_skills():
+for item in find_all_skills():
     skills.append({
         "name": str(item.get("name") or "").strip(),
         "description": str(item.get("description") or "").strip(),
         "category": str(item.get("category") or "").strip(),
     })
 
-print("${CATALOG_MARKER}" + json.dumps({"skills": skills}, ensure_ascii=False, separators=(",", ":")))
+print(CATALOG_MARKER + json.dumps({"skills": skills}, ensure_ascii=False, separators=(",", ":")))
 `;
 
 function asString(value: unknown): string {
@@ -85,7 +88,7 @@ export function loadHermesSkillCatalog(
   return new Promise<HermesSkillOption[]>((resolvePromise, rejectPromise) => {
     const child = spawn(
       python.executable,
-      buildHermesPythonArgs(python, CATALOG_SCRIPT, [profile]),
+      buildHermesPythonArgs(python, HERMES_SKILL_CATALOG_SCRIPT, [profile]),
       {
         env: {
           ...process.env,

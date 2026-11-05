@@ -129,11 +129,55 @@ def _normalized_url(value):
     return text.lower() if text else ""
 
 
+def _install_gateway_reasoning_adapter():
+    try:
+        import acp_adapter.gateway_server as gateway_mod
+        from acp.schema import SetSessionConfigOptionResponse
+        from acp.exceptions import RequestError
+
+        if getattr(gateway_mod.GatewayACPAgent.set_config_option, "_hermesian_reasoning_patched", False):
+            return
+
+        _orig_gateway_set_config = gateway_mod.GatewayACPAgent.set_config_option
+
+        async def _patched_gateway_set_config(self, config_id, session_id, value=None, **kwargs):
+            if config_id == "hermesian:reasoning_effort":
+                if value not in ("default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
+                    raise RequestError(-32602, "Invalid Hermesian reasoning effort")
+                try:
+                    held_id = self._held_session(session_id)
+                except Exception:
+                    raise RequestError(-32602, "Hermes session agent is unavailable")
+                client = await self._client()
+                effort_payload = None if value == "default" else value
+                payload = {"effort": effort_payload}
+                self._unacked.pop(held_id, None)
+                try:
+                    await self._mutations.apply(client, held_id, "reasoning", payload)
+                except Exception as exc:
+                    if str(exc) in ("session_busy", "unknown_execution"):
+                        raise RequestError(-32600, "Cannot apply thinking depth during an active turn") from exc
+                    raise RequestError(-32603, f"Hermes gateway failed to apply reasoning effort: {exc}") from exc
+                self._mutations.acknowledge(held_id, "reasoning", payload)
+                return SetSessionConfigOptionResponse(config_options=[], field_meta={
+                    "hermesian_version": 1, "config_id": config_id,
+                    "effort": value, "applied": True,
+                })
+            return await _orig_gateway_set_config(self, config_id, session_id, value=value, **kwargs)
+
+        _patched_gateway_set_config._hermesian_reasoning_patched = True
+        gateway_mod.GatewayACPAgent.set_config_option = _patched_gateway_set_config
+    except Exception:
+        pass
+
+
 def _hermesian_cmd_acp(args):
     import acp_adapter.server as server_mod
     from acp.schema import SetSessionConfigOptionResponse
     from acp.exceptions import RequestError
     from hermes_cli.config import load_config_readonly
+
+    _install_gateway_reasoning_adapter()
 
     original = server_mod.HermesACPAgent
     if not callable(getattr(original, "_run_agent_turn", None)):
@@ -189,6 +233,11 @@ try:
     _install_restore_provider_heal(_hermesian_server_module)
 except Exception:
     # Older layout without acp_adapter.server, or an unexpected shape: fail open to native.
+    pass
+
+try:
+    _install_gateway_reasoning_adapter()
+except Exception:
     pass
 
 if __name__ == "__main__":
