@@ -10,6 +10,7 @@ import {
   addPendingConversationTab,
   createConversationWorkspace,
   replaceConversationSession,
+  updateConversationTab,
   type PersistedConversationWorkspace,
 } from "../src/conversation-tabs";
 import type { HermesHistoryItem } from "../src/types";
@@ -2405,6 +2406,182 @@ describe("ConversationController ensureConversationReady", () => {
     expect(target.connect).not.toHaveBeenCalled();
     expect(target.loadSessionHistory).toHaveBeenCalledWith("main-session");
   });
+});
 
+describe("ConversationController titles", () => {
+  async function readySessionController(
+    workspace: ReturnType<typeof createConversationWorkspace>,
+    clients: Map<string, FakeClient>,
+    createTabId?: () => string,
+  ): Promise<{
+    controller: ConversationController<FakeClient>;
+    deps: ConversationControllerDependencies<FakeClient>;
+  }> {
+    let n = 0;
+    const fallbackClient = clients.values().next().value!;
+    const deps = dependencies(
+      workspace,
+      fallbackClient,
+      clients,
+      createTabId ?? (() => `tab-new-${++n}`),
+    );
+    const controller = new ConversationController(deps);
+    await controller.initialize();
+    for (const tab of workspace.tabs) {
+      await controller.ensureConversationReady(tab.id);
+    }
+    return { controller, deps };
+  }
 
+  function workspaceWithPendingTabs(...tabIds: string[]): ReturnType<typeof createConversationWorkspace> {
+    let workspace = createConversationWorkspace("base", "base-session");
+    for (const tabId of tabIds) {
+      workspace = addPendingConversationTab(workspace, tabId);
+    }
+    return { ...workspace, activeTabId: "base" };
+  }
+
+  it("persists a valid title and updates snapshot", async () => {
+    const workspace = createConversationWorkspace("tab-a", "session-a");
+    const { controller, deps } = await readySessionController(
+      workspace,
+      new Map([["tab-a", fakeClient("tab-a")]]),
+    );
+
+    await controller.setConversationTitle("tab-a", "  Refactor Auth  ", "session-a");
+
+    expect(controller.getSnapshot().workspace?.tabs[0]?.title).toBe("Refactor Auth");
+    expect(deps.workspace.getWorkspace()?.tabs[0]?.title).toBe("Refactor Auth");
+  });
+
+  it("returns early without saving if title is identical to normalized target", async () => {
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = updateConversationTab(workspace, "tab-a", { title: "Existing Title" });
+    const { controller, deps } = await readySessionController(
+      workspace,
+      new Map([["tab-a", fakeClient("tab-a")]]),
+    );
+
+    const setWorkspaceSpy = vi.spyOn(deps.workspace, "setWorkspace");
+    await controller.setConversationTitle("tab-a", "  Existing Title  ");
+    expect(setWorkspaceSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects with operation_stale if expectedSessionId does not match", async () => {
+    const workspace = createConversationWorkspace("tab-a", "session-a");
+    const { controller } = await readySessionController(
+      workspace,
+      new Map([["tab-a", fakeClient("tab-a")]]),
+    );
+
+    await expect(
+      controller.setConversationTitle("tab-a", "New Title", "wrong-session"),
+    ).rejects.toMatchObject({
+      code: "operation_stale",
+      message: "Conversation session changed",
+    });
+  });
+
+  it("rolls back previous title when persistence fails", async () => {
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = updateConversationTab(workspace, "tab-a", { title: "Original Title" });
+    const { controller, deps } = await readySessionController(
+      workspace,
+      new Map([["tab-a", fakeClient("tab-a")]]),
+    );
+
+    let fail = true;
+    const originalSet = deps.workspace.setWorkspace;
+    deps.workspace.setWorkspace = vi.fn(async (next, options) => {
+      if (fail) {
+        fail = false;
+        throw new Error("Disk full");
+      }
+      return originalSet(next, options);
+    });
+
+    await expect(
+      controller.setConversationTitle("tab-a", "Failed Title"),
+    ).rejects.toThrow("Disk full");
+
+    expect(deps.workspace.getWorkspace()?.tabs[0]?.title).toBe("Original Title");
+    expect(controller.getSnapshot().workspace?.tabs[0]?.title).toBe("Original Title");
+  });
+
+  it("openHistorySession seeds title on new tab and persists it", async () => {
+    const workspace = createConversationWorkspace("tab-a", "session-a");
+    const clients = new Map([["tab-a", fakeClient("tab-a")]]);
+    const { controller, deps } = await readySessionController(workspace, clients);
+
+    let createdTabId = "";
+    const newClient = fakeClient("new-client");
+    newClient.sessionId = "hist-sess-1";
+    deps.clients.acquireClient = vi.fn((tabId: string) => {
+      createdTabId = tabId;
+      return newClient;
+    });
+    deps.clients.isCurrentClient = vi.fn(() => true);
+
+    const result = await controller.openHistorySession("hist-sess-1", "  Historical Investigation  ");
+
+    expect(result.reused).toBe(false);
+    expect(result.tabId).toBe(createdTabId);
+    expect(result.workspace.tabs.find((t) => t.id === createdTabId)?.title).toBe("Historical Investigation");
+    expect(deps.workspace.getWorkspace()?.tabs.find((t) => t.id === createdTabId)?.title).toBe(
+      "Historical Investigation",
+    );
+  });
+
+  it("openHistorySession seeds title when reusing an existing owner without title", async () => {
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = { ...workspace, activeTabId: "tab-a" };
+    const clients = new Map([["tab-a", fakeClient("tab-a")], ["tab-b", fakeClient("tab-b")]]);
+    const { controller, deps } = await readySessionController(workspace, clients);
+
+    const result = await controller.openHistorySession("session-b", "Adopted Title");
+
+    expect(result.reused).toBe(true);
+    expect(result.tabId).toBe("tab-b");
+    expect(result.workspace.tabs.find((t) => t.id === "tab-b")?.title).toBe("Adopted Title");
+    expect(deps.workspace.getWorkspace()?.tabs.find((t) => t.id === "tab-b")?.title).toBe("Adopted Title");
+  });
+
+  it("openHistorySession preserves existing title when reusing owner with title", async () => {
+    let workspace = createConversationWorkspace("tab-a", "session-a");
+    workspace = addPendingConversationTab(workspace, "tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "session-b");
+    workspace = updateConversationTab(workspace, "tab-b", { title: "Existing Title" });
+    workspace = { ...workspace, activeTabId: "tab-a" };
+    const clients = new Map([["tab-a", fakeClient("tab-a")], ["tab-b", fakeClient("tab-b")]]);
+    const { controller, deps } = await readySessionController(workspace, clients);
+
+    const result = await controller.openHistorySession("session-b", "Ignored Title");
+
+    expect(result.reused).toBe(true);
+    expect(result.workspace.tabs.find((t) => t.id === "tab-b")?.title).toBe("Existing Title");
+    expect(deps.workspace.getWorkspace()?.tabs.find((t) => t.id === "tab-b")?.title).toBe("Existing Title");
+  });
+
+  it("restartConversation clears title on the restarted tab", async () => {
+    let workspace = workspaceWithPendingTabs("tab-b");
+    workspace = replaceConversationSession(workspace, "tab-b", "old-session");
+    workspace = updateConversationTab(workspace, "tab-b", { title: "Title To Be Cleared" });
+    const target = fakeClient("tab-b");
+    target.sessionId = "new-session";
+    target.newSession = vi.fn(async () => { target.sessionId = "new-session"; });
+    const { controller, deps } = await readySessionController(
+      workspace,
+      new Map([
+        ["base", fakeClient("base")],
+        ["tab-b", target],
+      ]),
+    );
+
+    const result = await controller.restartConversation("tab-b");
+    expect(result.workspace.tabs.find((tab) => tab.id === "tab-b")?.title).toBeUndefined();
+    expect(deps.workspace.getWorkspace()?.tabs.find((tab) => tab.id === "tab-b")?.title).toBeUndefined();
+    expect(controller.getSnapshot().workspace?.tabs.find((tab) => tab.id === "tab-b")?.title).toBeUndefined();
+  });
 });

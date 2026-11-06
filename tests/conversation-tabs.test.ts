@@ -15,6 +15,7 @@ import {
   normalizeConversationWorkspace,
   removeConversationTab,
   replaceConversationSession,
+  resolveConversationTabTitle,
   sanitizeModelOption,
   shouldAutoScrollConversation,
   updateConversationTab,
@@ -1165,6 +1166,193 @@ describe("inline reference persistence (start placements)", () => {
       const ws1 = createConversationWorkspace("tab-1", "session-1");
       const ws2 = addConversationTab(ws1, "tab-2", "session-2");
       expect(cycleConversationTabId(ws2, 1, () => false)).toBeUndefined();
+    });
+  });
+
+  describe("conversation tab titles", () => {
+    it("updateConversationTab sets, trims, and clears title", () => {
+      const ws = createConversationWorkspace("tab-1", "session-1");
+      // Set title
+      const withTitle = updateConversationTab(ws, "tab-1", { title: "  My Feature  " });
+      expect(withTitle.tabs[0]?.title).toBe("My Feature");
+
+      // Preserve title when updating other fields
+      const withDraft = updateConversationTab(withTitle, "tab-1", { draft: "hello" });
+      expect(withDraft.tabs[0]?.title).toBe("My Feature");
+      expect(withDraft.tabs[0]?.draft).toBe("hello");
+
+      // Clear title with undefined
+      const cleared1 = updateConversationTab(withTitle, "tab-1", { title: undefined });
+      expect(cleared1.tabs[0]?.title).toBeUndefined();
+      expect("title" in (cleared1.tabs[0] ?? {})).toBe(false);
+
+      // Clear title with empty string
+      const cleared2 = updateConversationTab(withTitle, "tab-1", { title: "" });
+      expect(cleared2.tabs[0]?.title).toBeUndefined();
+      expect("title" in (cleared2.tabs[0] ?? {})).toBe(false);
+
+      // Clear title with whitespace-only string
+      const cleared3 = updateConversationTab(withTitle, "tab-1", { title: "   " });
+      expect(cleared3.tabs[0]?.title).toBeUndefined();
+      expect("title" in (cleared3.tabs[0] ?? {})).toBe(false);
+    });
+
+    describe("normalizeConversationWorkspace title handling", () => {
+      it("preserves valid trimmed title on normalized tabs", () => {
+        const raw = {
+          activeTabId: "tab-1",
+          nextLabel: 2,
+          tabs: [
+            {
+              draft: "",
+              id: "tab-1",
+              includeCurrentDocumentContext: true,
+              label: 1,
+              sessionId: "session-1",
+              title: "  Fix parser bug  ",
+            },
+          ],
+          version: 2,
+        };
+        const normalized = normalizeConversationWorkspace(raw);
+        expect(normalized).toBeDefined();
+        expect(normalized?.tabs[0]?.title).toBe("Fix parser bug");
+      });
+
+      it("drops empty, whitespace-only, or non-string title without rejecting workspace", () => {
+        const raw = {
+          activeTabId: "tab-1",
+          nextLabel: 4,
+          tabs: [
+            {
+              draft: "",
+              id: "tab-1",
+              includeCurrentDocumentContext: true,
+              label: 1,
+              sessionId: "session-1",
+              title: "",
+            },
+            {
+              draft: "",
+              id: "tab-2",
+              includeCurrentDocumentContext: true,
+              label: 2,
+              sessionId: "session-2",
+              title: "   ",
+            },
+            {
+              draft: "",
+              id: "tab-3",
+              includeCurrentDocumentContext: true,
+              label: 3,
+              sessionId: "session-3",
+              title: 12345,
+            },
+          ],
+          version: 2,
+        };
+        const normalized = normalizeConversationWorkspace(raw);
+        expect(normalized).toBeDefined();
+        expect(normalized?.tabs).toHaveLength(3);
+        expect(normalized?.tabs[0]?.title).toBeUndefined();
+        expect("title" in (normalized?.tabs[0] ?? {})).toBe(false);
+        expect(normalized?.tabs[1]?.title).toBeUndefined();
+        expect("title" in (normalized?.tabs[1] ?? {})).toBe(false);
+        expect(normalized?.tabs[2]?.title).toBeUndefined();
+        expect("title" in (normalized?.tabs[2] ?? {})).toBe(false);
+      });
+
+      it("drops title when a tab's session was stripped due to duplicate sessionId", () => {
+        const raw = {
+          activeTabId: "tab-1",
+          nextLabel: 3,
+          tabs: [
+            {
+              draft: "",
+              id: "tab-1",
+              includeCurrentDocumentContext: true,
+              label: 1,
+              sessionId: "shared-session",
+              title: "First Tab Title",
+            },
+            {
+              draft: "",
+              id: "tab-2",
+              includeCurrentDocumentContext: true,
+              label: 2,
+              sessionId: "shared-session",
+              title: "Duplicate Session Tab Title",
+            },
+          ],
+          version: 2,
+        };
+        const normalized = normalizeConversationWorkspace(raw);
+        expect(normalized).toBeDefined();
+        expect(normalized?.tabs[0]?.sessionId).toBe("shared-session");
+        expect(normalized?.tabs[0]?.title).toBe("First Tab Title");
+
+        // Second tab lost its duplicate session, so its title must be dropped
+        expect(normalized?.tabs[1]?.sessionId).toBeNull();
+        expect(normalized?.tabs[1]?.title).toBeUndefined();
+        expect("title" in (normalized?.tabs[1] ?? {})).toBe(false);
+      });
+    });
+
+    describe("resolveConversationTabTitle", () => {
+      it("prefers authoritative tab.title when present and non-empty", () => {
+        expect(
+          resolveConversationTabTitle(
+            { title: "Refactor database queries" },
+            "Can you help me rewrite this SQL query?",
+          ),
+        ).toBe("Refactor database queries");
+
+        expect(
+          resolveConversationTabTitle(
+            { title: "  Clean up CSS  " },
+            "Please fix styles",
+          ),
+        ).toBe("Clean up CSS");
+      });
+
+      it("falls back to truncated first non-empty line of firstUserMessage", () => {
+        expect(
+          resolveConversationTabTitle(
+            { title: undefined },
+            "How do I use vitest?",
+          ),
+        ).toBe("How do I use vitest?");
+
+        expect(
+          resolveConversationTabTitle(
+            { title: "   " },
+            "Fix the button styling",
+          ),
+        ).toBe("Fix the button styling");
+
+        const multiline = "\n  \n   First line with   multiple    spaces   \nSecond line";
+        expect(
+          resolveConversationTabTitle({ title: undefined }, multiline),
+        ).toBe("First line with multiple spaces");
+
+        const exactly60 = "a".repeat(60);
+        expect(
+          resolveConversationTabTitle({ title: undefined }, exactly60),
+        ).toBe(exactly60);
+
+        const over60 = "This is a very long user prompt that exceeds the sixty character limit for tab titles";
+        expect(
+          resolveConversationTabTitle({ title: undefined }, over60),
+        ).toBe(`${over60.slice(0, 60)}…`);
+      });
+
+      it("falls back to 未命名会话 when both title and firstUserMessage are missing or blank", () => {
+        expect(resolveConversationTabTitle({ title: undefined })).toBe("未命名会话");
+        expect(resolveConversationTabTitle({ title: "" })).toBe("未命名会话");
+        expect(resolveConversationTabTitle({ title: "   " })).toBe("未命名会话");
+        expect(resolveConversationTabTitle({ title: undefined }, "")).toBe("未命名会话");
+        expect(resolveConversationTabTitle({ title: undefined }, "   \n  \t  ")).toBe("未命名会话");
+      });
     });
   });
 });

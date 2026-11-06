@@ -297,6 +297,7 @@ export class HermesAcpClient {
     | undefined;
   private imagePromptSupported = false;
   private intentionalShutdown = false;
+  private lastEmittedTitle: string | undefined;
   private lifecycleGeneration = 0;
   private modelRestorationFailure: Error | undefined;
   private restoringModel:
@@ -454,6 +455,7 @@ export class HermesAcpClient {
       return;
     }
     this.catalogGeneration += 1;
+    this.lastEmittedTitle = undefined;
     this.activeSession?.dispose();
     this.activeSession = undefined;
     this.resumedSessionId = undefined;
@@ -610,6 +612,13 @@ export class HermesAcpClient {
       .client({ name: "hermesian" })
       .onNotification(acp.methods.client.session.update, async (ctx) => {
         const sessionId = ctx.params.sessionId;
+        if (
+          ctx.params.update.sessionUpdate === "session_info_update" &&
+          (sessionId === this.sessionId || this.historyCapture?.sessionId === sessionId)
+        ) {
+          this.handleSessionUpdate(ctx.params.update);
+          return;
+        }
         if (this.historyCapture?.sessionId === sessionId) {
           this.historyCapture.updates.push(ctx.params.update);
           return;
@@ -682,6 +691,7 @@ export class HermesAcpClient {
     if (!this.context || !this.isTransportReady) {
       throw new Error("Hermes ACP context is unavailable");
     }
+    this.lastEmittedTitle = undefined;
     this.confirmedModel = undefined;
     this.modelRestorationFailure = undefined;
     this.restoringModel = undefined;
@@ -860,6 +870,7 @@ export class HermesAcpClient {
   }
 
   async loadSessionHistory(sessionId: string): Promise<HermesHistoryItem[]> {
+    this.lastEmittedTitle = undefined;
     const releaseOperation = this.claimSessionOperation(
       "history",
       "Cannot load conversation history while Hermes is responding",
@@ -1386,6 +1397,7 @@ export class HermesAcpClient {
 
   async disconnect(): Promise<void> {
     this.lifecycleGeneration += 1;
+    this.lastEmittedTitle = undefined;
     this.promptOwner = undefined;
     this.#appliedReasoningEffort = undefined;
     this.confirmedModel = undefined;
@@ -1535,10 +1547,20 @@ export class HermesAcpClient {
       case "plan_removed":
         this.emit({ type: "notice", text: "Hermes cleared its plan" });
         return;
+      case "session_info_update": {
+        const rawTitle = (update as { title?: unknown }).title;
+        if (typeof rawTitle === "string") {
+          const trimmed = rawTitle.trim();
+          if (trimmed && trimmed !== this.lastEmittedTitle) {
+            this.lastEmittedTitle = trimmed;
+            this.emit({ type: "session-title", title: trimmed });
+          }
+        }
+        return;
+      }
       case "user_message_chunk":
       case "current_mode_update":
       case "config_option_update":
-      case "session_info_update":
         return;
       case "available_commands_update": {
         const commands = update.availableCommands
@@ -1562,6 +1584,7 @@ export class HermesAcpClient {
     executable: string,
     profile: string,
   ): void {
+    this.lastEmittedTitle = undefined;
     this.#appliedReasoningEffort = undefined;
     const generation = ++this.catalogGeneration;
     const fallback = normalizeAcpModelState(

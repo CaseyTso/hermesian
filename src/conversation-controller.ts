@@ -711,6 +711,81 @@ export class ConversationController<TClient extends ConversationClient> {
     });
   }
 
+  setConversationTitle(
+    tabId: string,
+    title: string | undefined,
+    expectedSessionId?: string | null,
+  ): Promise<void> {
+    return this.enqueueWorkspaceCommit(async () => {
+      const latest = copyWorkspace(
+        this.dependencies.workspace.getWorkspace() ?? this.snapshot.workspace,
+      );
+      const tab = latest?.tabs.find((candidate) => candidate.id === tabId);
+      if (
+        this.disposed ||
+        !latest ||
+        !tab ||
+        this.snapshot.tabOperations.get(tabId)?.closing
+      ) {
+        throw this.controllerError(
+          "cancelled",
+          "Conversation is no longer available",
+          tabId,
+        );
+      }
+      if (
+        expectedSessionId !== undefined &&
+        tab.sessionId !== expectedSessionId
+      ) {
+        throw this.controllerError(
+          "operation_stale",
+          "Conversation session changed",
+          tabId,
+        );
+      }
+      const normalized =
+        typeof title === "string" && title.trim() ? title.trim() : undefined;
+      if (tab.title === normalized) {
+        return;
+      }
+      const previous = tab.title;
+      const next = updateConversationTab(latest, tabId, { title: normalized });
+      try {
+        const saving = this.dependencies.workspace.setWorkspace(next, {
+          flush: true,
+          save: true,
+        });
+        this.publishWorkspace(next);
+        await saving;
+      } catch (error) {
+        const current = copyWorkspace(
+          this.dependencies.workspace.getWorkspace() ?? latest,
+        )!;
+        const currentTab = current.tabs.find(
+          (candidate) => candidate.id === tabId,
+        );
+        const owned = currentTab?.title === normalized;
+        const recovered = owned
+          ? updateConversationTab(current, tabId, { title: previous })
+          : current;
+        if (!this.disposed) {
+          await this.dependencies.workspace.setWorkspace(recovered, {
+            save: true,
+          });
+          this.publishWorkspace(recovered);
+        }
+        throw error;
+      }
+      if (!this.disposed) {
+        this.publishWorkspace(
+          copyWorkspace(
+            this.dependencies.workspace.getWorkspace() ?? next,
+          )!,
+        );
+      }
+    });
+  }
+
   getSelectedModel(tabId?: string): HermesModelOption | undefined {
     const ws = this.snapshot.workspace;
     if (!ws) return undefined;
@@ -1088,13 +1163,14 @@ export class ConversationController<TClient extends ConversationClient> {
     }
   }
 
-  openHistorySession(sessionId: string): Promise<HistoryOpenResult> {
+  openHistorySession(sessionId: string, title?: string): Promise<HistoryOpenResult> {
     const blocked = this.blockedDuringStartup<HistoryOpenResult>("openHistorySession");
-    return blocked ?? this.openHistorySessionInternal(sessionId);
+    return blocked ?? this.openHistorySessionInternal(sessionId, title);
   }
 
   private async openHistorySessionInternal(
     requestedSessionId: string,
+    initialTitle?: string,
   ): Promise<HistoryOpenResult> {
     const sessionId = requestedSessionId.trim();
     if (!sessionId) {
@@ -1113,6 +1189,9 @@ export class ConversationController<TClient extends ConversationClient> {
       (tab) => tab.sessionId === sessionId,
     );
     if (existingOwner) {
+      if (!existingOwner.title && initialTitle?.trim()) {
+        await this.setConversationTitle(existingOwner.id, initialTitle.trim(), sessionId);
+      }
       const switchResult = await this.switchConversationInternal(existingOwner.id);
       return {
         items: switchResult.items,
@@ -1129,7 +1208,10 @@ export class ConversationController<TClient extends ConversationClient> {
     const tabId = this.dependencies.createTabId?.() ?? globalThis.crypto.randomUUID();
     this.historyReservations.set(sessionId, tabId);
     try {
-      const pending = replaceConversationSession(addPendingConversationTab(workspace, tabId), tabId, sessionId);
+      let pending = replaceConversationSession(addPendingConversationTab(workspace, tabId), tabId, sessionId);
+      if (initialTitle?.trim()) {
+        pending = updateConversationTab(pending, tabId, { title: initialTitle.trim() });
+      }
       this.publishWorkspace(pending);
       await this.dependencies.workspace.setWorkspace(pending, { save: true });
       void this.readAvailableHistory(tabId);
@@ -1177,10 +1259,14 @@ export class ConversationController<TClient extends ConversationClient> {
       if (!latestWorkspace?.tabs.some((candidate) => candidate.id === tabId)) {
         throw this.controllerError("workspace_conflict", "Conversation tab was removed during restart", tabId);
       }
-      const committedWorkspace = replaceConversationSession(
-        latestWorkspace,
+      const committedWorkspace = updateConversationTab(
+        replaceConversationSession(
+          latestWorkspace,
+          tabId,
+          sessionId,
+        ),
         tabId,
-        sessionId,
+        { title: undefined },
       );
       await this.dependencies.workspace.setWorkspace(committedWorkspace, {
         flush: true,

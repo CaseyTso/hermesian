@@ -570,6 +570,9 @@ export class HermesianSidebarView extends ItemView {
         this.editScopes.set(tabId, undefined);
         void this.finishTurn(tabId, event.reason);
         return;
+      case "session-title":
+        void this.controller?.setConversationTitle(tabId, event.title).catch(() => {});
+        return;
     }
   }
 
@@ -1571,7 +1574,7 @@ export class HermesianSidebarView extends ItemView {
     this.captureActiveConversationRuntime();
     const previousActive = this.conversationWorkspace.activeTabId;
     const epoch = this.viewEpoch;
-    const opening = controller.openHistorySession(session.sessionId);
+    const opening = controller.openHistorySession(session.sessionId, session.title);
     const pendingActive = this.conversationWorkspace.activeTabId;
     if (pendingActive !== previousActive) {
       this.showConversationMessages(pendingActive);

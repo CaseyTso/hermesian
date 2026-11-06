@@ -126,7 +126,8 @@ export type HermesUiEvent =
     }
   | { type: "notice"; text: string }
   | { type: "error"; message: string; terminal: boolean }
-  | { type: "turn-stop"; reason: string };
+  | { type: "turn-stop"; reason: string }
+  | { type: "session-title"; title: string };
 
 /**
  * Why a steer (running-turn pure-text correction) did not apply. The client

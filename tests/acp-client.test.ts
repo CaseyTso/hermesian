@@ -1841,3 +1841,136 @@ describe("classifySteerCapture per-chunk receipts", () => {
     ).toEqual({ body: "", ok: true });
   });
 });
+
+describe("HermesAcpClient session_info_update title handling", () => {
+  function createTestClient(events: unknown[] = []): {
+    client: HermesAcpClient;
+    events: unknown[];
+  } {
+    const client = new HermesAcpClient({
+      onEvent: (event) => events.push(event),
+      onPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+      pluginVersion: "test",
+      settings: () => ({
+        acceptHooks: true,
+        autoApproveVaultEdits: true,
+        debugLogging: false,
+        hermesExecutable: "hermes",
+        hiddenModelSwitchIds: [],
+        profile: "default",
+        reasoningEffort: "default",
+      }),
+      vaultPath: "/tmp/hermesian-test-vault",
+    });
+    return { client, events };
+  }
+
+  function sendUpdate(client: HermesAcpClient, update: unknown): void {
+    const handler = Reflect.get(client, "handleSessionUpdate") as
+      | ((update: unknown) => void)
+      | undefined;
+    expect(typeof handler).toBe("function");
+    handler!.call(client, update);
+  }
+
+  it("emits session-title even when client is not busy", () => {
+    const { client, events } = createTestClient();
+    expect(client.isBusy).toBe(false);
+
+    sendUpdate(client, {
+      sessionUpdate: "session_info_update",
+      title: "Design System Implementation",
+    });
+
+    expect(events).toEqual([
+      { type: "session-title", title: "Design System Implementation" },
+    ]);
+  });
+
+  it("ignores empty, whitespace-only, null, undefined, or non-string titles", () => {
+    const { client, events } = createTestClient();
+
+    sendUpdate(client, { sessionUpdate: "session_info_update", title: "" });
+    sendUpdate(client, { sessionUpdate: "session_info_update", title: "   " });
+    sendUpdate(client, { sessionUpdate: "session_info_update", title: null });
+    sendUpdate(client, { sessionUpdate: "session_info_update", title: undefined });
+    sendUpdate(client, { sessionUpdate: "session_info_update", title: 42 });
+    sendUpdate(client, { sessionUpdate: "session_info_update", title: {} });
+    sendUpdate(client, { sessionUpdate: "session_info_update" });
+
+    expect(events).toEqual([]);
+  });
+
+  it("trims titles and deduplicates identical consecutive titles", () => {
+    const { client, events } = createTestClient();
+
+    // First emission (with whitespace that gets trimmed)
+    sendUpdate(client, {
+      sessionUpdate: "session_info_update",
+      title: "  Fix parser regression  ",
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({
+      type: "session-title",
+      title: "Fix parser regression",
+    });
+
+    // Consecutive identical title is deduplicated
+    sendUpdate(client, {
+      sessionUpdate: "session_info_update",
+      title: "Fix parser regression",
+    });
+    sendUpdate(client, {
+      sessionUpdate: "session_info_update",
+      title: "  Fix parser regression  ",
+    });
+    expect(events).toHaveLength(1);
+
+    // New title is emitted
+    sendUpdate(client, {
+      sessionUpdate: "session_info_update",
+      title: "Updated Title",
+    });
+    expect(events).toHaveLength(2);
+    expect(events[1]).toEqual({
+      type: "session-title",
+      title: "Updated Title",
+    });
+
+    // Sending again is deduplicated
+    sendUpdate(client, {
+      sessionUpdate: "session_info_update",
+      title: "Updated Title",
+    });
+    expect(events).toHaveLength(2);
+  });
+
+  it("resets deduplication tracking on session disconnect", async () => {
+    const { client, events } = createTestClient();
+
+    sendUpdate(client, {
+      sessionUpdate: "session_info_update",
+      title: "Persistent Problem",
+    });
+    expect(events).toEqual([
+      { type: "session-title", title: "Persistent Problem" },
+    ]);
+
+    await client.disconnect();
+
+    // After disconnect, the same title can be emitted again
+    sendUpdate(client, {
+      sessionUpdate: "session_info_update",
+      title: "Persistent Problem",
+    });
+    expect(events).toContainEqual({
+      type: "session-title",
+      title: "Persistent Problem",
+    });
+    const titleEvents = events.filter(
+      (e): e is { type: "session-title"; title: string } =>
+        Boolean(e && typeof e === "object" && (e as any).type === "session-title"),
+    );
+    expect(titleEvents).toHaveLength(2);
+  });
+});

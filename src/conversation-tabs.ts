@@ -14,6 +14,7 @@ export interface PersistedConversationTab {
   label: number;
   reasoningEffort?: ReasoningEffort | undefined;
   sessionId: string | null;
+  title?: string | undefined;
   /** Explicit token metadata from menu selection (not inferred from draft text). */
   token?: { kind: "skill" | "command"; name: string } | undefined;
   /** Explicit reference metadata from whole-paste URL/path recognition. */
@@ -36,6 +37,7 @@ export type ConversationTabPatch = Partial<
     | "includeCurrentDocumentContext"
     | "reasoningEffort"
     | "selectedModel"
+    | "title"
   >
 > & {
   token?: { kind: "skill" | "command"; name: string } | undefined;
@@ -421,6 +423,15 @@ export function updateConversationTab(
         return tab;
       }
       const updated = { ...tab, ...patch };
+      if ("title" in patch) {
+        const trimmed =
+          typeof patch.title === "string" ? patch.title.trim() : "";
+        if (trimmed) {
+          updated.title = trimmed;
+        } else {
+          delete updated.title;
+        }
+      }
       if ("selectedModel" in patch) {
         if (patch.selectedModel) {
           const sanitized = sanitizeModelOption(patch.selectedModel);
@@ -551,6 +562,12 @@ export function normalizeConversationWorkspace(
       ? tabEffort
       : fallbackReasoningEffort;
     const selectedModel = sanitizeModelOption(tab.selectedModel);
+    const title =
+      typeof tab.title === "string" &&
+      tab.title.trim() &&
+      !(normalizedSessionId && !sessionId)
+        ? tab.title.trim()
+        : undefined;
     tabs.push({
       draft: tab.draft ?? "",
       id: tab.id,
@@ -558,6 +575,7 @@ export function normalizeConversationWorkspace(
       label: tabs.length + 1,
       reasoningEffort,
       sessionId,
+      ...(title !== undefined ? { title } : {}),
       ...(selectedModel !== undefined ? { selectedModel } : {}),
       ...(token !== undefined ? { token } : {}),
       ...(references !== undefined ? { references } : {}),
@@ -573,4 +591,26 @@ export function normalizeConversationWorkspace(
     tabs,
     version: 2,
   };
+}
+
+export function resolveConversationTabTitle(
+  tab: Pick<PersistedConversationTab, "title">,
+  firstUserMessage?: string,
+): string {
+  if (typeof tab.title === "string" && tab.title.trim()) {
+    return tab.title.trim();
+  }
+  if (typeof firstUserMessage === "string") {
+    const firstLine = firstUserMessage
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find(Boolean);
+    if (firstLine) {
+      const line = firstLine.replace(/\s+/g, " ");
+      if (line) {
+        return line.length > 60 ? `${line.slice(0, 60)}…` : line;
+      }
+    }
+  }
+  return "未命名会话";
 }
