@@ -1,6 +1,8 @@
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 import {
+  HERMES_SESSION_CATALOG_SCRIPT,
   mergeHermesSessionEntries,
   parseHermesSessionCatalogOutput,
 } from "../src/hermes-session-catalog";
@@ -72,6 +74,54 @@ describe("mergeHermesSessionEntries", () => {
         sessionId: "session-a",
         title: "Live title",
         updatedAt: "2026-07-17T10:00:00Z",
+      },
+    ]);
+  });
+});
+
+describe("HERMES_SESSION_CATALOG_SCRIPT", () => {
+  it("contains a defensive guard filtering rows with non-positive message_count", () => {
+    expect(HERMES_SESSION_CATALOG_SCRIPT).toContain(
+      'int(row.get("message_count") or 0) <= 0',
+    );
+  });
+
+  it("executes as Python and filters sessions with zero or negative message_count", () => {
+    const dbStub = [
+      "import sys, types",
+      "from pathlib import Path",
+      "constants = types.ModuleType('hermes_constants')",
+      "constants.get_hermes_home = lambda: Path('/fake')",
+      "sys.modules['hermes_constants'] = constants",
+      "state = types.ModuleType('hermes_state')",
+      "class FakeSessionDB:",
+      "    def __init__(self, *args, **kwargs):",
+      "        pass",
+      "    def list_sessions_rich(self, **kwargs):",
+      "        return [",
+      "            {'id': 'session-empty', 'message_count': 0, 'title': 'Empty'},",
+      "            {'id': 'session-negative', 'message_count': -1, 'title': 'Negative'},",
+      "            {'id': 'session-none', 'message_count': None, 'title': 'None'},",
+      "            {'id': 'session-active', 'message_count': 3, 'title': 'Active', 'cwd': '/vault'},",
+      "        ]",
+      "state.SessionDB = FakeSessionDB",
+      "sys.modules['hermes_state'] = state",
+    ].join("\n");
+    const output = execFileSync(
+      "python3",
+      ["-c", `${dbStub}\n${HERMES_SESSION_CATALOG_SCRIPT}`],
+      {
+        encoding: "utf8",
+      },
+    );
+
+    expect(output).not.toContain("${");
+    expect(parseHermesSessionCatalogOutput(output)).toEqual([
+      {
+        cwd: "/vault",
+        sessionId: "session-active",
+        title: "Active",
+        updatedAt: undefined,
       },
     ]);
   });

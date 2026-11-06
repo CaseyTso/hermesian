@@ -7,7 +7,7 @@ const CATALOG_MARKER = "HERMESIAN_SESSION_CATALOG=";
 const CATALOG_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 2_000_000;
 
-const CATALOG_SCRIPT = String.raw`
+export const HERMES_SESSION_CATALOG_SCRIPT = String.raw`
 import json
 import os
 import sys
@@ -44,6 +44,12 @@ for row in rows:
     if not session_id:
         continue
 
+    try:
+        if int(row.get("message_count") or 0) <= 0:
+            continue
+    except (TypeError, ValueError):
+        continue
+
     cwd = str(row.get("cwd") or "").strip()
     if not cwd:
         try:
@@ -70,6 +76,8 @@ for row in rows:
 
 print("${CATALOG_MARKER}" + json.dumps({"sessions": sessions}, ensure_ascii=False, separators=(",", ":")))
 `;
+
+const CATALOG_SCRIPT = HERMES_SESSION_CATALOG_SCRIPT;
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
