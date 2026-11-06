@@ -769,6 +769,7 @@ export class HermesAcpClient {
       "new-session",
       "Cannot create a new session while Hermes is responding",
     );
+    this.lastEmittedTitle = undefined;
     try {
       await this.ensureTransport();
       this.activeSession?.dispose();
@@ -870,11 +871,11 @@ export class HermesAcpClient {
   }
 
   async loadSessionHistory(sessionId: string): Promise<HermesHistoryItem[]> {
-    this.lastEmittedTitle = undefined;
     const releaseOperation = this.claimSessionOperation(
       "history",
       "Cannot load conversation history while Hermes is responding",
     );
+    this.lastEmittedTitle = undefined;
     try {
       // Resume path: transport + session/load only. Never session/new first.
       await this.ensureTransport();
@@ -1584,7 +1585,6 @@ export class HermesAcpClient {
     executable: string,
     profile: string,
   ): void {
-    this.lastEmittedTitle = undefined;
     this.#appliedReasoningEffort = undefined;
     const generation = ++this.catalogGeneration;
     const fallback = normalizeAcpModelState(
