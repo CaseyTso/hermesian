@@ -21,18 +21,43 @@ if profile:
 from hermes_constants import get_hermes_home
 from hermes_state import SessionDB
 
+def _list_acp_page(db, limit, offset):
+    if hasattr(db, "_read_all"):
+        try:
+            from hermes_cli.gateway_session_store import SurfaceLabelReader
+            return SurfaceLabelReader(db).list_sessions_rich(
+                source="acp",
+                limit=limit,
+                offset=offset,
+                include_archived=False,
+                order_by_last_active=True,
+            )
+        except Exception:
+            pass
+    try:
+        return db.list_sessions_rich(
+            sources=["acp", "local"],
+            local_created_sources=["acp"],
+            limit=limit,
+            offset=offset,
+            include_archived=False,
+            order_by_last_active=True,
+        )
+    except TypeError:
+        return db.list_sessions_rich(
+            source="acp",
+            limit=limit,
+            offset=offset,
+            include_archived=False,
+            order_by_last_active=True,
+        )
+
 db = SessionDB(db_path=get_hermes_home() / "state.db")
 rows = []
 offset = 0
 page_size = 500
 while True:
-    page = db.list_sessions_rich(
-        source="acp",
-        limit=page_size,
-        offset=offset,
-        include_archived=False,
-        order_by_last_active=True,
-    )
+    page = _list_acp_page(db, page_size, offset)
     rows.extend(page)
     if len(page) < page_size:
         break
@@ -60,7 +85,14 @@ for row in rows:
     if not cwd:
         cwd = "."
 
-    title = str(row.get("title") or row.get("preview") or "").strip()
+    raw_title = str(row.get("title") or "").strip()
+    if not raw_title:
+        preview = str(row.get("preview") or "").strip()
+        if preview.startswith("<hermesian_identity>"):
+            raw_title = ""
+        else:
+            raw_title = preview
+    title = raw_title
     updated = row.get("last_active") or row.get("ended_at") or row.get("started_at")
     if isinstance(updated, (int, float)):
         updated = datetime.fromtimestamp(updated, tz=timezone.utc).isoformat().replace("+00:00", "Z")
