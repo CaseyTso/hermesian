@@ -8,6 +8,18 @@ Hermesian is an Obsidian sidebar client for running and controlling independent 
 A sidebar tab that owns one independently running or resumed Hermes session.
 _Avoid_: Dialog, conversation box, chat box
 
+**Conversation Title**:
+The human-readable name of the Hermes session a Conversation Tab owns. Hermes is its single authority: it may be derived automatically, upgraded by Hermes's title model, or set by the user, and every client shows the same value. Distinct from the tab's sequential number label.
+_Avoid_: Tab label, tab name, local title
+
+**Title Popover**:
+The opaque Picker Popover opened by right-clicking a Conversation Tab, showing the Conversation Title and offering manual rename and AI title generation. It is not a way to close the tab.
+_Avoid_: Tab context menu, rename dialog, close menu
+
+**Empty Session**:
+A Hermes session that holds no messages, typically left behind by a Conversation Tab that connected but never sent anything. It is never offered as resumable history.
+_Avoid_: Broken session, unrecoverable session
+
 **Active Turn**:
 The currently executing Hermes response within one Conversation Tab.
 _Avoid_: Working dialog, active chat

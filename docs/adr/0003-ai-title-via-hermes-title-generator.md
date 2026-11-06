@@ -1,0 +1,5 @@
+# Generate AI Conversation Titles with Hermes's own title generator
+
+Hermes ACP offers no way to regenerate a Conversation Title, but Hermes ships an internal `generate_title()` that already produces its automatic titles with the user's cheap title model and thinking turned off. Hermesian therefore runs a short Python helper, the same way it reads the session catalog, that feeds the session's transcript to that function and then applies the result through Hermes's normal user rename (`/title`). Hermes stays the single authority for titles, and AI titles look like Hermes's automatic ones.
+
+Asking the tab's selected model was rejected because it would spend that session's context and tokens on a model the user picked for real work, and it would have to wait for any Active Turn to finish. This deliberately accepts a dependency on an internal Hermes function. If the function is missing or fails after a Hermes upgrade, the Title Popover shows an explicit error and manual rename keeps working. Switch to a native ACP regenerate-title method if Hermes ever provides one.
