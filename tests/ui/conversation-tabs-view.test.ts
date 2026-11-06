@@ -52,6 +52,7 @@ function defaults(callbacks: Partial<ConversationTabsCallbacks> = {}): Conversat
   return {
     onActivate: vi.fn(),
     onClose: vi.fn(),
+    onContextMenu: vi.fn(),
     ...callbacks,
   };
 }
@@ -169,9 +170,10 @@ describe("renderConversationTabsView", () => {
     expect(button.getAttribute("aria-busy")).toBe("true");
   });
 
-  it("prevents default on contextmenu and calls onClose", () => {
+  it("prevents default on contextmenu, calls onContextMenu, and does NOT call onClose", () => {
     const host = document.createElement("div");
     const onClose = vi.fn();
+    const onContextMenu = vi.fn();
     const state: ConversationTabsState = {
       activeTabId: "tab-1",
       isTabBusy: () => false,
@@ -180,14 +182,46 @@ describe("renderConversationTabsView", () => {
       tabs: [makeTab({ id: "tab-1" })],
     };
 
-    renderConversationTabsView(host, state, defaults({ onClose }));
+    renderConversationTabsView(host, state, defaults({ onClose, onContextMenu }));
 
     const button = host.querySelector("button")!;
     const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
     button.dispatchEvent(event);
 
     expect(event.defaultPrevented).toBe(true);
-    expect(onClose).toHaveBeenCalledWith("tab-1");
+    expect(onContextMenu).toHaveBeenCalledWith("tab-1", button, event);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("includes resolved conversation title in hover title attribute and omits Right-click text", () => {
+    const host = document.createElement("div");
+    const state: ConversationTabsState = {
+      activeTabId: "tab-1",
+      isTabBusy: () => false,
+      isTabLoading: () => false,
+      tabNavigationDisabled: false,
+      tabs: [
+        makeTab({ id: "tab-1", label: 1, title: "Custom User Title" }),
+        makeTab({ id: "tab-2", label: 2, title: undefined }),
+      ],
+      resolveTabTitle: (tab) => (tab.id === "tab-2" ? "Inferred Title" : (tab.title ?? "")),
+    };
+
+    renderConversationTabsView(host, state, defaults());
+
+    const buttons = host.querySelectorAll("button");
+    const title1 = buttons[0].getAttribute("title");
+    const title2 = buttons[1].getAttribute("title");
+    const ariaLabel1 = buttons[0].getAttribute("aria-label");
+    const ariaLabel2 = buttons[1].getAttribute("aria-label");
+
+    expect(title1).toBe("Custom User Title · Conversation 1");
+    expect(title1).not.toContain("Right-click");
+    expect(ariaLabel1).toBe("Conversation 1: Custom User Title");
+
+    expect(title2).toBe("Inferred Title · Conversation 2");
+    expect(title2).not.toContain("Right-click");
+    expect(ariaLabel2).toBe("Conversation 2: Inferred Title");
   });
 
   it("calls onClose when the close (×) button is clicked without activating tab", () => {

@@ -19,6 +19,7 @@
 export const PICKER_WIDTH_MAX = 360;
 export const PICKER_EDGE_PADDING = 8;
 export const PICKER_GAP_ABOVE_ANCHOR = 8;
+export const PICKER_GAP_BELOW_ANCHOR = 8;
 
 export interface PickerPlacementInput {
   /** Vertical anchor only: the panel grows upward from the button's top edge. */
@@ -33,6 +34,20 @@ export interface PickerPlacement {
   bottom: number;
   height: number;
   left: number;
+  width: number;
+}
+
+export interface DownwardPickerPlacementInput {
+  anchorRect: { bottom: number };
+  containerRect: { left: number; width: number };
+  viewport: { height: number; width: number };
+  popoverHeightMax: number;
+}
+
+export interface DownwardPickerPlacement {
+  height: number;
+  left: number;
+  top: number;
   width: number;
 }
 
@@ -86,4 +101,38 @@ export function resolvePickerPlacement(input: PickerPlacementInput): PickerPlace
   );
   const bottom = viewport.height - anchorRect.top + PICKER_GAP_ABOVE_ANCHOR;
   return { bottom, height, left, width };
+}
+
+/**
+ * Pure: computes an anchored downward popover box (e.g. title popover anchored
+ * below a conversation tab).
+ *
+ * - `width` and `left` follow the sidebar content width, bounded identically to
+ *   `resolvePickerPlacement`.
+ * - `top` places the panel just below the anchor button (`anchorRect.bottom + PICKER_GAP_BELOW_ANCHOR`).
+ * - `height` never exceeds `popoverHeightMax` and shrinks to fit within the viewport.
+ */
+export function resolveDownwardPickerPlacement(
+  input: DownwardPickerPlacementInput,
+): DownwardPickerPlacement {
+  const { anchorRect, containerRect, viewport, popoverHeightMax } = input;
+  const width = Math.max(
+    0,
+    Math.min(PICKER_WIDTH_MAX, containerRect.width - PICKER_EDGE_PADDING * 2),
+  );
+  const leftFloor = Math.max(
+    PICKER_EDGE_PADDING,
+    containerRect.left + PICKER_EDGE_PADDING,
+  );
+  const left = clamp(
+    containerRect.left + PICKER_EDGE_PADDING,
+    leftFloor,
+    viewport.width - width - PICKER_EDGE_PADDING,
+  );
+  const top = anchorRect.bottom + PICKER_GAP_BELOW_ANCHOR;
+  const height = Math.min(
+    popoverHeightMax,
+    Math.max(0, viewport.height - top - PICKER_EDGE_PADDING),
+  );
+  return { height, left, top, width };
 }

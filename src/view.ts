@@ -25,6 +25,7 @@ import {
 import {
   cycleConversationTabId,
   isActiveConversationSession,
+  resolveConversationTabTitle,
   updateConversationTab,
   type PersistedConversationTab,
   type PersistedConversationWorkspace,
@@ -75,8 +76,13 @@ import {
   TableModal,
   handleRenderedLinkClick,
 } from "./ui/table-modal";
+import {
+  generateHermesSessionTitle,
+  renameHermesSession,
+} from "./hermes-session-title";
 import { HermesModelPickerPopover } from "./ui/model-picker-popover";
 import { HermesReasoningPickerPopover } from "./ui/reasoning-picker-popover";
+import { HermesTitlePopover } from "./ui/title-popover";
 import {
   renderConversationTabsView,
   type ConversationTabsCallbacks,
@@ -352,6 +358,8 @@ export class HermesianSidebarView extends ItemView {
   private reasoningButtonEl!: HTMLButtonElement;
   private reasoningLabelEl!: HTMLElement;
   private reasoningPicker: HermesReasoningPickerPopover | null = null;
+  private titlePopover: HermesTitlePopover | null = null;
+  private readonly tabFirstUserMessages = new Map<string, string>();
   private selectionBarEl!: HTMLElement;
   private sendButtonEl!: HTMLButtonElement;
   private steerButtonEl!: HTMLButtonElement;
@@ -462,6 +470,8 @@ export class HermesianSidebarView extends ItemView {
     this.modelPicker = null;
     this.reasoningPicker?.detach();
     this.reasoningPicker = null;
+    this.titlePopover?.detach();
+    this.titlePopover = null;
     this.startup?.close();
     this.startup = undefined;
     this.teardownDictationRecording();
@@ -1203,6 +1213,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private forgetConversationMessages(tabId: string): void {
+    this.tabFirstUserMessages?.delete(tabId);
     this.loadedMessageTabIds.delete(tabId);
     this.displayedHistories.delete(tabId);
     this.historyRendering.delete(tabId);
@@ -1279,12 +1290,17 @@ export class HermesianSidebarView extends ItemView {
     }
     const workspace = this.conversationWorkspace;
     if (!workspace) {
+      this.titlePopover?.detach();
+      this.titlePopover = null;
       this.conversationTabsEl.empty();
       return;
     }
     const callbacks: ConversationTabsCallbacks = {
       onActivate: (tabId) => { void this.switchConversation(tabId); },
       onClose: (tabId) => { void this.closeConversation(tabId); },
+      onContextMenu: (tabId, anchorEl) => {
+        this.openTitlePopover(tabId, anchorEl);
+      },
     };
     renderConversationTabsView(this.conversationTabsEl, {
       activeTabId: workspace.activeTabId,
@@ -1293,10 +1309,175 @@ export class HermesianSidebarView extends ItemView {
       isTabFailed: (tabId) => this.controller?.getSnapshot().tabOperations.get(tabId)?.connection === "failed",
       tabNavigationDisabled: !this.controlAvailability().tabNavigation,
       tabs: workspace.tabs,
+      resolveTabTitle: (tab) => resolveConversationTabTitle(tab, this.firstUserMessageForTab(tab.id)),
     }, callbacks);
+
+    if (this.titlePopover?.isOpen()) {
+      const popoverTabId = this.titlePopover.getTabId();
+      const newBtn = this.conversationTabsEl.querySelector<HTMLElement>(
+        `[data-conversation-tab-id="${popoverTabId}"]`,
+      );
+      const activePopoverTab = workspace.tabs.find((t) => t.id === popoverTabId);
+      if (!newBtn || !activePopoverTab) {
+        this.titlePopover.detach();
+        this.titlePopover = null;
+      } else {
+        this.titlePopover.updateAnchor(newBtn);
+        const title = resolveConversationTabTitle(
+          activePopoverTab,
+          this.firstUserMessageForTab(activePopoverTab.id),
+        );
+        this.titlePopover.updateExternalTitle(title, {
+          hasCustomTitle: Boolean(activePopoverTab.title?.trim()),
+          canGenerateAi: Boolean(activePopoverTab.sessionId) && this.tabHasMessages(activePopoverTab.id),
+        });
+      }
+    }
+  }
+
+  private openTitlePopover(tabId: string, anchorEl: HTMLElement): void {
+    if (this.titlePopover?.isOpen() && this.titlePopover.getTabId() === tabId) {
+      this.titlePopover.detach();
+      return;
+    }
+    this.titlePopover?.detach();
+    this.titlePopover = null;
+    this.modelPicker?.detach();
+    this.modelPicker = null;
+    this.reasoningPicker?.detach();
+    this.reasoningPicker = null;
+
+    const tab = this.conversationWorkspace?.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || this.isTabClosing(tabId)) {
+      return;
+    }
+
+    const currentTitle = resolveConversationTabTitle(tab, this.firstUserMessageForTab(tabId));
+    const hasCustomTitle = Boolean(tab.title?.trim());
+    const canGenerateAi = Boolean(tab.sessionId) && this.tabHasMessages(tabId);
+
+    this.titlePopover = new HermesTitlePopover({
+      anchorEl,
+      tabId,
+      tabLabel: tab.label,
+      currentTitle,
+      hasCustomTitle,
+      canGenerateAi,
+      getContainerRect: () => {
+        const rect = this.sidebarRootEl.getBoundingClientRect();
+        return { left: rect.left, width: rect.width };
+      },
+      iconRenderer: (element, icon) => setIcon(element, icon),
+      onRename: async (nextTitle) => await this.renameConversationTitle(tabId, nextTitle),
+      onGenerateAi: async () => await this.generateAiConversationTitle(tabId),
+      onClose: () => {
+        this.titlePopover = null;
+      },
+    });
+    this.titlePopover.open();
+  }
+
+  private async renameConversationTitle(
+    tabId: string,
+    nextTitle: string,
+  ): Promise<string> {
+    const tab = this.conversationWorkspace?.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) {
+      throw new Error("会话不可用");
+    }
+    const sessionId = tab.sessionId
+      ? tab.sessionId
+      : (await this.ensureTabSession(tabId)).sessionId;
+    const saved = await renameHermesSession(
+      resolveHermesExecutable(this.plugin.settings.hermesExecutable),
+      this.plugin.settings.profile,
+      sessionId,
+      nextTitle,
+    );
+    await this.controller?.setConversationTitle(tabId, saved, sessionId);
+    this.renderConversationTabs();
+    return saved;
+  }
+
+  private async generateAiConversationTitle(tabId: string): Promise<string> {
+    const tab = this.conversationWorkspace?.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab?.sessionId) {
+      throw new Error("发送消息后可用");
+    }
+    const saved = await generateHermesSessionTitle(
+      resolveHermesExecutable(this.plugin.settings.hermesExecutable),
+      this.plugin.settings.profile,
+      tab.sessionId,
+      this.userMessagesForTab(tabId),
+    );
+    await this.controller?.setConversationTitle(tabId, saved, tab.sessionId);
+    this.renderConversationTabs();
+    return saved;
+  }
+
+  private async ensureTabSession(tabId: string): Promise<{ sessionId: string }> {
+    return await this.ensureClientForTab(tabId);
+  }
+
+  private firstUserMessageForTab(tabId: string): string | undefined {
+    const historyItems =
+      this.displayedHistories.get(tabId)?.items ??
+      this.controller?.getSnapshot().histories.get(tabId)?.items;
+    if (historyItems) {
+      for (const item of historyItems) {
+        if (item.kind === "user" && item.text?.trim()) {
+          return item.text.trim();
+        }
+      }
+    }
+    return this.tabFirstUserMessages?.get(tabId);
+  }
+
+  private userMessagesForTab(tabId: string): string[] {
+    const historyItems =
+      this.displayedHistories.get(tabId)?.items ??
+      this.controller?.getSnapshot().histories.get(tabId)?.items ??
+      [];
+    const userTexts: string[] = [];
+    for (const item of historyItems) {
+      if (item.kind === "user" && item.text?.trim()) {
+        userTexts.push(item.text.trim());
+      }
+    }
+    if (userTexts.length > 0) {
+      return userTexts;
+    }
+    try {
+      const container = this.messageContainer(tabId);
+      const nodes = container.querySelectorAll(
+        ".hermesian-message.is-user .hermesian-message-body, .hermesian-message.is-user .hermesian-message-content",
+      );
+      for (const node of Array.from(nodes)) {
+        const text = node.textContent?.trim();
+        if (text) {
+          userTexts.push(text);
+        }
+      }
+    } catch {
+      // DOM query fallback
+    }
+    if (userTexts.length > 0) {
+      return userTexts;
+    }
+    const fallback = this.tabFirstUserMessages?.get(tabId);
+    return fallback ? [fallback] : [];
+  }
+
+  private tabHasMessages(tabId: string): boolean {
+    return (
+      this.userMessagesForTab(tabId).length > 0 ||
+      this.firstUserMessageForTab(tabId) !== undefined
+    );
   }
 
   private async addConversation(): Promise<void> {
+    this.titlePopover?.detach();
+    this.titlePopover = null;
     if (
       !this.controller ||
       !this.controlAvailability().add ||
@@ -1346,6 +1527,8 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private async closeConversation(tabId: string): Promise<void> {
+    this.titlePopover?.detach();
+    this.titlePopover = null;
     const workspace = this.conversationWorkspace;
     if (
       !this.controller ||
@@ -1413,6 +1596,8 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private async switchConversation(tabId: string): Promise<void> {
+    this.titlePopover?.detach();
+    this.titlePopover = null;
     if (
       !this.controller ||
       !this.controlAvailability().tabNavigation ||
@@ -1483,6 +1668,8 @@ export class HermesianSidebarView extends ItemView {
       this.modelPicker.detach();
       return;
     }
+    this.titlePopover?.detach();
+    this.titlePopover = null;
     this.reasoningPicker?.detach();
     const targetTabId = activeTab.id;
     let settled = false;
@@ -1689,6 +1876,8 @@ export class HermesianSidebarView extends ItemView {
       this.reasoningPicker.detach();
       return;
     }
+    this.titlePopover?.detach();
+    this.titlePopover = null;
     this.modelPicker?.detach();
     const targetTabId = activeTab.id;
     const currentEffort =
@@ -2674,6 +2863,7 @@ export class HermesianSidebarView extends ItemView {
         this.slashMenuItems.length > 0 ||
         this.modelPicker ||
         this.reasoningPicker ||
+        this.titlePopover ||
         this.permissions.size > 0
       ) {
         return;
@@ -2983,6 +3173,8 @@ export class HermesianSidebarView extends ItemView {
   }
 
   async startNewSession(): Promise<void> {
+    this.titlePopover?.detach();
+    this.titlePopover = null;
     const activeTab = this.activeConversationTab();
     if (
       !this.controller ||
@@ -3047,6 +3239,10 @@ export class HermesianSidebarView extends ItemView {
     contextChipTitle?: string,
     options?: { animate?: boolean },
   ): HTMLElement {
+    if (tabId && text.trim() && this.tabFirstUserMessages && !this.tabFirstUserMessages.has(tabId)) {
+      this.tabFirstUserMessages.set(tabId, text.trim());
+      this.renderConversationTabs?.();
+    }
     const parent = tabId ? this.messageContainer(tabId) : this.messagesEl;
     const isVisibleTab = this.messageRenderer
       ? (tabId ? this.messageRenderer.isVisible(tabId) : true)
@@ -3276,6 +3472,7 @@ export class HermesianSidebarView extends ItemView {
   }
 
   private resetConversationView(tabId: string): void {
+    this.tabFirstUserMessages?.delete(tabId);
     this.turnManager.resetView(tabId);
     this.updateComposerPlaceholder();
   }

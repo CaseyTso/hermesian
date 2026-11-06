@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   PICKER_EDGE_PADDING,
   PICKER_GAP_ABOVE_ANCHOR,
+  PICKER_GAP_BELOW_ANCHOR,
   PICKER_WIDTH_MAX,
+  resolveDownwardPickerPlacement,
   resolvePickerPlacement,
 } from "../src/ui/picker-geometry";
 
@@ -117,5 +119,73 @@ describe("resolvePickerPlacement — vertical logic is unchanged", () => {
     expect(placement.bottom).toBe(viewport.height - 600 + PICKER_GAP_ABOVE_ANCHOR);
     expect(placement.bottom).toBe(176);
     expect(placement.bottom).toBe(place(containerRect, viewport, REASONING_HEIGHT_MAX, 600).bottom);
+  });
+});
+
+describe("resolveDownwardPickerPlacement", () => {
+  const TITLE_POPOVER_HEIGHT_MAX = 320;
+
+  function placeDownward(
+    containerRect: { left: number; width: number },
+    viewport: { height: number; width: number },
+    anchorBottom = 40,
+    popoverHeightMax = TITLE_POPOVER_HEIGHT_MAX,
+  ) {
+    return resolveDownwardPickerPlacement({
+      anchorRect: { bottom: anchorBottom },
+      containerRect,
+      viewport,
+      popoverHeightMax,
+    });
+  }
+
+  it("shares the same width and left calculation as resolvePickerPlacement", () => {
+    const containerRect = { left: 400, width: 300 };
+    const viewport = { height: 768, width: 1024 };
+    const downward = placeDownward(containerRect, viewport, 50);
+    const upward = resolvePickerPlacement({
+      anchorRect: { top: 600 },
+      containerRect,
+      viewport,
+      popoverHeightMax: TITLE_POPOVER_HEIGHT_MAX,
+    });
+
+    expect(downward.width).toBe(upward.width);
+    expect(downward.left).toBe(upward.left);
+  });
+
+  it("positions top at anchorRect.bottom + PICKER_GAP_BELOW_ANCHOR", () => {
+    const containerRect = { left: 0, width: 300 };
+    const viewport = { height: 768, width: 1024 };
+    const downward = placeDownward(containerRect, viewport, 44);
+
+    expect(downward.top).toBe(44 + PICKER_GAP_BELOW_ANCHOR);
+    expect(downward.top).toBe(52);
+  });
+
+  it("caps the height at popoverHeightMax when there is ample vertical space", () => {
+    const containerRect = { left: 0, width: 300 };
+    const viewport = { height: 768, width: 1024 };
+    const downward = placeDownward(containerRect, viewport, 40, 320);
+
+    expect(downward.height).toBe(320);
+  });
+
+  it("shrinks height when anchor is near the bottom of viewport and avoids overflow", () => {
+    const containerRect = { left: 0, width: 300 };
+    const viewport = { height: 768, width: 1024 };
+    // top = 700 + 8 = 708. Available = 768 - 708 - 8 = 52.
+    const downward = placeDownward(containerRect, viewport, 700, 320);
+
+    expect(downward.height).toBe(52);
+    expect(downward.top + downward.height + PICKER_EDGE_PADDING).toBeLessThanOrEqual(viewport.height);
+  });
+
+  it("never returns a negative height if anchor is beyond the viewport bottom", () => {
+    const containerRect = { left: 0, width: 300 };
+    const viewport = { height: 768, width: 1024 };
+    const downward = placeDownward(containerRect, viewport, 800, 320);
+
+    expect(downward.height).toBe(0);
   });
 });
