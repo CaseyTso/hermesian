@@ -136,3 +136,70 @@ export function resolveDownwardPickerPlacement(
   );
   return { height, left, top, width };
 }
+
+export const CONTEXT_POPOVER_WIDTH = 260;
+export const CONTEXT_POPOVER_ARROW_PADDING = 16;
+
+export interface AnchoredDownwardPlacementInput {
+  anchorRect: { bottom: number; left: number; right: number };
+  containerRect: { left: number; width: number };
+  viewport: { height: number; width: number };
+  popoverWidth?: number;
+  popoverHeightMax: number;
+}
+
+export interface AnchoredDownwardPlacement {
+  arrowOffsetLeft: number;
+  height: number;
+  left: number;
+  top: number;
+  width: number;
+}
+
+/**
+ * Pure: computes an anchored downward popover box with custom width, centered
+ * under the anchor horizontally and clamped to the sidebar content box and
+ * viewport. Also computes the relative horizontal offset for a top pointing arrow.
+ */
+export function resolveAnchoredDownwardPlacement(
+  input: AnchoredDownwardPlacementInput,
+): AnchoredDownwardPlacement {
+  const { anchorRect, containerRect, viewport, popoverHeightMax } = input;
+  const desiredWidth = input.popoverWidth ?? CONTEXT_POPOVER_WIDTH;
+  const width = Math.max(
+    0,
+    Math.min(desiredWidth, containerRect.width - PICKER_EDGE_PADDING * 2),
+  );
+
+  const anchorCenter = (anchorRect.left + anchorRect.right) / 2;
+  const idealLeft = anchorCenter - width / 2;
+
+  const minLeft = Math.max(
+    PICKER_EDGE_PADDING,
+    containerRect.left + PICKER_EDGE_PADDING,
+  );
+  const maxLeft = Math.min(
+    viewport.width - width - PICKER_EDGE_PADDING,
+    containerRect.left + containerRect.width - width - PICKER_EDGE_PADDING,
+  );
+
+  const left = clamp(idealLeft, minLeft, maxLeft);
+  const top = anchorRect.bottom + PICKER_GAP_BELOW_ANCHOR;
+  const height = Math.min(
+    popoverHeightMax,
+    Math.max(0, viewport.height - top - PICKER_EDGE_PADDING),
+  );
+
+  const arrowPadding = Math.min(
+    CONTEXT_POPOVER_ARROW_PADDING,
+    width > 0 ? width / 2 : 0,
+  );
+  const arrowOffsetLeft = clamp(
+    anchorCenter - left,
+    arrowPadding,
+    Math.max(arrowPadding, width - arrowPadding),
+  );
+
+  return { arrowOffsetLeft, height, left, top, width };
+}
+

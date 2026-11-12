@@ -96,11 +96,27 @@ describe("createSidebarShell", () => {
       );
     });
 
-    it("renders the context gauge in header actions with progressbar role and 0% initial label", () => {
+    it("renders the context gauge in header actions with button role, aria-haspopup, tabindex, and 0% initial label", () => {
       const { shell } = setup();
-      expect(shell.contextGaugeEl.getAttribute("role")).toBe("progressbar");
+      expect(shell.contextGaugeEl.getAttribute("role")).toBe("button");
+      expect(shell.contextGaugeEl.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(shell.contextGaugeEl.getAttribute("tabindex")).toBe("0");
       expect(shell.contextGaugeEl.getAttribute("aria-label")).toBe("上下文: 0%");
       expect(shell.contextGaugeFillEl).not.toBeNull();
+    });
+
+    it("dispatches click when Enter or Space is pressed on contextGaugeEl", () => {
+      const { shell } = setup();
+      const clickSpy = vi.fn();
+      shell.contextGaugeEl.addEventListener("click", clickSpy);
+
+      const enterEvent = new KeyboardEvent("keydown", { key: "Enter", cancelable: true });
+      shell.contextGaugeEl.dispatchEvent(enterEvent);
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+
+      const spaceEvent = new KeyboardEvent("keydown", { key: " ", cancelable: true });
+      shell.contextGaugeEl.dispatchEvent(spaceEvent);
+      expect(clickSpy).toHaveBeenCalledTimes(2);
     });
 
     it("renders the conversation tabs container with tablist role", () => {

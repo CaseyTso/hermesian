@@ -317,6 +317,11 @@ from acp.schema import SetSessionConfigOptionResponse
 from acp.exceptions import RequestError
 
 cli.cmd_acp = lambda args: None
+
+async def fake_orig_set_config(self, config_id, session_id, value=None, **kwargs):
+    return SetSessionConfigOptionResponse(config_options=[])
+gateway_mod.GatewayACPAgent.set_config_option = fake_orig_set_config
+
 exec(json.loads(sys.stdin.read()), {"__name__": "adapter_test"})
 
 mutations_applied = []

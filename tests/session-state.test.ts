@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   acpModelSwitchId,
+  calculateRemainingTokens,
   contextUsageLevel,
   contextUsagePercent,
   formatContextUsage,
+  formatExactTokens,
+  isValidContextUsage,
   mergeModelCatalogs,
   modelSwitchId,
   normalizeAcpModelState,
@@ -362,5 +365,44 @@ describe("formatContextUsage", () => {
   it("does not invent usage for invalid data", () => {
     expect(formatContextUsage(undefined)).toBe("上下文: 0%");
     expect(formatContextUsage({ used: 10, size: 0 })).toBe("上下文: 0%");
+  });
+});
+
+describe("formatExactTokens", () => {
+  it("formats numbers with comma thousands separator", () => {
+    expect(formatExactTokens(116_234)).toBe("116,234");
+    expect(formatExactTokens(1_000_000)).toBe("1,000,000");
+    expect(formatExactTokens(0)).toBe("0");
+    expect(formatExactTokens(500)).toBe("500");
+  });
+
+  it("handles negative or non-finite numbers safely", () => {
+    expect(formatExactTokens(-1)).toBe("0");
+    expect(formatExactTokens(NaN)).toBe("0");
+    expect(formatExactTokens(Infinity)).toBe("0");
+  });
+});
+
+describe("calculateRemainingTokens", () => {
+  it("computes remaining tokens clamped to at least zero", () => {
+    expect(calculateRemainingTokens({ used: 116_234, size: 1_000_000 })).toBe(883_766);
+    expect(calculateRemainingTokens({ used: 500_000, size: 500_000 })).toBe(0);
+    expect(calculateRemainingTokens({ used: 600_000, size: 500_000 })).toBe(0);
+  });
+
+  it("returns zero for undefined or invalid usage", () => {
+    expect(calculateRemainingTokens(undefined)).toBe(0);
+    expect(calculateRemainingTokens({ used: -10, size: 100 })).toBe(0);
+    expect(calculateRemainingTokens({ used: 10, size: 0 })).toBe(0);
+  });
+});
+
+describe("isValidContextUsage", () => {
+  it("validates positive usage with size > 0", () => {
+    expect(isValidContextUsage({ used: 100, size: 1000 })).toBe(true);
+    expect(isValidContextUsage({ used: 0, size: 1000 })).toBe(true);
+    expect(isValidContextUsage(undefined)).toBe(false);
+    expect(isValidContextUsage({ used: -1, size: 1000 })).toBe(false);
+    expect(isValidContextUsage({ used: 10, size: 0 })).toBe(false);
   });
 });

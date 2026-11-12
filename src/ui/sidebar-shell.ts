@@ -46,10 +46,18 @@ export function createSidebarShell(
 
   const contextGaugeEl = headerActions.createDiv({
     attr: {
+      "aria-haspopup": "dialog",
       "aria-label": "上下文: 0%",
-      role: "progressbar",
+      role: "button",
+      tabindex: "0",
     },
     cls: "hermesian-context-gauge",
+  });
+  contextGaugeEl.addEventListener("keydown", (event: KeyboardEvent) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      contextGaugeEl.click();
+    }
   });
   contextGaugeEl.innerHTML = `
     <svg viewBox="0 0 20 20" class="hermesian-context-gauge-svg">

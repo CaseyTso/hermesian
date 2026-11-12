@@ -110,6 +110,10 @@ _Avoid_: Stacked headers, separate tab bar, navigation card
 A compact circular visual indicator in the Top Dock header actions row that reflects the active Conversation Tab's context window usage ratio. It uses an outline track with a proportional stroke fill colored by consumption tier (normal, warning at 70%, danger at 90%), and reveals a compact percentage and token breakdown on hover. It supersedes the in-composer horizontal context track.
 _Avoid_: Context bar, context progress line, context percentage label, bottom context meter
 
+**Context Gauge Popover**:
+The opaque Functional Layer popover opened by left-clicking the Context Ring Gauge, showing the active Conversation Tab's context usage details (percentage, exact used/total/remaining tokens) and offering a button that sends the native `/compress` command. It closes on Escape, outside click, re-clicking the gauge, or when the compress command is dispatched; it is never open at the same time as another Picker Popover.
+_Avoid_: Context menu, usage tooltip, settings dialog
+
 **Context Tray**:
 The upper composer region containing the active note reference capsule, the file and selection attachment actions on its right, and any active selection or image attachment bars.
 _Avoid_: Note bar, attachment bar, upload area

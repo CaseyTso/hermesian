@@ -83,6 +83,7 @@ import {
 import { HermesModelPickerPopover } from "./ui/model-picker-popover";
 import { HermesReasoningPickerPopover } from "./ui/reasoning-picker-popover";
 import { HermesTitlePopover } from "./ui/title-popover";
+import { HermesContextGaugePopover } from "./ui/context-gauge-popover";
 import {
   renderConversationTabsView,
   type ConversationTabsCallbacks,
@@ -359,6 +360,7 @@ export class HermesianSidebarView extends ItemView {
   private reasoningLabelEl!: HTMLElement;
   private reasoningPicker: HermesReasoningPickerPopover | null = null;
   private titlePopover: HermesTitlePopover | null = null;
+  private contextGaugePopover: HermesContextGaugePopover | null = null;
   private readonly tabFirstUserMessages = new Map<string, string>();
   private selectionBarEl!: HTMLElement;
   private sendButtonEl!: HTMLButtonElement;
@@ -472,6 +474,8 @@ export class HermesianSidebarView extends ItemView {
     this.reasoningPicker = null;
     this.titlePopover?.detach();
     this.titlePopover = null;
+    this.contextGaugePopover?.detach();
+    this.contextGaugePopover = null;
     this.startup?.close();
     this.startup = undefined;
     this.teardownDictationRecording();
@@ -738,6 +742,10 @@ export class HermesianSidebarView extends ItemView {
     setIcon(shell.root.querySelector(".hermesian-logo")!, HERMESIAN_ICON_ID);
     setIcon(shell.addConversationButtonEl, "square-plus");
     setIcon(shell.historyButtonEl, "history");
+
+    this.contextGaugeEl.addEventListener("click", () => {
+      this.toggleContextGaugePopover();
+    });
 
     this.appendSystemMessage(
       "Select text in a Markdown note, run 'Ask Hermes about selection', then describe the change you want.",
@@ -1292,6 +1300,8 @@ export class HermesianSidebarView extends ItemView {
     if (!workspace) {
       this.titlePopover?.detach();
       this.titlePopover = null;
+      this.contextGaugePopover?.detach();
+      this.contextGaugePopover = null;
       this.conversationTabsEl.empty();
       return;
     }
@@ -1346,6 +1356,8 @@ export class HermesianSidebarView extends ItemView {
     this.modelPicker = null;
     this.reasoningPicker?.detach();
     this.reasoningPicker = null;
+    this.contextGaugePopover?.detach();
+    this.contextGaugePopover = null;
 
     const tab = this.conversationWorkspace?.tabs.find((candidate) => candidate.id === tabId);
     if (!tab || this.isTabClosing(tabId)) {
@@ -1478,6 +1490,8 @@ export class HermesianSidebarView extends ItemView {
   private async addConversation(): Promise<void> {
     this.titlePopover?.detach();
     this.titlePopover = null;
+    this.contextGaugePopover?.detach();
+    this.contextGaugePopover = null;
     if (
       !this.controller ||
       !this.controlAvailability().add ||
@@ -1529,6 +1543,8 @@ export class HermesianSidebarView extends ItemView {
   private async closeConversation(tabId: string): Promise<void> {
     this.titlePopover?.detach();
     this.titlePopover = null;
+    this.contextGaugePopover?.detach();
+    this.contextGaugePopover = null;
     const workspace = this.conversationWorkspace;
     if (
       !this.controller ||
@@ -1598,6 +1614,8 @@ export class HermesianSidebarView extends ItemView {
   private async switchConversation(tabId: string): Promise<void> {
     this.titlePopover?.detach();
     this.titlePopover = null;
+    this.contextGaugePopover?.detach();
+    this.contextGaugePopover = null;
     if (
       !this.controller ||
       !this.controlAvailability().tabNavigation ||
@@ -1671,6 +1689,8 @@ export class HermesianSidebarView extends ItemView {
     this.titlePopover?.detach();
     this.titlePopover = null;
     this.reasoningPicker?.detach();
+    this.contextGaugePopover?.detach();
+    this.contextGaugePopover = null;
     const targetTabId = activeTab.id;
     let settled = false;
     this.modelPicker = new HermesModelPickerPopover({
@@ -1879,6 +1899,8 @@ export class HermesianSidebarView extends ItemView {
     this.titlePopover?.detach();
     this.titlePopover = null;
     this.modelPicker?.detach();
+    this.contextGaugePopover?.detach();
+    this.contextGaugePopover = null;
     const targetTabId = activeTab.id;
     const currentEffort =
       activeTab.reasoningEffort ?? this.plugin.getReasoningEffort(targetTabId);
@@ -1907,6 +1929,89 @@ export class HermesianSidebarView extends ItemView {
       },
     });
     this.reasoningPicker.open();
+  }
+
+  private canCompressContext(): { available: boolean; reason?: string } {
+    const activeTab = this.activeConversationTab();
+    if (!activeTab) {
+      return { available: false, reason: "未选择会话" };
+    }
+    if (!activeTab.sessionId) {
+      return { available: false, reason: "会话尚未建立连接" };
+    }
+    if (this.isStopping()) {
+      return { available: false, reason: "正在停止…" };
+    }
+    if (this.hasPendingPermission(activeTab.id)) {
+      return { available: false, reason: "等待权限确认…" };
+    }
+    if (this.isTabBusy(activeTab.id)) {
+      return { available: false, reason: "会话正忙，请稍候…" };
+    }
+    if (this.isTabLoading(activeTab.id)) {
+      return { available: false, reason: "会话连接中…" };
+    }
+    const availability = this.controlAvailability();
+    if (!availability.send) {
+      return { available: false, reason: "当前无法发送指令" };
+    }
+    return { available: true };
+  }
+
+  private async sendCompressCommand(): Promise<void> {
+    const activeTab = this.activeConversationTab();
+    if (!activeTab || !this.canCompressContext().available) {
+      return;
+    }
+    await this.sendMessage({
+      pending: {
+        tabId: activeTab.id,
+        draft: { token: null, text: "/compress", references: [] },
+        images: [],
+        includeCurrentDocumentContext: false,
+      },
+    });
+  }
+
+  private toggleContextGaugePopover(): void {
+    if (this.contextGaugePopover?.isOpen()) {
+      this.contextGaugePopover.detach();
+      this.contextGaugePopover = null;
+      return;
+    }
+    this.openContextGaugePopover();
+  }
+
+  private openContextGaugePopover(): void {
+    this.titlePopover?.detach();
+    this.titlePopover = null;
+    this.modelPicker?.detach();
+    this.modelPicker = null;
+    this.reasoningPicker?.detach();
+    this.reasoningPicker = null;
+    this.contextGaugePopover?.detach();
+    this.contextGaugePopover = null;
+
+    const state = this.activeSessionState();
+    const canCompress = this.canCompressContext();
+
+    this.contextGaugePopover = new HermesContextGaugePopover({
+      anchorEl: this.contextGaugeEl,
+      contextUsage: state.contextUsage,
+      canCompress,
+      getContainerRect: () => {
+        const rect = this.sidebarRootEl.getBoundingClientRect();
+        return { left: rect.left, width: rect.width };
+      },
+      iconRenderer: (element, icon) => setIcon(element, icon),
+      onCompress: async () => {
+        await this.sendCompressCommand();
+      },
+      onClose: () => {
+        this.contextGaugePopover = null;
+      },
+    });
+    this.contextGaugePopover.open();
   }
 
   async setConversationReasoningEffort(tabId: string, effort: ReasoningEffort): Promise<void> {
@@ -1994,6 +2099,9 @@ export class HermesianSidebarView extends ItemView {
       const offset = (circumference * (1 - percent / 100)).toFixed(2);
       this.contextGaugeFillEl.style.strokeDashoffset = `${offset}`;
       this.contextGaugeFillEl.style.opacity = percent === 0 ? "0" : "1";
+    }
+    if (this.contextGaugePopover?.isOpen()) {
+      this.contextGaugePopover.update(state.contextUsage, this.canCompressContext());
     }
     if (this.composerInlineDraftIsSlashCommand()) {
       this.renderSlashMenu(false);
@@ -2864,6 +2972,7 @@ export class HermesianSidebarView extends ItemView {
         this.modelPicker ||
         this.reasoningPicker ||
         this.titlePopover ||
+        this.contextGaugePopover ||
         this.permissions.size > 0
       ) {
         return;
@@ -3175,6 +3284,8 @@ export class HermesianSidebarView extends ItemView {
   async startNewSession(): Promise<void> {
     this.titlePopover?.detach();
     this.titlePopover = null;
+    this.contextGaugePopover?.detach();
+    this.contextGaugePopover = null;
     const activeTab = this.activeConversationTab();
     if (
       !this.controller ||

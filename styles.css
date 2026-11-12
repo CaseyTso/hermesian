@@ -182,14 +182,25 @@ body,
 
 .hermesian-context-gauge {
   align-items: center;
+  border-radius: var(--radius-s);
   box-sizing: border-box;
-  cursor: default;
+  cursor: pointer;
   display: inline-flex;
   flex: 0 0 auto;
   height: 30px;
   justify-content: center;
   position: relative;
+  transition: background var(--hermesian-motion);
   width: 30px;
+}
+
+.hermesian-context-gauge:hover {
+  background: var(--background-modifier-hover);
+}
+
+.hermesian-context-gauge:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--hermesian-accent);
+  outline: none;
 }
 
 .hermesian-context-gauge-svg {
@@ -2543,6 +2554,234 @@ body,
   font-size: var(--font-ui-smaller);
   line-height: 1.4;
   padding: 0 4px;
+}
+
+/* ── Context Gauge Popover ────────────────────────────────────────────── */
+
+.hermesian-context-popover {
+  align-items: stretch;
+  background: var(--background-primary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-card);
+  box-shadow: var(--hermesian-shadow-popover);
+  display: flex;
+  flex-direction: column;
+  font-size: var(--font-ui-small);
+  opacity: 0;
+  position: fixed;
+  transform: translateY(-4px) scale(0.96);
+  transition:
+    opacity 160ms var(--hermesian-motion-decel),
+    transform 160ms var(--hermesian-motion-spring);
+  z-index: 1000;
+}
+
+.hermesian-context-popover--open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.hermesian-reduced-motion .hermesian-context-popover {
+  transform: none;
+  transition: none;
+}
+
+.hermesian-context-popover-arrow {
+  background: var(--background-primary);
+  border-left: 1px solid var(--hermesian-border);
+  border-top: 1px solid var(--hermesian-border);
+  height: 10px;
+  pointer-events: none;
+  position: absolute;
+  top: -6px;
+  transform: translateX(-50%) rotate(45deg);
+  width: 10px;
+  z-index: 1;
+}
+
+.hermesian-context-popover-header {
+  align-items: center;
+  border-bottom: 1px solid var(--hermesian-border);
+  border-top-left-radius: var(--hermesian-radius-card);
+  border-top-right-radius: var(--hermesian-radius-card);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 8px 12px;
+}
+
+.hermesian-context-popover-heading {
+  color: var(--text-muted);
+  flex: 1 1 auto;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  min-width: 0;
+  text-transform: uppercase;
+}
+
+.hermesian-context-popover-body {
+  border-bottom-left-radius: var(--hermesian-radius-card);
+  border-bottom-right-radius: var(--hermesian-radius-card);
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.hermesian-context-popover-hero {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+
+.hermesian-context-popover-ring {
+  flex: 0 0 auto;
+  height: 40px;
+  position: relative;
+  width: 40px;
+}
+
+.hermesian-context-popover-ring-svg {
+  display: block;
+  height: 40px;
+  transform: rotate(-90deg);
+  width: 40px;
+}
+
+.hermesian-context-popover-track {
+  fill: none;
+  stroke: color-mix(in srgb, var(--text-muted) 20%, transparent);
+  stroke-width: 3.5;
+}
+
+.hermesian-context-popover-fill {
+  fill: none;
+  stroke: var(--hermesian-accent);
+  stroke-dasharray: 100.53;
+  stroke-dashoffset: 100.53;
+  stroke-linecap: round;
+  stroke-width: 3.5;
+  transition:
+    stroke-dashoffset var(--hermesian-motion),
+    stroke var(--hermesian-motion),
+    opacity var(--hermesian-motion);
+}
+
+.hermesian-context-popover[data-level="warning"] .hermesian-context-popover-fill {
+  stroke: var(--color-yellow);
+}
+
+.hermesian-context-popover[data-level="danger"] .hermesian-context-popover-fill {
+  stroke: var(--color-red);
+}
+
+.hermesian-context-popover-hero-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hermesian-context-popover-percentage {
+  color: var(--text-normal);
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.hermesian-context-popover-hero-label {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.hermesian-context-popover-stats {
+  background: var(--background-secondary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+}
+
+.hermesian-context-popover-stat-row {
+  align-items: center;
+  display: flex;
+  font-size: var(--font-ui-smaller);
+  justify-content: space-between;
+}
+
+.hermesian-context-popover-stat-label {
+  color: var(--text-muted);
+}
+
+.hermesian-context-popover-stat-value {
+  color: var(--text-normal);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.hermesian-context-popover-unit {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: normal;
+  margin-left: 2px;
+}
+
+.hermesian-context-popover-actions {
+  display: flex;
+  margin-top: 2px;
+}
+
+.hermesian-context-popover-compress-btn {
+  align-items: center;
+  background: var(--background-secondary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  color: var(--text-normal);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+  gap: 6px;
+  justify-content: center;
+  padding: 6px 12px;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
+  width: 100%;
+}
+
+.hermesian-context-popover-compress-btn:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--hermesian-accent-soft);
+  border-color: var(--hermesian-accent);
+  color: var(--hermesian-accent);
+}
+
+.hermesian-context-popover-compress-btn:disabled,
+.hermesian-context-popover-compress-btn[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.hermesian-context-popover-compress-icon {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.hermesian-context-popover-compress-icon svg {
+  height: 14px;
+  width: 14px;
+}
+
+.hermesian-context-popover-compress-label {
+  white-space: nowrap;
 }
 
 /* ── Settings: hidden models ─────────────────────────────────────────── */

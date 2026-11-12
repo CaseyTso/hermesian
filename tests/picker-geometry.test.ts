@@ -5,6 +5,7 @@ import {
   PICKER_GAP_ABOVE_ANCHOR,
   PICKER_GAP_BELOW_ANCHOR,
   PICKER_WIDTH_MAX,
+  resolveAnchoredDownwardPlacement,
   resolveDownwardPickerPlacement,
   resolvePickerPlacement,
 } from "../src/ui/picker-geometry";
@@ -187,5 +188,91 @@ describe("resolveDownwardPickerPlacement", () => {
     const downward = placeDownward(containerRect, viewport, 800, 320);
 
     expect(downward.height).toBe(0);
+  });
+});
+
+describe("resolveAnchoredDownwardPlacement (context gauge popover)", () => {
+  it("uses custom popover width and centers horizontally under the anchor when space permits", () => {
+    const containerRect = { left: 100, width: 400 };
+    const viewport = { height: 768, width: 1024 };
+    const anchorRect = { bottom: 40, left: 280, right: 320 }; // center = 300
+
+    const placement = resolveAnchoredDownwardPlacement({
+      anchorRect,
+      containerRect,
+      viewport,
+      popoverWidth: 260,
+      popoverHeightMax: 320,
+    });
+
+    expect(placement.width).toBe(260);
+    // idealLeft = 300 - 130 = 170.
+    // minLeft = 100 + 8 = 108. maxLeft = 100 + 400 - 260 - 8 = 232.
+    // 170 is in [108, 232].
+    expect(placement.left).toBe(170);
+    // arrow points to anchorCenter (300) -> 300 - 170 = 130
+    expect(placement.arrowOffsetLeft).toBe(130);
+    expect(placement.top).toBe(48);
+    expect(placement.height).toBe(320);
+  });
+
+  it("clamps to right boundary of sidebar and shifts arrow offset accordingly", () => {
+    const containerRect = { left: 100, width: 300 };
+    const viewport = { height: 768, width: 1024 };
+    // Anchor near the right edge of the sidebar
+    const anchorRect = { bottom: 40, left: 360, right: 390 }; // center = 375
+
+    const placement = resolveAnchoredDownwardPlacement({
+      anchorRect,
+      containerRect,
+      viewport,
+      popoverWidth: 260,
+      popoverHeightMax: 320,
+    });
+
+    expect(placement.width).toBe(260);
+    // maxLeft = 100 + 300 - 260 - 8 = 132.
+    expect(placement.left).toBe(132);
+    // arrowOffset = 375 - 132 = 243. Clamped to [16, 260 - 16 = 244].
+    expect(placement.arrowOffsetLeft).toBe(243);
+  });
+
+  it("clamps to left boundary of sidebar when anchor is near left edge", () => {
+    const containerRect = { left: 100, width: 300 };
+    const viewport = { height: 768, width: 1024 };
+    // Anchor near the left edge
+    const anchorRect = { bottom: 40, left: 105, right: 125 }; // center = 115
+
+    const placement = resolveAnchoredDownwardPlacement({
+      anchorRect,
+      containerRect,
+      viewport,
+      popoverWidth: 260,
+      popoverHeightMax: 320,
+    });
+
+    expect(placement.width).toBe(260);
+    // minLeft = 100 + 8 = 108.
+    expect(placement.left).toBe(108);
+    // arrowOffset = 115 - 108 = 7, clamped to min padding 16.
+    expect(placement.arrowOffsetLeft).toBe(16);
+  });
+
+  it("narrows width when sidebar is narrower than desired popover width", () => {
+    const containerRect = { left: 0, width: 200 };
+    const viewport = { height: 768, width: 1024 };
+    const anchorRect = { bottom: 40, left: 170, right: 190 }; // center = 180
+
+    const placement = resolveAnchoredDownwardPlacement({
+      anchorRect,
+      containerRect,
+      viewport,
+      popoverWidth: 260,
+      popoverHeightMax: 320,
+    });
+
+    // 200 - 16 = 184
+    expect(placement.width).toBe(184);
+    expect(placement.left + placement.width + 8).toBeLessThanOrEqual(200);
   });
 });

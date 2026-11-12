@@ -363,3 +363,26 @@ export function contextUsagePercent(usage: SessionContextUsage | undefined): num
   }
   return Math.max(0, Math.min(100, (usage.used / usage.size) * 100));
 }
+
+export function isValidContextUsage(
+  usage: SessionContextUsage | undefined,
+): usage is SessionContextUsage {
+  return validUsage(usage);
+}
+
+export function formatExactTokens(value: number): string {
+  if (!Number.isFinite(value) || value < 0) {
+    return "0";
+  }
+  return Math.round(value).toLocaleString("en-US");
+}
+
+export function calculateRemainingTokens(
+  usage: SessionContextUsage | undefined,
+): number {
+  if (!validUsage(usage)) {
+    return 0;
+  }
+  return Math.max(0, usage.size - usage.used);
+}
+
