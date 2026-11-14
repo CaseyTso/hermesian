@@ -93,9 +93,18 @@ describe("HermesTitlePopover", () => {
 
     const titleText = container.querySelector(".hermesian-title-popover-title-text");
     expect(titleText?.textContent).toBe("Test Title");
+
+    const displayRow = container.querySelector(".hermesian-title-popover-display")!;
+    const rowChildren = Array.from(displayRow.children);
+    expect(rowChildren.map((el) => el.className)).toEqual([
+      "hermesian-title-popover-title-trigger",
+      "clickable-icon hermesian-title-popover-icon-button hermesian-title-popover-edit-button",
+      "clickable-icon hermesian-title-popover-icon-button hermesian-title-popover-ai-button",
+    ]);
+    expect(container.querySelector(".hermesian-title-popover-ai-label")).toBeNull();
   });
 
-  it("switches to edit mode on clicking title display, and saves on Enter via onRename", async () => {
+  it("switches to edit mode on clicking title trigger or edit icon button, and saves on Enter via onRename", async () => {
     const onRename = vi.fn(async (title: string) => `Renamed: ${title}`);
     const { container } = openPopover({
       currentTitle: "Original Title",
@@ -103,21 +112,34 @@ describe("HermesTitlePopover", () => {
       onRename,
     });
 
-    const displayBtn = container.querySelector<HTMLButtonElement>(
+    const displayRow = container.querySelector<HTMLElement>(
       ".hermesian-title-popover-display",
+    )!;
+    const titleTriggerBtn = container.querySelector<HTMLButtonElement>(
+      ".hermesian-title-popover-title-trigger",
+    )!;
+    const editBtn = container.querySelector<HTMLButtonElement>(
+      ".hermesian-title-popover-edit-button",
     )!;
     const input = container.querySelector<HTMLInputElement>(
       ".hermesian-title-popover-input",
     )!;
 
-    expect(displayBtn.style.display).not.toBe("none");
+    expect(displayRow.style.display).not.toBe("none");
     expect(input.style.display).toBe("none");
 
-    displayBtn.click();
+    titleTriggerBtn.click();
 
-    expect(displayBtn.style.display).toBe("none");
+    expect(displayRow.style.display).toBe("none");
     expect(input.style.display).not.toBe("none");
     expect(input.value).toBe("Original Title");
+
+    // Escape returns to display row, then edit icon button also enters edit mode
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    expect(displayRow.style.display).not.toBe("none");
+    editBtn.click();
+    expect(displayRow.style.display).toBe("none");
+    expect(input.style.display).not.toBe("none");
 
     input.value = "New User Title";
     const enterEvent = new KeyboardEvent("keydown", {
@@ -132,7 +154,7 @@ describe("HermesTitlePopover", () => {
 
     expect(onRename).toHaveBeenCalledWith("New User Title");
     expect(input.style.display).toBe("none");
-    expect(displayBtn.style.display).not.toBe("none");
+    expect(displayRow.style.display).not.toBe("none");
     expect(container.querySelector(".hermesian-title-popover-title-text")?.textContent).toBe(
       "Renamed: New User Title",
     );
@@ -148,8 +170,8 @@ describe("HermesTitlePopover", () => {
       onRename,
     });
 
-    const displayBtn = container.querySelector<HTMLButtonElement>(
-      ".hermesian-title-popover-display",
+    const editBtn = container.querySelector<HTMLButtonElement>(
+      ".hermesian-title-popover-edit-button",
     )!;
     const input = container.querySelector<HTMLInputElement>(
       ".hermesian-title-popover-input",
@@ -158,7 +180,7 @@ describe("HermesTitlePopover", () => {
       ".hermesian-title-popover-error",
     )!;
 
-    displayBtn.click();
+    editBtn.click();
     input.value = "Failing Title";
 
     const enterEvent = new KeyboardEvent("keydown", {
@@ -187,8 +209,8 @@ describe("HermesTitlePopover", () => {
       onRename,
     });
 
-    const displayBtn = container.querySelector<HTMLButtonElement>(
-      ".hermesian-title-popover-display",
+    const titleTriggerBtn = container.querySelector<HTMLButtonElement>(
+      ".hermesian-title-popover-title-trigger",
     )!;
     const input = container.querySelector<HTMLInputElement>(
       ".hermesian-title-popover-input",
@@ -197,7 +219,7 @@ describe("HermesTitlePopover", () => {
       ".hermesian-title-popover-error",
     )!;
 
-    displayBtn.click();
+    titleTriggerBtn.click();
     input.value = "   ";
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
@@ -210,20 +232,23 @@ describe("HermesTitlePopover", () => {
   it("exits edit mode on Escape without detaching popover, and detaches on Escape when not editing", () => {
     const { container, onClose, popover } = openPopover({ currentTitle: "Some Title" });
 
-    const displayBtn = container.querySelector<HTMLButtonElement>(
+    const displayRow = container.querySelector<HTMLElement>(
       ".hermesian-title-popover-display",
+    )!;
+    const titleTriggerBtn = container.querySelector<HTMLButtonElement>(
+      ".hermesian-title-popover-title-trigger",
     )!;
     const input = container.querySelector<HTMLInputElement>(
       ".hermesian-title-popover-input",
     )!;
 
-    displayBtn.click();
+    titleTriggerBtn.click();
     expect(input.style.display).not.toBe("none");
 
     // Escape in input: exits edit mode
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
     expect(input.style.display).toBe("none");
-    expect(displayBtn.style.display).not.toBe("none");
+    expect(displayRow.style.display).not.toBe("none");
     expect(popover.isOpen()).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
 
@@ -275,7 +300,9 @@ describe("HermesTitlePopover", () => {
 
     aiBtn.click();
 
-    expect(container.querySelector(".hermesian-title-popover-ai-label")?.textContent).toBe("生成中…");
+    expect(aiBtn.classList.contains("is-loading")).toBe(true);
+    expect(aiBtn.getAttribute("aria-busy")).toBe("true");
+    expect(aiBtn.title).toBe("正在生成标题…");
 
     await Promise.resolve();
     await Promise.resolve();
@@ -284,11 +311,13 @@ describe("HermesTitlePopover", () => {
     expect(container.querySelector(".hermesian-title-popover-title-text")?.textContent).toBe(
       "AI Generated Smart Title",
     );
-    expect(container.querySelector(".hermesian-title-popover-ai-label")?.textContent).toBe("AI 生成标题");
-    const displayBtn = container.querySelector<HTMLButtonElement>(
-      ".hermesian-title-popover-display",
+    expect(aiBtn.classList.contains("is-loading")).toBe(false);
+    expect(aiBtn.hasAttribute("aria-busy")).toBe(false);
+    expect(aiBtn.title).toBe("使用 AI 生成会话标题");
+    const titleTriggerBtn = container.querySelector<HTMLButtonElement>(
+      ".hermesian-title-popover-title-trigger",
     )!;
-    expect(document.activeElement).toBe(displayBtn);
+    expect(document.activeElement).toBe(titleTriggerBtn);
   });
 
   it("dismisses popover on document Escape even when focus is on document.body, and exits edit mode first if editing", () => {
@@ -298,15 +327,18 @@ describe("HermesTitlePopover", () => {
     document.body.focus();
     expect(document.activeElement).toBe(document.body);
 
-    const displayBtn = container.querySelector<HTMLButtonElement>(
+    const displayRow = container.querySelector<HTMLElement>(
       ".hermesian-title-popover-display",
+    )!;
+    const titleTriggerBtn = container.querySelector<HTMLButtonElement>(
+      ".hermesian-title-popover-title-trigger",
     )!;
     const input = container.querySelector<HTMLInputElement>(
       ".hermesian-title-popover-input",
     )!;
 
     // Enter edit mode
-    displayBtn.click();
+    titleTriggerBtn.click();
     expect(input.style.display).not.toBe("none");
 
     // Press Escape on document while editing
@@ -319,7 +351,7 @@ describe("HermesTitlePopover", () => {
 
     // Exits edit mode without closing popover on the first Escape press
     expect(input.style.display).toBe("none");
-    expect(displayBtn.style.display).not.toBe("none");
+    expect(displayRow.style.display).not.toBe("none");
     expect(popover.isOpen()).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
 

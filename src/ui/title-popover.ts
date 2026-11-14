@@ -104,11 +104,12 @@ export class HermesTitlePopover {
 
   private readonly containerEl: HTMLElement;
   private readonly mainBodyEl: HTMLElement;
-  private readonly displayEl: HTMLButtonElement;
+  private readonly displayEl: HTMLElement;
+  private readonly titleTriggerEl: HTMLButtonElement;
   private readonly titleTextEl: HTMLElement;
+  private readonly editButtonEl: HTMLButtonElement;
   private readonly inputEl: HTMLInputElement;
   private readonly aiButtonEl: HTMLButtonElement;
-  private readonly aiButtonLabelEl: HTMLElement;
   private readonly aiModelButtonEl: HTMLButtonElement;
   private readonly aiModelLabelEl: HTMLElement;
   private readonly aiReasoningButtonEl: HTMLButtonElement;
@@ -226,24 +227,54 @@ export class HermesTitlePopover {
     this.mainBodyEl = document.createElement("div");
     this.mainBodyEl.className = "hermesian-title-popover-body";
 
-    // Display row (clickable to edit)
-    this.displayEl = document.createElement("button");
-    this.displayEl.type = "button";
+    // Display row (title trigger + edit icon button + AI generate icon button)
+    this.displayEl = document.createElement("div");
     this.displayEl.className = "hermesian-title-popover-display";
-    this.displayEl.title = "点击修改标题";
+
+    this.titleTriggerEl = document.createElement("button");
+    this.titleTriggerEl.type = "button";
+    this.titleTriggerEl.className = "hermesian-title-popover-title-trigger";
+    this.titleTriggerEl.title = "点击修改标题";
+    this.titleTriggerEl.setAttribute("aria-label", "点击修改标题");
 
     this.titleTextEl = document.createElement("span");
     this.titleTextEl.className = "hermesian-title-popover-title-text";
     this.titleTextEl.textContent = this.currentTitle;
+    this.titleTriggerEl.appendChild(this.titleTextEl);
+    this.titleTriggerEl.addEventListener("click", () => {
+      this.enterEditMode();
+    });
+
+    this.editButtonEl = document.createElement("button");
+    this.editButtonEl.type = "button";
+    this.editButtonEl.className =
+      "clickable-icon hermesian-title-popover-icon-button hermesian-title-popover-edit-button";
+    this.editButtonEl.title = "编辑标题";
+    this.editButtonEl.setAttribute("aria-label", "编辑标题");
 
     const pencilIconEl = document.createElement("span");
     pencilIconEl.className = "hermesian-title-popover-pencil-icon";
     this.iconRenderer(pencilIconEl, "pencil");
-
-    this.displayEl.append(this.titleTextEl, pencilIconEl);
-    this.displayEl.addEventListener("click", () => {
+    this.editButtonEl.appendChild(pencilIconEl);
+    this.editButtonEl.addEventListener("click", () => {
       this.enterEditMode();
     });
+
+    this.aiButtonEl = document.createElement("button");
+    this.aiButtonEl.type = "button";
+    this.aiButtonEl.className =
+      "clickable-icon hermesian-title-popover-icon-button hermesian-title-popover-ai-button";
+
+    const aiIconEl = document.createElement("span");
+    aiIconEl.className = "hermesian-title-popover-ai-icon";
+    this.iconRenderer(aiIconEl, "sparkles");
+
+    this.aiButtonEl.appendChild(aiIconEl);
+    this.aiButtonEl.addEventListener("click", () => {
+      void this.runAiGenerate();
+    });
+
+    this.displayEl.append(this.titleTriggerEl, this.editButtonEl, this.aiButtonEl);
 
     // Input row (revealed when editing)
     this.inputEl = document.createElement("input");
@@ -260,26 +291,9 @@ export class HermesTitlePopover {
       }
     });
 
-    // Actions row (AI generate button + model & reasoning selectors)
+    // Actions row (model & reasoning selectors)
     const actionsEl = document.createElement("div");
     actionsEl.className = "hermesian-title-popover-actions";
-
-    this.aiButtonEl = document.createElement("button");
-    this.aiButtonEl.type = "button";
-    this.aiButtonEl.className = "hermesian-title-popover-ai-button";
-
-    const aiIconEl = document.createElement("span");
-    aiIconEl.className = "hermesian-title-popover-ai-icon";
-    this.iconRenderer(aiIconEl, "sparkles");
-
-    this.aiButtonLabelEl = document.createElement("span");
-    this.aiButtonLabelEl.className = "hermesian-title-popover-ai-label";
-    this.aiButtonLabelEl.textContent = "AI 生成标题";
-
-    this.aiButtonEl.append(aiIconEl, this.aiButtonLabelEl);
-    this.aiButtonEl.addEventListener("click", () => {
-      void this.runAiGenerate();
-    });
 
     const aiControlsEl = document.createElement("div");
     aiControlsEl.className = "hermesian-title-popover-ai-controls";
@@ -316,7 +330,7 @@ export class HermesTitlePopover {
     });
 
     aiControlsEl.append(this.aiModelButtonEl, this.aiReasoningButtonEl);
-    actionsEl.append(this.aiButtonEl, aiControlsEl);
+    actionsEl.append(aiControlsEl);
 
     // Error alert
     this.errorEl = document.createElement("div");
@@ -389,7 +403,7 @@ export class HermesTitlePopover {
     document.addEventListener("pointerdown", this.onPointerDown, true);
     document.addEventListener("keydown", this.onDocumentKeyDown, true);
     window.addEventListener("resize", this.onResize);
-    this.displayEl.focus();
+    this.titleTriggerEl.focus();
   }
 
   detach(): void {
@@ -530,7 +544,7 @@ export class HermesTitlePopover {
     } else if (previousMode === "reasoning") {
       this.aiReasoningButtonEl.focus();
     } else {
-      this.displayEl.focus();
+      this.titleTriggerEl.focus();
     }
   }
 
@@ -832,7 +846,7 @@ export class HermesTitlePopover {
     this.inputEl.style.display = "none";
     this.displayEl.style.display = "";
     this.titleTextEl.textContent = this.currentTitle;
-    this.displayEl.focus();
+    this.titleTriggerEl.focus();
   }
 
   private showError(message: string): void {
@@ -847,28 +861,38 @@ export class HermesTitlePopover {
 
   private updateAiButtonState(): void {
     if (this.canGenerateAi) {
+      const tooltip = this.isBusy ? "正在生成标题…" : "使用 AI 生成会话标题";
       this.aiButtonEl.disabled = this.isBusy;
-      this.aiButtonEl.title = "使用 AI 生成会话标题";
+      this.aiButtonEl.title = tooltip;
+      this.aiButtonEl.setAttribute("aria-label", tooltip);
       this.aiButtonEl.removeAttribute("aria-disabled");
     } else {
       this.aiButtonEl.disabled = true;
       this.aiButtonEl.title = "发送消息后可用";
+      this.aiButtonEl.setAttribute("aria-label", "发送消息后可用");
       this.aiButtonEl.setAttribute("aria-disabled", "true");
     }
   }
 
   private setBusy(busy: boolean, isAi = false): void {
     this.isBusy = busy;
+    this.titleTriggerEl.disabled = busy;
+    this.editButtonEl.disabled = busy;
     this.inputEl.disabled = busy;
     this.aiModelButtonEl.disabled = busy;
     this.aiReasoningButtonEl.disabled = busy;
+    this.aiButtonEl.classList.toggle("is-loading", busy && isAi);
     if (busy) {
       if (isAi) {
-        this.aiButtonLabelEl.textContent = "生成中…";
+        this.aiButtonEl.setAttribute("aria-busy", "true");
+        this.aiButtonEl.title = "正在生成标题…";
+        this.aiButtonEl.setAttribute("aria-label", "正在生成标题…");
+      } else {
+        this.aiButtonEl.removeAttribute("aria-busy");
       }
       this.aiButtonEl.disabled = true;
     } else {
-      this.aiButtonLabelEl.textContent = "AI 生成标题";
+      this.aiButtonEl.removeAttribute("aria-busy");
       this.updateAiButtonState();
     }
   }
@@ -926,7 +950,7 @@ export class HermesTitlePopover {
     } finally {
       this.setBusy(false);
       if (this.isOpenFlag && !this.isEditing && this.mode === "main") {
-        this.displayEl.focus();
+        this.titleTriggerEl.focus();
       }
     }
   }
