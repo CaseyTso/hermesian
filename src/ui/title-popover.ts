@@ -1,7 +1,12 @@
-import type { HermesModelOption, ReasoningEffort } from "../types";
+import type {
+  HermesModelOption,
+  HermesProviderModels,
+  ReasoningEffort,
+} from "../types";
 import {
   filterVisibleModels,
   groupModelsByProvider,
+  normalizeProviderExpansionState,
   searchModels,
 } from "./model-picker-popover";
 import { resolveDownwardPickerPlacement } from "./picker-geometry";
@@ -16,10 +21,14 @@ export interface HermesTitlePopoverOptions {
   models?: HermesModelOption[];
   catalogLoading?: boolean;
   hiddenModelSwitchIds?: string[];
+  providerExpansion?: Record<string, boolean>;
   selectedAiModel?: HermesModelOption;
   selectedAiReasoningEffort?: ReasoningEffort;
   onSelectAiModel?: (model: HermesModelOption | undefined) => void | Promise<void>;
   onSelectAiReasoning?: (effort: ReasoningEffort) => void | Promise<void>;
+  onSaveProviderExpansion?: (
+    expansion: Record<string, boolean>,
+  ) => void | Promise<void>;
   onRename: (nextTitle: string) => Promise<string>;
   onGenerateAi: () => Promise<string>;
   onClose?: () => void;
@@ -78,6 +87,8 @@ export class HermesTitlePopover {
   private models: HermesModelOption[];
   private catalogLoading: boolean;
   private hiddenModelSwitchIds: string[];
+  private providerExpansion: Record<string, boolean>;
+  private readonly sessionProviderToggles = new Map<string, boolean>();
   private selectedAiModel: HermesModelOption | undefined;
   private selectedAiReasoningEffort: ReasoningEffort;
 
@@ -188,6 +199,9 @@ export class HermesTitlePopover {
     this.hiddenModelSwitchIds = options.hiddenModelSwitchIds
       ? [...options.hiddenModelSwitchIds]
       : [];
+    this.providerExpansion = normalizeProviderExpansionState(
+      options.providerExpansion,
+    );
     this.selectedAiModel = options.selectedAiModel;
     this.selectedAiReasoningEffort = options.selectedAiReasoningEffort ?? "none";
     this.iconRenderer = options.iconRenderer ?? (() => {});
@@ -567,25 +581,66 @@ export class HermesTitlePopover {
       this.modelQuery,
     );
 
-    for (const group of groupModelsByProvider(visibleModels)) {
+    const groups = groupModelsByProvider(visibleModels);
+    for (const group of groups) {
+      const isExpanded = this.isProviderGroupExpanded(group, groups.length);
       const groupEl = document.createElement("div");
-      groupEl.className = "hermesian-model-group";
-      const labelEl = document.createElement("div");
+      groupEl.className = isExpanded
+        ? "hermesian-model-group"
+        : "hermesian-model-group is-collapsed";
+      groupEl.dataset.providerId = group.id;
+
+      const headerBtn = document.createElement("button");
+      headerBtn.type = "button";
+      headerBtn.className = "hermesian-model-group-header";
+      headerBtn.setAttribute("aria-expanded", String(isExpanded));
+
+      const chevronEl = document.createElement("span");
+      chevronEl.className = "hermesian-model-group-chevron";
+      chevronEl.setAttribute("aria-hidden", "true");
+      this.iconRenderer(chevronEl, isExpanded ? "chevron-down" : "chevron-right");
+
+      const labelEl = document.createElement("span");
       labelEl.className = "hermesian-model-group-label";
       labelEl.textContent = group.label;
-      groupEl.appendChild(labelEl);
+
+      const countEl = document.createElement("span");
+      countEl.className = "hermesian-model-group-count";
+      countEl.textContent = String(group.models.length);
+
+      headerBtn.append(chevronEl, labelEl, countEl);
+      headerBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const nextExpanded = !isExpanded;
+        this.sessionProviderToggles.set(group.id, nextExpanded);
+        this.providerExpansion = {
+          ...this.providerExpansion,
+          [group.id]: nextExpanded,
+        };
+        void Promise.resolve(
+          this.options.onSaveProviderExpansion?.({ ...this.providerExpansion }),
+        ).catch(() => {});
+        this.renderModelPickerList();
+      });
+      groupEl.appendChild(headerBtn);
+
+      const itemsEl = document.createElement("div");
+      itemsEl.className = "hermesian-model-group-items";
 
       for (const model of group.models) {
         const optionEl = this.createPickerOptionRow({
           title: model.name,
-          subtitle: model.description
-            ? `${model.providerName} · ${model.description}`
-            : model.providerName,
+          subtitle: model.description,
           selected: model.switchId === this.selectedAiModel?.switchId,
+          registerKeyboardAction: isExpanded,
+          tooltip: model.description
+            ? `${model.providerName} · ${model.modelId} — ${model.description}`
+            : `${model.providerName} · ${model.modelId}`,
           onChoose: () => this.chooseAiModel(model),
         });
-        groupEl.appendChild(optionEl);
+        itemsEl.appendChild(optionEl);
       }
+      groupEl.appendChild(itemsEl);
       fragment.appendChild(groupEl);
     }
 
@@ -639,27 +694,62 @@ export class HermesTitlePopover {
     this.setActivePickerIndex(selectedIdx >= 0 ? selectedIdx : 0);
   }
 
+  private isProviderGroupExpanded(
+    group: HermesProviderModels,
+    totalGroups: number,
+  ): boolean {
+    if (this.modelQuery.trim()) {
+      return true;
+    }
+    if (this.sessionProviderToggles.has(group.id)) {
+      return this.sessionProviderToggles.get(group.id)!;
+    }
+    if (
+      this.selectedAiModel?.switchId &&
+      group.models.some((model) => model.switchId === this.selectedAiModel?.switchId)
+    ) {
+      return true;
+    }
+    if (this.providerExpansion[group.id] !== undefined) {
+      return this.providerExpansion[group.id];
+    }
+    if (totalGroups <= 1) {
+      return true;
+    }
+    return false;
+  }
+
   private createPickerOptionRow(params: {
     title: string;
     subtitle: string;
     selected: boolean;
+    registerKeyboardAction?: boolean;
+    tooltip?: string;
     onChoose: () => void;
   }): HTMLElement {
     const optionEl = document.createElement("div");
-    optionEl.className = "hermesian-title-popover-picker-option";
+    optionEl.className = params.selected
+      ? "hermesian-title-popover-picker-option is-selected"
+      : "hermesian-title-popover-picker-option";
     optionEl.setAttribute("role", "option");
     optionEl.setAttribute("aria-selected", String(params.selected));
     optionEl.tabIndex = -1;
+    if (params.tooltip) {
+      optionEl.title = params.tooltip;
+    }
 
     const copyEl = document.createElement("div");
     copyEl.className = "hermesian-title-popover-picker-option-copy";
     const titleEl = document.createElement("div");
     titleEl.className = "hermesian-title-popover-picker-option-name";
     titleEl.textContent = params.title;
-    const subtitleEl = document.createElement("div");
-    subtitleEl.className = "hermesian-title-popover-picker-option-desc";
-    subtitleEl.textContent = params.subtitle;
-    copyEl.append(titleEl, subtitleEl);
+    copyEl.appendChild(titleEl);
+    if (params.subtitle) {
+      const subtitleEl = document.createElement("div");
+      subtitleEl.className = "hermesian-title-popover-picker-option-desc";
+      subtitleEl.textContent = params.subtitle;
+      copyEl.appendChild(subtitleEl);
+    }
     optionEl.appendChild(copyEl);
 
     if (params.selected) {
@@ -670,14 +760,16 @@ export class HermesTitlePopover {
       optionEl.appendChild(checkEl);
     }
 
-    const index = this.renderedPickerActions.length;
-    optionEl.addEventListener("pointerenter", () => {
-      this.setActivePickerIndex(index);
-    });
+    if (params.registerKeyboardAction !== false) {
+      const index = this.renderedPickerActions.length;
+      optionEl.addEventListener("pointerenter", () => {
+        this.setActivePickerIndex(index);
+      });
+      this.renderedPickerActions.push({ el: optionEl, onChoose: params.onChoose });
+    }
     optionEl.addEventListener("click", () => {
       params.onChoose();
     });
-    this.renderedPickerActions.push({ el: optionEl, onChoose: params.onChoose });
     return optionEl;
   }
 

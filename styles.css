@@ -2216,8 +2216,7 @@ body,
   transition: none;
 }
 
-.hermesian-model-popover-header,
-.hermesian-model-popover-manage-header {
+.hermesian-model-popover-header {
   align-items: center;
   border-bottom: 1px solid var(--hermesian-border);
   display: flex;
@@ -2227,7 +2226,19 @@ body,
 }
 
 .hermesian-model-popover-manage-header {
+  border-bottom: 1px solid var(--hermesian-border);
   display: none;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+}
+
+.hermesian-model-popover-manage-top {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  width: 100%;
 }
 
 .hermesian-model-popover.is-manage .hermesian-model-popover-header {
@@ -2242,11 +2253,17 @@ body,
   background: var(--background-secondary);
   border: 1px solid var(--hermesian-border);
   border-radius: var(--hermesian-radius-lg);
+  box-sizing: border-box;
   color: var(--text-normal);
   flex: 1 1 auto;
   font-size: var(--font-ui-small);
   min-width: 0;
   padding: 5px 8px;
+}
+
+.hermesian-model-popover-manage-search {
+  flex: 0 0 auto;
+  width: 100%;
 }
 
 .hermesian-model-popover-search::placeholder {
@@ -2255,14 +2272,35 @@ body,
 
 .hermesian-model-popover-search:focus-visible,
 .hermesian-model-popover .clickable-icon:focus-visible,
-.hermesian-model-popover-empty-action:focus-visible {
+.hermesian-model-popover-empty-action:focus-visible,
+.hermesian-model-group-header:focus-visible,
+.hermesian-model-group-toggle:focus-visible,
+.hermesian-model-manage-bulk-btn:focus-visible {
   box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--hermesian-accent);
   outline: none;
 }
 
 .hermesian-model-popover-manage-title {
   color: var(--text-normal);
+  flex: 1 1 auto;
   font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermesian-model-popover-manage-summary {
+  background: var(--background-secondary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-pill);
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.3;
+  padding: 1px 8px;
 }
 
 .hermesian-model-popover-body {
@@ -2273,16 +2311,97 @@ body,
 
 .hermesian-model-popover-list,
 .hermesian-model-popover-manage-list {
-  padding: 4px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0 8px;
+}
+
+.hermesian-model-group {
+  border-radius: var(--hermesian-radius-sm);
+  margin: 0 6px;
+}
+
+.hermesian-model-group-header,
+.hermesian-model-group-toggle {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-radius: var(--hermesian-radius-sm);
+  box-shadow: none;
+  color: var(--text-normal);
+  cursor: pointer;
+  display: flex;
+  gap: 6px;
+  height: auto;
+  min-height: 28px;
+  padding: 4px 8px;
+  text-align: left;
+  transition: background-color 120ms ease;
+  width: 100%;
+}
+
+.hermesian-model-group-header:hover,
+.hermesian-model-group-toggle:hover {
+  background: var(--background-modifier-hover);
+}
+
+.hermesian-model-group-chevron {
+  align-items: center;
+  color: var(--text-muted);
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 14px;
+  justify-content: center;
+  width: 14px;
+}
+
+.hermesian-model-group-chevron svg {
+  height: 13px;
+  width: 13px;
 }
 
 .hermesian-model-group-label {
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  flex: 1 1 auto;
+  font-size: var(--font-ui-small);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 8px 12px 4px;
-  text-transform: uppercase;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermesian-model-group-count {
+  background: var(--background-secondary);
+  border: 1px solid color-mix(in srgb, var(--hermesian-border) 80%, transparent);
+  border-radius: var(--hermesian-radius-pill);
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  line-height: 1.3;
+  padding: 1px 7px;
+}
+
+.hermesian-model-group-count.is-zero {
+  color: var(--text-faint);
+  opacity: 0.65;
+}
+
+.hermesian-model-group-items {
+  border-left: 1px solid color-mix(in srgb, var(--hermesian-border) 85%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 4px 14px;
+  padding-left: 6px;
+}
+
+.hermesian-model-group.is-collapsed .hermesian-model-group-items {
+  display: none;
 }
 
 .hermesian-model-option {
@@ -2290,9 +2409,20 @@ body,
   border-radius: var(--hermesian-radius-sm);
   cursor: pointer;
   display: flex;
-  gap: 10px;
-  margin: 0 6px;
-  padding: 6px 10px;
+  gap: 8px;
+  margin: 0;
+  min-height: 28px;
+  padding: 4px 8px;
+  transition: background-color 100ms ease;
+}
+
+.hermesian-model-option.is-selected {
+  background: color-mix(in srgb, var(--hermesian-accent-soft) 65%, transparent);
+}
+
+.hermesian-model-option.is-selected .hermesian-model-option-name {
+  color: var(--hermesian-accent);
+  font-weight: 600;
 }
 
 .hermesian-model-option:hover,
@@ -2313,15 +2443,17 @@ body,
 .hermesian-model-option-name,
 .hermesian-model-manage-name {
   color: var(--text-normal);
+  font-family: var(--font-monospace, var(--font-interface));
+  font-size: var(--font-ui-smaller);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.hermesian-model-option-provider,
-.hermesian-model-manage-provider {
+.hermesian-model-option-desc,
+.hermesian-model-manage-desc {
   color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2336,16 +2468,6 @@ body,
 .hermesian-model-option-check svg {
   height: 14px;
   width: 14px;
-}
-
-.hermesian-model-option-current {
-  background: var(--hermesian-accent-soft);
-  border-radius: var(--hermesian-radius-pill);
-  color: var(--hermesian-accent);
-  flex: 0 0 auto;
-  font-size: var(--font-ui-smaller);
-  font-weight: 600;
-  padding: 1px 8px;
 }
 
 .hermesian-model-popover-empty {
@@ -2374,14 +2496,64 @@ body,
   background: var(--hermesian-accent-soft-hover);
 }
 
+.hermesian-model-manage-group-header {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  padding-right: 2px;
+}
+
+.hermesian-model-manage-group-header .hermesian-model-group-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.hermesian-model-manage-group-actions {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 3px;
+}
+
+.hermesian-model-manage-bulk-btn {
+  appearance: none;
+  background: var(--background-secondary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-sm);
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  height: 22px;
+  line-height: 1;
+  padding: 0 7px;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.hermesian-model-manage-bulk-btn:hover:not(:disabled) {
+  background: var(--hermesian-accent-soft);
+  border-color: color-mix(in srgb, var(--hermesian-accent) 30%, transparent);
+  color: var(--hermesian-accent);
+}
+
+.hermesian-model-manage-bulk-btn:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
 .hermesian-model-manage-row {
   align-items: center;
   border-radius: var(--hermesian-radius-sm);
   cursor: pointer;
   display: flex;
   gap: 8px;
-  margin: 0 6px;
-  padding: 5px 10px;
+  margin: 0;
+  min-height: 26px;
+  padding: 3px 8px;
 }
 
 .hermesian-model-manage-row:hover {
@@ -3135,43 +3307,36 @@ body,
 /* ── Settings: hidden models ─────────────────────────────────────────── */
 
 .hermesian-hidden-models {
-  margin-bottom: 12px;
-  padding-left: 12px;
+  background: var(--background-secondary-alt, var(--background-secondary));
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--hermesian-radius-card, 8px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 10px;
 }
 
-.hermesian-hidden-provider {
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  margin-top: 10px;
-  text-transform: uppercase;
-}
-
-.hermesian-hidden-model-row {
+.hermesian-hidden-models-toolbar {
   align-items: center;
   display: flex;
   gap: 8px;
-  padding: 3px 0;
 }
 
-.hermesian-hidden-model-row input[type="checkbox"] {
-  accent-color: var(--interactive-accent);
-  margin: 0;
+.hermesian-hidden-models-search {
+  flex: 1 1 auto;
 }
 
-.hermesian-hidden-model-name {
-  color: var(--text-normal);
-}
-
-.hermesian-hidden-model-provider {
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+.hermesian-hidden-models-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .hermesian-hidden-models-error {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  padding: 6px 4px;
 }
 
 /* ── Diagram Surface (Mermaid / pele) ────────────────────────────────── */

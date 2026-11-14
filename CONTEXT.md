@@ -162,6 +162,10 @@ _Avoid_: Custom glass popover, global modal override, themed host chrome
 An opaque, high-contrast Functional Layer popover that lists selectable options and floats above conversation content. Unlike Theme-Adaptive Glass, it uses a solid background so list text never bleeds through against the content beneath it. Currently the model picker, thinking-depth picker, slash menu, and file picker menu.
 _Avoid_: Glass picker, frosted popover, transparent dropdown, blurred selector
 
+**Provider Group**:
+A collapsible provider section inside a model Picker Popover that groups a provider's models under a single header with a model-count badge, keeping individual model rows free of redundant provider labels.
+_Avoid_: Static group label, flat model list, per-row provider subtitle
+
 **Safety Surface**:
 An opaque, high-contrast Content Layer surface for pending permission requests and their diffs.
 _Avoid_: Glass permission card, decorative card, subdued approval

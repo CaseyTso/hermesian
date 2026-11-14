@@ -1382,6 +1382,7 @@ export class HermesianSidebarView extends ItemView {
       models: availableModels,
       catalogLoading: sessionCatalogLoading || this.titleCatalogLoading,
       hiddenModelSwitchIds: this.plugin.settings.hiddenModelSwitchIds,
+      providerExpansion: this.plugin.settings.modelProviderExpansion,
       selectedAiModel: this.getTitleAiModelPreference(),
       selectedAiReasoningEffort: this.getTitleAiReasoningPreference(),
       getContainerRect: () => {
@@ -1391,6 +1392,8 @@ export class HermesianSidebarView extends ItemView {
       iconRenderer: (element, icon) => setIcon(element, icon),
       onSelectAiModel: async (model) => await this.saveTitleAiModelPreference(model),
       onSelectAiReasoning: async (effort) => await this.saveTitleAiReasoningPreference(effort),
+      onSaveProviderExpansion: (expansion) =>
+        this.plugin.saveModelProviderExpansion?.(expansion),
       onRename: async (nextTitle) => await this.renameConversationTitle(tabId, nextTitle),
       onGenerateAi: async () => await this.generateAiConversationTitle(tabId),
       onClose: () => {
@@ -1809,6 +1812,7 @@ export class HermesianSidebarView extends ItemView {
       anchorEl: this.modelButtonEl,
       models: state.models,
       hiddenSwitchIds: this.plugin.settings.hiddenModelSwitchIds,
+      providerExpansion: this.plugin.settings.modelProviderExpansion,
       currentSwitchId: state.currentModel?.switchId,
       iconRenderer: (element, icon) => setIcon(element, icon),
       // The popover width follows the sidebar content box, not the trigger
@@ -1830,6 +1834,8 @@ export class HermesianSidebarView extends ItemView {
         this.modelPicker = null;
       },
       onSaveHidden: (switchIds) => this.plugin.saveHiddenModelSwitchIds(switchIds),
+      onSaveProviderExpansion: (expansion) =>
+        this.plugin.saveModelProviderExpansion?.(expansion),
     });
     this.modelPicker.open();
   }

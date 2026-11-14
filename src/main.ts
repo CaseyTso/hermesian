@@ -41,7 +41,10 @@ import {
 } from "./settings";
 import { TabClientRegistry } from "./tab-client-registry";
 import { ModelSaveCoordinator } from "./model-save-coordinator";
-import { normalizeHiddenSwitchIds } from "./ui/model-picker-popover";
+import {
+  normalizeHiddenSwitchIds,
+  normalizeProviderExpansionState,
+} from "./ui/model-picker-popover";
 import { assignAndPersistWithRollback } from "./workspace-persistence";
 import {
   HERMESIAN_VIEW_TYPE,
@@ -412,6 +415,14 @@ export default class HermesianPlugin extends Plugin {
     return this.hiddenModelSaveCoordinator.save(switchIds);
   }
 
+  async saveModelProviderExpansion(
+    expansion: Record<string, boolean>,
+  ): Promise<void> {
+    this.settings.modelProviderExpansion =
+      normalizeProviderExpansionState(expansion);
+    await this.savePluginSettings();
+  }
+
   async saveTitleGenerationPreferences(next: {
     model?: HermesModelOption;
     reasoningEffort: ReasoningEffort;
@@ -682,6 +693,9 @@ export default class HermesianPlugin extends Plugin {
       profile:
         typeof saved.profile === "string" ? saved.profile : DEFAULT_SETTINGS.profile,
       hiddenModelSwitchIds: normalizeHiddenSwitchIds(saved.hiddenModelSwitchIds),
+      modelProviderExpansion: normalizeProviderExpansionState(
+        saved.modelProviderExpansion,
+      ),
       reasoningEffort:
         typeof saved.reasoningEffort === "string" &&
         isReasoningEffort(saved.reasoningEffort)

@@ -388,20 +388,48 @@ describe("HermesModelPickerPopover", () => {
       expect(labels).toEqual(["OpenAI", "Anthropic"]);
       const rows = container.querySelectorAll(".hermesian-model-option");
       expect(rows).toHaveLength(3);
-      const currentRow = container.querySelector(".hermesian-model-option-current");
-      expect(currentRow?.textContent).toContain("Current");
-      expect(container.querySelector(".hermesian-model-option-check")).toBeTruthy();
+      const selectedRow = container.querySelector(".hermesian-model-option.is-selected");
+      expect(selectedRow?.getAttribute("aria-selected")).toBe("true");
+      expect(selectedRow?.querySelector(".hermesian-model-option-check")).toBeTruthy();
+      expect(container.querySelector(".hermesian-model-option-current")).toBeNull();
     });
 
-    it("keeps the current model visible with a Current badge even when hidden", async () => {
+    it("keeps the current model visible and marked as selected even when hidden", async () => {
       const { container } = openPopover({ hiddenSwitchIds: ["openai:gpt-4o"] });
       await sleep(30);
       const rows = container.querySelectorAll(".hermesian-model-option");
       expect(rows).toHaveLength(3);
-      const currentRow = container
-        .querySelector(".hermesian-model-option-current")
-        ?.parentElement as HTMLElement;
+      const currentRow = container.querySelector(
+        ".hermesian-model-option.is-selected",
+      ) as HTMLElement;
+      expect(currentRow).toBeTruthy();
       expect(currentRow.textContent).toContain("GPT-4o");
+      expect(currentRow.querySelector(".hermesian-model-option-check")).toBeTruthy();
+    });
+
+    it("expands the current model's provider by default, collapses other providers, and persists manual toggles", async () => {
+      const onSaveProviderExpansion = vi.fn();
+      const { container } = openPopover({ onSaveProviderExpansion });
+      await sleep(30);
+      const groups = [...container.querySelectorAll<HTMLElement>(".hermesian-model-group")];
+      expect(groups).toHaveLength(2);
+      // OpenAI owns the current model (openai:gpt-4o), so it is expanded by default
+      expect(groups[0].dataset.providerId).toBe("openai");
+      expect(groups[0].classList.contains("is-collapsed")).toBe(false);
+      // Anthropic is collapsed by default on first open
+      expect(groups[1].dataset.providerId).toBe("anthropic");
+      expect(groups[1].classList.contains("is-collapsed")).toBe(true);
+
+      // Clicking Anthropic's group header expands it and saves expansion state
+      const anthropicHeader = groups[1].querySelector<HTMLButtonElement>(
+        ".hermesian-model-group-header",
+      )!;
+      anthropicHeader.click();
+      const updatedGroups = [
+        ...container.querySelectorAll<HTMLElement>(".hermesian-model-group"),
+      ];
+      expect(updatedGroups[1].classList.contains("is-collapsed")).toBe(false);
+      expect(onSaveProviderExpansion).toHaveBeenCalledWith({ anthropic: true });
     });
 
     it("filters the list by search across provider, model, id and description", async () => {
@@ -511,13 +539,67 @@ describe("HermesModelPickerPopover", () => {
       // manage mode still shows every model, so hidden models can always be restored
       expect(container.querySelectorAll(".hermesian-model-manage-row")).toHaveLength(3);
       // back to select: gpt-4o is hidden but is the current model so it stays
-      // visible with a Current badge; gpt-4o-mini stays hidden
+      // visible and selected; gpt-4o-mini stays hidden
       (container.querySelector(".hermesian-model-popover-back-button") as HTMLElement).click();
       expect(container.classList.contains("is-manage")).toBe(false);
       const backRows = container.querySelectorAll(".hermesian-model-option");
       expect(backRows).toHaveLength(2);
       expect(backRows[0].textContent).toContain("GPT-4o");
-      expect(backRows[0].querySelector(".hermesian-model-option-current")).toBeTruthy();
+      expect(backRows[0].classList.contains("is-selected")).toBe(true);
+      expect(backRows[0].querySelector(".hermesian-model-option-check")).toBeTruthy();
+    });
+
+    it("supports per-provider All / None bulk actions and search filter in manage mode", async () => {
+      const { container, onSaveHidden } = openPopover({
+        hiddenSwitchIds: [],
+      });
+      await sleep(30);
+      (container.querySelector(".hermesian-model-popover-manage-button") as HTMLElement).click();
+
+      const openaiGroup = container.querySelector<HTMLElement>(
+        ".hermesian-model-manage-group[data-provider-id='openai']",
+      )!;
+      const noneBtn = openaiGroup.querySelector<HTMLButtonElement>(
+        "[data-bulk-action='none']",
+      )!;
+      const allBtn = openaiGroup.querySelector<HTMLButtonElement>(
+        "[data-bulk-action='all']",
+      )!;
+      expect(allBtn.disabled).toBe(true);
+      expect(noneBtn.disabled).toBe(false);
+
+      // Hide all OpenAI models in one click
+      noneBtn.click();
+      await sleep(0);
+      expect(onSaveHidden).toHaveBeenCalledWith(
+        expect.arrayContaining(["openai:gpt-4o", "openai:gpt-4o-mini"]),
+      );
+      expect(
+        openaiGroup.querySelector(".hermesian-model-group-count")?.textContent,
+      ).toBe("0/2");
+      expect(noneBtn.disabled).toBe(true);
+      expect(allBtn.disabled).toBe(false);
+
+      // Re-enable all OpenAI models in one click
+      allBtn.click();
+      await sleep(0);
+      expect(onSaveHidden).toHaveBeenLastCalledWith([]);
+      expect(
+        openaiGroup.querySelector(".hermesian-model-group-count")?.textContent,
+      ).toBe("2/2");
+
+      // Filter in manage mode
+      const manageSearch = container.querySelector<HTMLInputElement>(
+        ".hermesian-model-popover-manage-search",
+      )!;
+      manageSearch.value = "claude";
+      manageSearch.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(
+        container.querySelectorAll(".hermesian-model-manage-group"),
+      ).toHaveLength(1);
+      expect(
+        container.querySelectorAll(".hermesian-model-manage-row"),
+      ).toHaveLength(1);
     });
 
     it("restores a hidden model from manage mode immediately", async () => {
