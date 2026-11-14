@@ -146,6 +146,8 @@ const OPEN_ANIMATION_DELAY_MS = 20;
 export class HermesModelPickerPopover {
   private readonly options: HermesModelPickerOptions;
   private readonly containerEl: HTMLElement;
+  private readonly headerEl: HTMLElement;
+  private readonly manageHeaderEl: HTMLElement;
   private readonly bodyEl: HTMLElement;
   private readonly searchInputEl: HTMLInputElement;
   private readonly manageSearchInputEl: HTMLInputElement;
@@ -251,8 +253,8 @@ export class HermesModelPickerPopover {
     this.containerEl.setAttribute("role", "dialog");
     this.containerEl.setAttribute("aria-label", "Select Hermes model");
 
-    const headerEl = document.createElement("div");
-    headerEl.className = "hermesian-model-popover-header";
+    this.headerEl = document.createElement("div");
+    this.headerEl.className = "hermesian-model-popover-header";
 
     this.searchInputEl = document.createElement("input");
     this.searchInputEl.className = "hermesian-model-popover-search";
@@ -281,10 +283,11 @@ export class HermesModelPickerPopover {
     this.iconRenderer(closeIconEl, "x");
     closeButtonEl.addEventListener("click", () => this.detach());
 
-    headerEl.append(this.searchInputEl, manageButtonEl, closeButtonEl);
+    this.headerEl.append(this.searchInputEl, manageButtonEl, closeButtonEl);
 
-    const manageHeaderEl = document.createElement("div");
-    manageHeaderEl.className = "hermesian-model-popover-manage-header";
+    this.manageHeaderEl = document.createElement("div");
+    this.manageHeaderEl.className = "hermesian-model-popover-manage-header";
+    this.manageHeaderEl.style.display = "none";
 
     const manageTopRowEl = document.createElement("div");
     manageTopRowEl.className = "hermesian-model-popover-manage-top";
@@ -315,7 +318,7 @@ export class HermesModelPickerPopover {
     this.manageSearchInputEl.setAttribute("aria-label", "Filter models in manage mode");
     this.manageSearchInputEl.addEventListener("input", this.onManageSearchInput);
 
-    manageHeaderEl.append(manageTopRowEl, this.manageSearchInputEl);
+    this.manageHeaderEl.append(manageTopRowEl, this.manageSearchInputEl);
 
     this.bodyEl = document.createElement("div");
     this.bodyEl.className = "hermesian-model-popover-body";
@@ -327,9 +330,11 @@ export class HermesModelPickerPopover {
 
     this.manageListEl = document.createElement("div");
     this.manageListEl.className = "hermesian-model-popover-manage-list";
+    this.manageListEl.style.display = "none";
 
     this.emptyEl = document.createElement("div");
     this.emptyEl.className = "hermesian-model-popover-empty";
+    this.emptyEl.style.display = "none";
     this.emptyCopyEl = document.createElement("div");
     this.emptyCopyEl.className = "hermesian-model-popover-empty-copy";
     const emptyActionEl = document.createElement("button");
@@ -340,7 +345,7 @@ export class HermesModelPickerPopover {
     this.emptyEl.append(this.emptyCopyEl, emptyActionEl);
 
     this.bodyEl.append(this.selectListEl, this.manageListEl, this.emptyEl);
-    this.containerEl.append(headerEl, manageHeaderEl, this.bodyEl);
+    this.containerEl.append(this.headerEl, this.manageHeaderEl, this.bodyEl);
     this.containerEl.addEventListener("keydown", this.onKeyDown);
   }
 
@@ -384,10 +389,20 @@ export class HermesModelPickerPopover {
   private setMode(mode: "select" | "manage"): void {
     this.mode = mode;
     this.containerEl.classList.toggle("is-manage", mode === "manage");
+    this.bodyEl.scrollTop = 0;
     if (mode === "manage") {
+      this.headerEl.style.display = "none";
+      this.manageHeaderEl.style.display = "";
+      this.selectListEl.style.display = "none";
+      this.emptyEl.style.display = "none";
+      this.manageListEl.style.display = "";
       this.renderManage();
       this.backButtonEl.focus();
     } else {
+      this.headerEl.style.display = "";
+      this.manageHeaderEl.style.display = "none";
+      this.manageListEl.style.display = "none";
+      this.selectListEl.style.display = "";
       this.renderSelect();
       this.searchInputEl.focus();
     }
@@ -493,12 +508,14 @@ export class HermesModelPickerPopover {
       this.query,
     );
     if (visible.length === 0) {
+      this.selectListEl.style.display = "none";
       this.emptyCopyEl.textContent = this.query.trim()
         ? "No models match your search."
         : "All models are hidden.";
       this.emptyEl.style.display = "";
       return;
     }
+    this.selectListEl.style.display = "";
     this.emptyEl.style.display = "none";
     const fragment = document.createDocumentFragment();
     const groups = groupModelsByProvider(visible);

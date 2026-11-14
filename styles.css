@@ -2334,6 +2334,19 @@ body,
   padding: 6px 0 8px;
 }
 
+.hermesian-model-popover-manage-list {
+  display: none;
+}
+
+.hermesian-model-popover.is-manage .hermesian-model-popover-list,
+.hermesian-model-popover.is-manage .hermesian-model-popover-empty {
+  display: none;
+}
+
+.hermesian-model-popover.is-manage .hermesian-model-popover-manage-list {
+  display: flex;
+}
+
 .hermesian-model-group {
   border-radius: var(--hermesian-radius-sm);
   margin: 0 6px;

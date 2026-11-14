@@ -507,11 +507,45 @@ describe("HermesModelPickerPopover", () => {
       expect(empty.textContent).toContain("All models are hidden");
       (empty.querySelector(".hermesian-model-popover-empty-action") as HTMLElement).click();
       expect(container.classList.contains("is-manage")).toBe(true);
+      expect(empty.style.display).toBe("none");
       expect(container.querySelectorAll(".hermesian-model-manage-row")).toHaveLength(3);
     });
   });
 
   describe("manage mode", () => {
+    it("separates select mode and manage mode panels cleanly across transitions", async () => {
+      const { container } = openPopover();
+      await sleep(30);
+
+      const header = container.querySelector<HTMLElement>(".hermesian-model-popover-header")!;
+      const manageHeader = container.querySelector<HTMLElement>(".hermesian-model-popover-manage-header")!;
+      const selectList = container.querySelector<HTMLElement>(".hermesian-model-popover-list")!;
+      const manageList = container.querySelector<HTMLElement>(".hermesian-model-popover-manage-list")!;
+      const emptyEl = container.querySelector<HTMLElement>(".hermesian-model-popover-empty")!;
+
+      // Initial select mode
+      expect(header.style.display).not.toBe("none");
+      expect(selectList.style.display).not.toBe("none");
+      expect(manageHeader.style.display).toBe("none");
+      expect(manageList.style.display).toBe("none");
+      expect(emptyEl.style.display).toBe("none");
+
+      // Enter manage mode
+      (container.querySelector(".hermesian-model-popover-manage-button") as HTMLElement).click();
+      expect(header.style.display).toBe("none");
+      expect(selectList.style.display).toBe("none");
+      expect(emptyEl.style.display).toBe("none");
+      expect(manageHeader.style.display).not.toBe("none");
+      expect(manageList.style.display).not.toBe("none");
+
+      // Return to select mode
+      (container.querySelector(".hermesian-model-popover-back-button") as HTMLElement).click();
+      expect(header.style.display).not.toBe("none");
+      expect(selectList.style.display).not.toBe("none");
+      expect(manageHeader.style.display).toBe("none");
+      expect(manageList.style.display).toBe("none");
+    });
+
     it("lists every model including hidden ones and persists visibility changes", async () => {
       const { container, onSaveHidden } = openPopover({
         hiddenSwitchIds: ["openai:gpt-4o-mini"],
