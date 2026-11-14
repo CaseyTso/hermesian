@@ -13,7 +13,7 @@ The human-readable name of the Hermes session a Conversation Tab owns. Hermes is
 _Avoid_: Tab label, tab name, local title
 
 **Title Popover**:
-The opaque Picker Popover opened by right-clicking a Conversation Tab, showing the Conversation Title and offering manual rename and AI title generation. It is not a way to close the tab.
+The opaque Picker Popover opened by clicking the Conversation Title in the Top Dock header (or by right-clicking a Conversation Tab), showing the Conversation Title and offering manual rename and AI title generation. It is not a way to close the tab.
 _Avoid_: Tab context menu, rename dialog, close menu
 
 **Empty Session**:
@@ -107,7 +107,7 @@ The shared Theme-Adaptive Glass container at the top of the Visual Shell that ho
 _Avoid_: Stacked headers, separate tab bar, navigation card
 
 **Context Ring Gauge**:
-A compact circular visual indicator in the Top Dock header actions row that reflects the active Conversation Tab's context window usage ratio. It uses an outline track with a proportional stroke fill colored by consumption tier (normal, warning at 70%, danger at 90%), and reveals a compact percentage and token breakdown on hover. It supersedes the in-composer horizontal context track.
+A compact circular visual indicator in the Top Dock tabs actions row that reflects the active Conversation Tab's context window usage ratio. It uses an outline track with a proportional stroke fill colored by consumption tier (normal, warning at 70%, danger at 90%), and reveals a compact percentage and token breakdown on hover. It supersedes the in-composer horizontal context track.
 _Avoid_: Context bar, context progress line, context percentage label, bottom context meter
 
 **Context Gauge Popover**:

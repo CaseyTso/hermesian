@@ -360,6 +360,7 @@ export class HermesianSidebarView extends ItemView {
   private reasoningLabelEl!: HTMLElement;
   private reasoningPicker: HermesReasoningPickerPopover | null = null;
   private titlePopover: HermesTitlePopover | null = null;
+  private titlePopoverAnchorEl: HTMLElement | undefined;
   private contextGaugePopover: HermesContextGaugePopover | null = null;
   private readonly tabFirstUserMessages = new Map<string, string>();
   private selectionBarEl!: HTMLElement;
@@ -391,6 +392,7 @@ export class HermesianSidebarView extends ItemView {
   private slashMenuIndex = 0;
   private slashMenuItems: SlashMenuItem[] = [];
   private statusEl!: HTMLElement;
+  private headerTitleEl!: HTMLElement;
   private startup: ViewStartupCoordinator | undefined;
   private startupStatusClickBound = false;
   /** Ephemeral composer hint (steer reject, STT error). Cleared on next draft change. */
@@ -474,6 +476,7 @@ export class HermesianSidebarView extends ItemView {
     this.reasoningPicker = null;
     this.titlePopover?.detach();
     this.titlePopover = null;
+    this.titlePopoverAnchorEl = undefined;
     this.contextGaugePopover?.detach();
     this.contextGaugePopover = null;
     this.startup?.close();
@@ -710,6 +713,7 @@ export class HermesianSidebarView extends ItemView {
 
     const shell = createSidebarShell(this.containerEl, callbacks);
     this.statusEl = shell.statusEl;
+    this.headerTitleEl = shell.headerTitleEl;
     this.addConversationButtonEl = shell.addConversationButtonEl;
     this.historyButtonEl = shell.historyButtonEl;
     this.contextGaugeEl = shell.contextGaugeEl;
@@ -745,6 +749,16 @@ export class HermesianSidebarView extends ItemView {
 
     this.contextGaugeEl.addEventListener("click", () => {
       this.toggleContextGaugePopover();
+    });
+
+    this.headerTitleEl.addEventListener("click", () => {
+      this.openActiveTabTitlePopover();
+    });
+    this.headerTitleEl.addEventListener("keydown", (event: KeyboardEvent) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        this.headerTitleEl.click();
+      }
     });
 
     this.appendSystemMessage(
@@ -1051,6 +1065,9 @@ export class HermesianSidebarView extends ItemView {
     if (snapshot.workspace && snapshot.workspace !== this.lastControllerWorkspace) {
       this.lastControllerWorkspace = snapshot.workspace;
       this.conversationWorkspace = snapshot.workspace;
+      if (this.headerTitleEl) {
+        this.updateHeaderTitle();
+      }
     }
     for (const [tabId, history] of snapshot.histories) {
       if (this.displayedHistories.get(tabId) === history) continue;
@@ -1324,15 +1341,18 @@ export class HermesianSidebarView extends ItemView {
 
     if (this.titlePopover?.isOpen()) {
       const popoverTabId = this.titlePopover.getTabId();
-      const newBtn = this.conversationTabsEl.querySelector<HTMLElement>(
-        `[data-conversation-tab-id="${popoverTabId}"]`,
-      );
       const activePopoverTab = workspace.tabs.find((t) => t.id === popoverTabId);
-      if (!newBtn || !activePopoverTab) {
+      const anchorEl = this.titlePopoverAnchorEl?.isConnected
+        ? this.titlePopoverAnchorEl
+        : this.conversationTabsEl.querySelector<HTMLElement>(
+            `[data-conversation-tab-id="${popoverTabId}"]`,
+          );
+      if (!anchorEl || !activePopoverTab) {
         this.titlePopover.detach();
         this.titlePopover = null;
+        this.titlePopoverAnchorEl = undefined;
       } else {
-        this.titlePopover.updateAnchor(newBtn);
+        this.titlePopover.updateAnchor(anchorEl);
         const title = resolveConversationTabTitle(
           activePopoverTab,
           this.firstUserMessageForTab(activePopoverTab.id),
@@ -1343,15 +1363,42 @@ export class HermesianSidebarView extends ItemView {
         });
       }
     }
+
+    this.updateHeaderTitle();
+  }
+
+  /** Mirrors the active conversation title into the header title element. */
+  private updateHeaderTitle(): void {
+    if (!this.headerTitleEl) {
+      return;
+    }
+    const activeTab = this.activeConversationTab();
+    const resolved = activeTab
+      ? resolveConversationTabTitle(activeTab, this.firstUserMessageForTab(activeTab.id))
+      : "未命名会话";
+    this.headerTitleEl.textContent = resolved;
+    this.headerTitleEl.title = resolved;
+  }
+
+  /** Opens the title popover for the active conversation, anchored to the header title. */
+  private openActiveTabTitlePopover(): void {
+    const workspace = this.conversationWorkspace;
+    if (!workspace) {
+      return;
+    }
+    this.openTitlePopover(workspace.activeTabId, this.headerTitleEl);
   }
 
   private openTitlePopover(tabId: string, anchorEl: HTMLElement): void {
     if (this.titlePopover?.isOpen() && this.titlePopover.getTabId() === tabId) {
       this.titlePopover.detach();
+      this.titlePopover = null;
+      this.titlePopoverAnchorEl = undefined;
       return;
     }
     this.titlePopover?.detach();
     this.titlePopover = null;
+    this.titlePopoverAnchorEl = undefined;
     this.modelPicker?.detach();
     this.modelPicker = null;
     this.reasoningPicker?.detach();
@@ -1368,6 +1415,7 @@ export class HermesianSidebarView extends ItemView {
     const hasCustomTitle = Boolean(tab.title?.trim());
     const canGenerateAi = Boolean(tab.sessionId) && this.tabHasMessages(tabId);
 
+    this.titlePopoverAnchorEl = anchorEl;
     this.titlePopover = new HermesTitlePopover({
       anchorEl,
       tabId,
@@ -1384,6 +1432,7 @@ export class HermesianSidebarView extends ItemView {
       onGenerateAi: async () => await this.generateAiConversationTitle(tabId),
       onClose: () => {
         this.titlePopover = null;
+        this.titlePopoverAnchorEl = undefined;
       },
     });
     this.titlePopover.open();

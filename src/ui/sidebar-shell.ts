@@ -7,6 +7,8 @@ export interface SidebarShellElements {
   messagesEl: HTMLElement;
   root: HTMLElement;
   statusEl: HTMLElement;
+  /** Header conversation title; clickable entry point for the title popover. */
+  headerTitleEl: HTMLElement;
   topDockEl: HTMLElement;
 }
 
@@ -20,7 +22,9 @@ export function createSidebarShell(
   containerEl: HTMLElement,
   callbacks: SidebarShellCallbacks,
 ): SidebarShellElements {
-  const root = containerEl.children[1] as HTMLElement;
+  const root = (containerEl.classList?.contains("view-content")
+    ? containerEl
+    : containerEl.children[1] ?? containerEl) as HTMLElement;
   root.empty();
   root.addClass("hermesian-view");
 
@@ -31,7 +35,18 @@ export function createSidebarShell(
   const header = topDockEl.createDiv({ cls: "hermesian-header" });
   const identity = header.createDiv({ cls: "hermesian-identity" });
   identity.createSpan({ cls: "hermesian-logo" });
-  identity.createSpan({ text: "Hermesian", cls: "hermesian-title" });
+  // The header title shows the active conversation title (not a static brand
+  // label). Text/`title` are filled in by the view via `updateHeaderTitle()`.
+  const headerTitleEl = identity.createSpan({
+    attr: {
+      "aria-haspopup": "dialog",
+      role: "button",
+      tabindex: "0",
+      title: "未命名会话",
+    },
+    cls: "hermesian-title hermesian-title--conversation",
+    text: "未命名会话",
+  });
   const statusEl = identity.createSpan({
     attr: {
       "aria-atomic": "true",
@@ -42,9 +57,17 @@ export function createSidebarShell(
     cls: "hermesian-status",
   });
 
-  const headerActions = header.createDiv({ cls: "hermesian-header-actions" });
+  // --- Tabs Row in Top Dock (tab list + right-aligned actions) ---
+  // The actions live beside the tab list (not inside it): the tab renderer
+  // empties its host element on every render, which would destroy them.
+  const tabsRowEl = topDockEl.createDiv({ cls: "hermesian-tabs-row" });
+  const conversationTabsEl = tabsRowEl.createDiv({
+    attr: { "aria-label": "Hermes conversations", role: "tablist" },
+    cls: "hermesian-conversation-tabs",
+  });
+  const tabsActionsEl = tabsRowEl.createDiv({ cls: "hermesian-tabs-actions" });
 
-  const contextGaugeEl = headerActions.createDiv({
+  const contextGaugeEl = tabsActionsEl.createDiv({
     attr: {
       "aria-haspopup": "dialog",
       "aria-label": "上下文: 0%",
@@ -69,7 +92,7 @@ export function createSidebarShell(
     ".hermesian-context-gauge-fill",
   ) as SVGCircleElement;
 
-  const historyButtonEl = headerActions.createEl("button", {
+  const historyButtonEl = tabsActionsEl.createEl("button", {
     attr: {
       "aria-label": "View Hermes history",
       title: "Browse and resume historical sessions",
@@ -78,7 +101,7 @@ export function createSidebarShell(
     cls: "clickable-icon",
   }) as HTMLButtonElement;
 
-  const addConversationButtonEl = headerActions.createEl("button", {
+  const addConversationButtonEl = tabsActionsEl.createEl("button", {
     attr: {
       "aria-label": "Add conversation",
       title: "Add conversation",
@@ -86,12 +109,6 @@ export function createSidebarShell(
     },
     cls: "clickable-icon",
   }) as HTMLButtonElement;
-
-  // --- Tabs Row in Top Dock ---
-  const conversationTabsEl = topDockEl.createDiv({
-    attr: { "aria-label": "Hermes conversations", role: "tablist" },
-    cls: "hermesian-conversation-tabs",
-  });
 
   // --- Messages ---
   const messagesEl = root.createDiv({ cls: "hermesian-messages" });
@@ -116,6 +133,7 @@ export function createSidebarShell(
     messagesEl,
     root,
     statusEl,
+    headerTitleEl,
     topDockEl,
   };
 }

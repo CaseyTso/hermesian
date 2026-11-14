@@ -66,11 +66,17 @@ describe("createSidebarShell", () => {
       expect(shell.root.classList.contains("hermesian-view")).toBe(true);
     });
 
-    it("renders the Hermesian title", () => {
+    it("renders the conversation title as a focusable popover trigger", () => {
       const { shell } = setup();
       const title = shell.root.querySelector(".hermesian-title");
       expect(title).not.toBeNull();
-      expect(title!.textContent).toBe("Hermesian");
+      expect(title).toBe(shell.headerTitleEl);
+      expect(title!.classList.contains("hermesian-title--conversation")).toBe(true);
+      expect(title!.getAttribute("role")).toBe("button");
+      expect(title!.getAttribute("tabindex")).toBe("0");
+      expect(title!.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(title!.textContent).toBe("未命名会话");
+      expect(title!.getAttribute("title")).toBe("未命名会话");
     });
 
     it("renders the status element with correct ARIA attributes", () => {
@@ -96,7 +102,7 @@ describe("createSidebarShell", () => {
       );
     });
 
-    it("renders the context gauge in header actions with button role, aria-haspopup, tabindex, and 0% initial label", () => {
+    it("renders the context gauge in tab-row actions with button role, aria-haspopup, tabindex, and 0% initial label", () => {
       const { shell } = setup();
       expect(shell.contextGaugeEl.getAttribute("role")).toBe("button");
       expect(shell.contextGaugeEl.getAttribute("aria-haspopup")).toBe("dialog");
@@ -139,6 +145,20 @@ describe("createSidebarShell", () => {
       expect(shell.topDockEl.contains(shell.conversationTabsEl)).toBe(true);
     });
 
+    it("keeps the tab-row actions outside the re-rendered tablist host", () => {
+      const { shell } = setup();
+      const tabsRow = shell.root.querySelector(".hermesian-tabs-row");
+      expect(tabsRow).not.toBeNull();
+      expect(tabsRow!.contains(shell.conversationTabsEl)).toBe(true);
+      const actions = shell.root.querySelector(".hermesian-tabs-actions");
+      expect(actions).not.toBeNull();
+      expect(actions!.contains(shell.contextGaugeEl)).toBe(true);
+      expect(actions!.contains(shell.historyButtonEl)).toBe(true);
+      expect(actions!.contains(shell.addConversationButtonEl)).toBe(true);
+      // Actions must NOT be inside the tablist host (which gets emptied on re-render)
+      expect(shell.conversationTabsEl.contains(shell.contextGaugeEl)).toBe(false);
+    });
+
     it("returns the root element for composer attachment", () => {
       const { shell } = setup();
       expect(shell.root).toBeInstanceOf(HTMLElement);
@@ -163,6 +183,51 @@ describe("createSidebarShell", () => {
       const event = new MouseEvent("click", { bubbles: true });
       shell.messagesEl.dispatchEvent(event);
       expect(cb.onMessagesClick).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("containerEl fallback", () => {
+    it("uses containerEl directly when it has class view-content", () => {
+      const contentEl = document.createElement("div");
+      contentEl.className = "view-content";
+
+      const cb: SidebarShellCallbacks = {
+        onAddConversation: vi.fn(),
+        onMessagesClick: vi.fn(),
+        onOpenHistory: vi.fn(),
+      };
+      const shell = createSidebarShell(contentEl, cb);
+      expect(shell.root).toBe(contentEl);
+      expect(shell.root.classList.contains("hermesian-view")).toBe(true);
+    });
+
+    it("falls back to children[1] for standard Obsidian ItemView containerEl", () => {
+      const containerEl = document.createElement("div");
+      containerEl.appendChild(document.createElement("div")); // children[0]
+      const child1 = document.createElement("div");
+      containerEl.appendChild(child1); // children[1]
+
+      const cb: SidebarShellCallbacks = {
+        onAddConversation: vi.fn(),
+        onMessagesClick: vi.fn(),
+        onOpenHistory: vi.fn(),
+      };
+      const shell = createSidebarShell(containerEl, cb);
+      expect(shell.root).toBe(child1);
+    });
+
+    it("falls back to containerEl itself when neither view-content nor children[1] exist", () => {
+      const containerEl = document.createElement("div");
+      // No children, no special class
+
+      const cb: SidebarShellCallbacks = {
+        onAddConversation: vi.fn(),
+        onMessagesClick: vi.fn(),
+        onOpenHistory: vi.fn(),
+      };
+      const shell = createSidebarShell(containerEl, cb);
+      expect(shell.root).toBe(containerEl);
+      expect(shell.root.classList.contains("hermesian-view")).toBe(true);
     });
   });
 
