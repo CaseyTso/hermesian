@@ -73,7 +73,7 @@ describe("createSelectionContext", () => {
 });
 
 describe("buildSelectionPrompt", () => {
-  it("includes the complete document and marks only the selection editable", () => {
+  it("includes path, line range, and selection without embedding full document or edit restrictions", () => {
     const context = createSelectionContext({
       content: "before\nselected\nafter",
       filePath: "Research/note.md",
@@ -84,13 +84,16 @@ describe("buildSelectionPrompt", () => {
 
     const prompt = buildSelectionPrompt(context, "改得更严谨");
 
-    expect(prompt).toContain("Research/note.md");
-    expect(prompt).toContain("第 2–2 行");
-    expect(prompt).toContain("<document>\nbefore\nselected\nafter\n</document>");
+    expect(prompt).toContain("文件：Research/note.md");
+    expect(prompt).toContain("绝对路径：/vault/Research/note.md");
+    expect(prompt).toContain("选区：第 2–2 行");
     expect(prompt).toContain("<selection>\nselected\n</selection>");
     expect(prompt).toContain("改得更严谨");
-    expect(prompt).toContain("patch(mode=\"replace\")");
-    expect(prompt).toContain("只能修改选区");
+    expect(prompt).not.toContain("<document>");
+    expect(prompt).not.toContain("before\nselected\nafter");
+    expect(prompt).not.toContain("只能修改选区");
+    expect(prompt).not.toContain("patch(mode=\"replace\")");
+    expect(prompt).toContain("不限于只改 <selection>");
   });
 });
 
@@ -157,7 +160,7 @@ describe("validateSelectionEdit", () => {
     expect(validateSelectionEdit(undefined, [])).toEqual({ allowed: true });
   });
 
-  it("rejects edits outside the selection, another file, and stale snapshots", () => {
+  it("allows edits outside the selection, another file, and modified snapshots", () => {
     expect(
       validateSelectionEdit(context, [
         {
@@ -165,8 +168,8 @@ describe("validateSelectionEdit", () => {
           oldText: context.documentContent,
           newText: "changed\nselected\nafter",
         },
-      ]).allowed,
-    ).toBe(false);
+      ]),
+    ).toEqual({ allowed: true });
     expect(
       validateSelectionEdit(context, [
         {
@@ -174,8 +177,8 @@ describe("validateSelectionEdit", () => {
           oldText: context.documentContent,
           newText: context.documentContent,
         },
-      ]).allowed,
-    ).toBe(false);
+      ]),
+    ).toEqual({ allowed: true });
     expect(
       validateSelectionEdit(context, [
         {
@@ -183,8 +186,8 @@ describe("validateSelectionEdit", () => {
           oldText: "stale",
           newText: context.documentContent,
         },
-      ]).allowed,
-    ).toBe(false);
+      ]),
+    ).toEqual({ allowed: true });
   });
 });
 
@@ -349,7 +352,7 @@ describe("buildDocumentCaption", () => {
       "IELTS/口语/雅思口语精炼-第01轮全Part高分示范与实战答卷.md",
     );
     expect(caption.text).toBe(
-      "📄 雅思口语精炼-第01轮全Part高分示范与实战答卷 · full note context",
+      "📄 雅思口语精炼-第01轮全Part高分示范与实战答卷",
     );
     expect(caption.title).toContain(
       "IELTS/口语/雅思口语精炼-第01轮全Part高分示范与实战答卷.md",
@@ -358,7 +361,7 @@ describe("buildDocumentCaption", () => {
 
   it("never leaks a vault path into the visible text", () => {
     const caption = buildDocumentCaption("deep/a/b/c/note.md");
-    expect(caption.text).toBe("📄 note · full note context");
+    expect(caption.text).toBe("📄 note");
     expect(caption.text).not.toContain("deep/a/b/c");
   });
 });
@@ -387,9 +390,34 @@ describe("stripOutboundPromptToRequest", () => {
     expect(stripOutboundPromptToRequest(prompt)).toBe("总结这篇笔记");
   });
 
-  it("round-trips an active-note marker prompt back to the bare request", () => {
-    const prompt = buildActiveNotePrompt("Research/note.md", "看看这篇笔记");
+  it("round-trips an active-note marker prompt (with absolute_path) back to the bare request", () => {
+    const prompt = buildActiveNotePrompt(
+      "Research/note.md",
+      "看看这篇笔记",
+      "/vault/Research/note.md",
+    );
+    expect(prompt).toContain("absolute_path: /vault/Research/note.md");
     expect(stripOutboundPromptToRequest(prompt)).toBe("看看这篇笔记");
+  });
+
+  it("round-trips a legacy selection edit prompt back to the bare request", () => {
+    const legacy = [
+      "你正在协助用户编辑 Obsidian Markdown 知识库。",
+      "",
+      "文件：Research/note.md",
+      "绝对路径：/vault/Research/note.md",
+      "选区：第 3–3 行",
+      "文档快照 SHA-256：abc",
+      "",
+      "<document>\n# 标题\n\n选中文本\n</document>",
+      "",
+      "<selection>\n选中文本\n</selection>",
+      "",
+      "用户请求：把选区改成大标题",
+      "",
+      "<document> 是当前 Markdown 文件的完整上下文，但只能修改选区（<selection> 对应内容）。",
+    ].join("\n");
+    expect(stripOutboundPromptToRequest(legacy)).toBe("把选区改成大标题");
   });
 
   it("round-trips a note-changed prompt back to the bare request", () => {

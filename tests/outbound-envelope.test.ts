@@ -9,6 +9,11 @@ import {
   stripEnvelopeFromPrompt,
   stripUserPromptForDisplay,
 } from "../src/outbound-envelope";
+import {
+  buildActiveNotePrompt,
+  buildSelectionPrompt,
+  createSelectionContext,
+} from "../src/selection-context";
 
 describe("buildEnvelopePrompt", () => {
   it("prepends the Obsidian sidebar identity and appends the output rules to ordinary requests", () => {
@@ -178,5 +183,26 @@ document_included: false
     expect(stripped).not.toContain("<hermesian_identity>");
     expect(stripped).not.toContain("<hermesian_output_rules>");
     expect(stripped).toContain("Figure2");
+  });
+
+  it("round-trips enveloped selection-focus and path-only active-note prompts back to the bare request", () => {
+    const selectionContext = createSelectionContext({
+      content: "alpha\nbeta\ngamma",
+      filePath: "Notes/demo.md",
+      from: { line: 1, ch: 0 },
+      to: { line: 1, ch: 4 },
+      vaultPath: "/vault",
+    });
+    const selectionOutbound = buildEnvelopePrompt(
+      buildSelectionPrompt(selectionContext, "这段是什么意思？"),
+      false,
+    );
+    expect(stripUserPromptForDisplay(selectionOutbound)).toBe("这段是什么意思？");
+
+    const activeNoteOutbound = buildEnvelopePrompt(
+      buildActiveNotePrompt("Notes/demo.md", "帮我梳理要点", "/vault/Notes/demo.md"),
+      false,
+    );
+    expect(stripUserPromptForDisplay(activeNoteOutbound)).toBe("帮我梳理要点");
   });
 });

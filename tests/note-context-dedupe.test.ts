@@ -113,11 +113,10 @@ describe("buildNoteChangedPrompt (changed-note marker)", () => {
   });
 });
 
-describe("two-turn dedupe chain through the production builders", () => {
-  it("re-sends the full document when there is no previous fingerprint, then stays silent on the identical second turn", () => {
+describe("per-turn path-only injection through the production builders", () => {
+  it("injects the active note paths on every turn without the document body", () => {
     const doc = sentinelDocumentContext();
 
-    // Turn 1: no previous fingerprint -> full context with the document body.
     const first = buildOutboundPrompt({
       request: "总结",
       isSlashCommand: false,
@@ -125,16 +124,14 @@ describe("two-turn dedupe chain through the production builders", () => {
       selection: undefined,
       documentContext: doc,
       activeNotePath: SENTINEL_PATH,
-      noteContextInjection: resolveNoteContextInjection({
-        previous: undefined,
-        currentPath: doc.filePath,
-        currentHash: doc.documentHash,
-      }),
+      activeNoteAbsolutePath: `${vaultPath}/${SENTINEL_PATH}`,
     });
-    expect(first).toContain("<document>");
-    expect(first).toContain(SENTINEL_BODY);
+    expect(first).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(first).toContain(`absolute_path: ${vaultPath}/${SENTINEL_PATH}`);
+    expect(first).toContain("document_included: false");
+    expect(first).not.toContain("<document>");
+    expect(first).not.toContain(SENTINEL_BODY);
 
-    // Turn 2: same path + same hash -> none -> request only, no body, no tags.
     const second = buildOutboundPrompt({
       request: "继续",
       isSlashCommand: false,
@@ -142,40 +139,16 @@ describe("two-turn dedupe chain through the production builders", () => {
       selection: undefined,
       documentContext: doc,
       activeNotePath: SENTINEL_PATH,
-      noteContextInjection: resolveNoteContextInjection({
-        previous: { filePath: doc.filePath, documentHash: doc.documentHash },
-        currentPath: doc.filePath,
-        currentHash: doc.documentHash,
-      }),
+      activeNoteAbsolutePath: `${vaultPath}/${SENTINEL_PATH}`,
     });
-    expect(second).toBe("继续");
+    expect(second).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(second).toContain(`absolute_path: ${vaultPath}/${SENTINEL_PATH}`);
+    expect(second).toContain("继续");
     expect(second).not.toContain("<document>");
     expect(second).not.toContain(SENTINEL_BODY);
   });
 
-  it("emits the changed marker without the body when the hash moves between turns", () => {
-    const doc = sentinelDocumentContext();
-    const prompt = buildOutboundPrompt({
-      request: "继续",
-      isSlashCommand: false,
-      includeCurrentDocumentContext: true,
-      selection: undefined,
-      documentContext: doc,
-      activeNotePath: SENTINEL_PATH,
-      noteContextInjection: resolveNoteContextInjection({
-        previous: { filePath: doc.filePath, documentHash: "old-hash" },
-        currentPath: doc.filePath,
-        currentHash: doc.documentHash,
-      }),
-    });
-
-    expect(prompt).toContain("note_changed: true");
-    expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
-    expect(prompt).not.toContain("<document>");
-    expect(prompt).not.toContain(SENTINEL_BODY);
-  });
-
-  it("re-sends the full document when the path moves between turns", () => {
+  it("injects the new note paths immediately when switching to another note", () => {
     const doc = sentinelDocumentContext();
     const prompt = buildOutboundPrompt({
       request: "总结",
@@ -184,14 +157,12 @@ describe("two-turn dedupe chain through the production builders", () => {
       selection: undefined,
       documentContext: doc,
       activeNotePath: SENTINEL_PATH,
-      noteContextInjection: resolveNoteContextInjection({
-        previous: { filePath: "Other/note.md", documentHash: doc.documentHash },
-        currentPath: doc.filePath,
-        currentHash: doc.documentHash,
-      }),
+      activeNoteAbsolutePath: `${vaultPath}/${SENTINEL_PATH}`,
     });
 
-    expect(prompt).toContain("<document>");
-    expect(prompt).toContain(SENTINEL_BODY);
+    expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(prompt).toContain(`absolute_path: ${vaultPath}/${SENTINEL_PATH}`);
+    expect(prompt).not.toContain("<document>");
+    expect(prompt).not.toContain(SENTINEL_BODY);
   });
 });

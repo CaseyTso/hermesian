@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { join, normalize } from "node:path";
+import { join } from "node:path";
 
 import { buildSlashOutboundPrompt } from "./slash-menu";
 
@@ -203,7 +203,7 @@ export function buildSelectionCaption(
 
 export function buildDocumentCaption(filePath: string): NoteContextCaption {
   return {
-    text: joinCaptionParts([noteTitle(filePath), "full note context"]),
+    text: joinCaptionParts([noteTitle(filePath)]),
     title: takeCodePoints(filePath, CAPTION_TOOLTIP_MAX_CODE_POINTS),
   };
 }
@@ -213,21 +213,17 @@ export function buildSelectionPrompt(
   request: string,
 ): string {
   return [
-    "你正在协助用户编辑 Obsidian Markdown 知识库。",
+    "你正在通过 Hermesian 协助用户处理 Obsidian Markdown 知识库中的选区内容。",
     "",
     `文件：${context.filePath}`,
     `绝对路径：${context.absolutePath}`,
     `选区：第 ${context.startLine}–${context.endLine} 行`,
-    `文档快照 SHA-256：${context.documentHash}`,
-    "",
-    block("document", context.documentContent),
     "",
     block("selection", context.selectedText),
     "",
     `用户请求：${request.trim()}`,
     "",
-    "<document> 是当前 Markdown 文件的完整上下文，但只能修改选区（<selection> 对应内容）；选区之前和之后的任何字符都必须保持不变。",
-    "如需改写，请只使用 patch(mode=\"replace\") 精确替换选区，不要使用 terminal 或整文件重写；客户端会拒绝越出选区的 diff，并在写入前展示允许范围内的 diff。",
+    "<selection> 是用户当前聚焦并提问的片段；如需查看该笔记的其它上下文，请按上述路径自行读取。如有修改需求，不限于只改 <selection>，可按用户要求修改本笔记的其它位置或其它笔记。",
   ].join("\n");
 }
 
@@ -253,12 +249,14 @@ export function buildDocumentPrompt(
 export function buildActiveNotePrompt(
   filePath: string | undefined,
   request: string,
+  absolutePath?: string,
 ): string {
   return [
     "你正在通过 Hermesian 协助用户使用 Obsidian。",
     "",
     "<obsidian_context>",
     `active_note: ${filePath ?? "none"}`,
+    ...(absolutePath ? [`absolute_path: ${absolutePath}`] : []),
     "document_included: false",
     "</obsidian_context>",
     "",
@@ -269,14 +267,15 @@ export function buildActiveNotePrompt(
 export type NoteContextInjectionKind = "full" | "changed" | "none";
 
 /**
- * Display-only inverse of the four outbound context wrappers built above
- * (selection / document / active-note / note-changed). Resume/load history
- * stores the full wrapped prompt; rendering must show only the bare user
- * request. Only exact build products are unwrapped — anything that does not
- * start with one of the fixed prefixes (plain text, slash commands, steer
- * corrections, user-typed lookalikes) is returned untouched.
+ * Display-only inverse of the outbound context wrappers built above
+ * (selection / document / active-note / note-changed, including legacy formats).
+ * Resume/load history stores the full wrapped prompt; rendering must show only
+ * the bare user request. Only exact build products are unwrapped — anything
+ * that does not start with one of the fixed prefixes (plain text, slash
+ * commands, steer corrections, user-typed lookalikes) is returned untouched.
  */
 const OUTBOUND_PREFIXES = [
+  "你正在通过 Hermesian 协助用户处理 Obsidian Markdown 知识库中的选区内容。\n\n",
   "你正在协助用户编辑 Obsidian Markdown 知识库。\n\n",
   "你正在协助用户理解当前 Obsidian Markdown 知识库笔记。\n\n",
   "你正在通过 Hermesian 协助用户使用 Obsidian。\n\n",
@@ -322,11 +321,19 @@ export function stripOutboundPromptToRequest(text: string): string {
     return text;
   }
   let request = rest.slice(markerIndex + "\n用户请求：".length);
-  // Fixed edit-scope/read-only trailers may have drifted slightly in older
-  // persisted messages; cut at the recognizable paragraph marker instead of
-  // requiring an exact constant match.
-  const trailerMarker = "\n\n<document> 是当前 Markdown 文件的完整上下文";
-  const trailerIndex = request.indexOf(trailerMarker);
+  // Fixed edit-scope/read-only/selection-focus trailers may appear after the
+  // user request; cut at the earliest recognizable paragraph marker.
+  const trailerMarkers = [
+    "\n\n<document> 是当前 Markdown 文件的完整上下文",
+    "\n\n<selection> 是用户当前聚焦并提问的片段",
+  ];
+  let trailerIndex = -1;
+  for (const marker of trailerMarkers) {
+    const idx = request.indexOf(marker);
+    if (idx !== -1 && (trailerIndex === -1 || idx < trailerIndex)) {
+      trailerIndex = idx;
+    }
+  }
   if (trailerIndex !== -1) {
     request = request.slice(0, trailerIndex);
   }
@@ -402,10 +409,11 @@ export interface OutboundPromptInput {
   /** Only ever supplied when the context capsule is on; the off-state send
    *  path never obtains the current note's path, so it cannot leak it. */
   activeNotePath?: string;
-  /** Optional per-tab dedupe override (see resolveNoteContextInjection).
-   *  Only consulted when the capsule is on and no explicit selection is
-   *  attached; omitted (or "full") keeps the historical document-first
-   *  routing, so legacy callers are unaffected. */
+  /** Disk absolute path corresponding to activeNotePath, supplied only when
+   *  the context capsule is on. */
+  activeNoteAbsolutePath?: string;
+  /** Deprecated: kept optional for legacy callers; capsule-on turns now always
+   *  inject only the active note paths on every turn. */
   noteContextInjection?: NoteContextInjectionKind;
 }
 
@@ -415,10 +423,11 @@ export interface OutboundPromptInput {
  * A menu-selected skill is first converted into an ordinary model request
  * (the skill load instruction replaces the raw `/skill <name> …` prefix),
  * then routed through the same branches as any other request: an explicit
- * selection wins (user-granted authorization even when the capsule is off);
- * the off state with no selection passes through without any note context;
- * a captured document is only eligible while the capsule is on; the on state
- * with no captured document falls back to the active-note marker.
+ * selection wins (passing path, line range, and `<selection>` without full
+ * document body); the off state with no selection passes through without any
+ * note context; the on state with no selection injects the active note's
+ * relative and absolute paths on every turn without reading or embedding the
+ * document body.
  *
  * Native control commands (and free-typed slash text) stay bare — the skill
  * flag wins over the bare-slash flag so a skill can never lose its context.
@@ -436,69 +445,17 @@ export function buildOutboundPrompt(input: OutboundPromptInput): string {
   if (!input.includeCurrentDocumentContext) {
     return request;
   }
-  switch (input.noteContextInjection ?? "full") {
-    case "none":
-      return request;
-    case "changed":
-      return buildNoteChangedPrompt(
-        input.documentContext?.filePath ?? input.activeNotePath,
-        request,
-      );
-    default:
-      if (input.documentContext) {
-        return buildDocumentPrompt(input.documentContext, request);
-      }
-      return buildActiveNotePrompt(input.activeNotePath, request);
-  }
+  const filePath = input.activeNotePath ?? input.documentContext?.filePath;
+  const absolutePath =
+    input.activeNoteAbsolutePath ?? input.documentContext?.absolutePath;
+  return buildActiveNotePrompt(filePath, request, absolutePath);
 }
 
 export function validateSelectionEdit(
-  context: SelectionContext | MarkdownDocumentContext | undefined,
-  diffs: SelectionEditDiff[],
+  _context: SelectionContext | MarkdownDocumentContext | undefined,
+  _diffs: SelectionEditDiff[],
 ): SelectionEditValidation {
-  // A document snapshot supplies context, not an exclusive edit boundary.
-  // Vault-wide path validation and approval happen in the ACP client. Only an
-  // explicit text selection narrows the user's authorization to one range.
-  if (!context || !("selectedText" in context)) {
-    return { allowed: true };
-  }
-
-  if (diffs.length !== 1) {
-    return {
-      allowed: false,
-      reason: "Inline editing requires exactly one diff for the selected Markdown file.",
-    };
-  }
-
-
-  const diff = diffs[0];
-  if (!diff) {
-    return { allowed: false, reason: "The edit did not include a diff." };
-  }
-  const requestedPath = normalize(diff.path);
-  if (
-    requestedPath !== normalize(context.absolutePath) &&
-    requestedPath !== normalize(context.filePath)
-  ) {
-    return { allowed: false, reason: "The edit targets a file other than the selected note." };
-  }
-  if (diff.oldText !== context.documentContent) {
-    return {
-      allowed: false,
-      reason: "The note changed after the context was captured; refresh and try again.",
-    };
-  }
-
-  const prefix = context.documentContent.slice(0, context.selectionStartOffset);
-  const suffix = context.documentContent.slice(context.selectionEndOffset);
-  if (diff.newText.length < prefix.length + suffix.length) {
-    return { allowed: false, reason: "The edit removes content outside the selection." };
-  }
-  if (
-    diff.newText.slice(0, prefix.length) !== prefix ||
-    diff.newText.slice(diff.newText.length - suffix.length) !== suffix
-  ) {
-    return { allowed: false, reason: "The edit changes content outside the selection." };
-  }
+  // Selection is conversational focus only; vault-wide path validation and
+  // user approval happen in the ACP client permission flow.
   return { allowed: true };
 }

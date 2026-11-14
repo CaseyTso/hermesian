@@ -69,7 +69,7 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
     expect(prompt).not.toContain("<document>");
   });
 
-  it("includes the full document when the context capsule is on", () => {
+  it("includes only the note paths (never the document body) when the context capsule is on", () => {
     const prompt = buildOutboundPrompt({
       request: "总结这篇笔记",
       isSlashCommand: false,
@@ -77,15 +77,19 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
       selection: undefined,
       documentContext: sentinelDocumentContext(),
       activeNotePath: SENTINEL_PATH,
+      activeNoteAbsolutePath: `${vaultPath}/${SENTINEL_PATH}`,
     });
 
-    expect(prompt).toContain("<document>");
-    expect(prompt).toContain(SENTINEL_BODY);
-    expect(prompt).toContain(`文件：${SENTINEL_PATH}`);
+    expect(prompt).toContain("<obsidian_context>");
+    expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(prompt).toContain(`absolute_path: ${vaultPath}/${SENTINEL_PATH}`);
+    expect(prompt).toContain("document_included: false");
     expect(prompt).toContain("总结这篇笔记");
+    expect(prompt).not.toContain("<document>");
+    expect(prompt).not.toContain(SENTINEL_BODY);
   });
 
-  it("keeps an explicitly added selection (with its document) even when the capsule is off", () => {
+  it("keeps an explicitly added selection (without full document body) even when the capsule is off", () => {
     const prompt = buildOutboundPrompt({
       request: "改写选区",
       isSlashCommand: false,
@@ -96,10 +100,12 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
     });
 
     expect(prompt).toContain("<selection>");
-    expect(prompt).toContain("<document>");
+    expect(prompt).toContain("SENTINEL_BODY_7");
     expect(prompt).toContain(SENTINEL_PATH);
-    expect(prompt).toContain(SENTINEL_BODY);
+    expect(prompt).toContain(`${vaultPath}/${SENTINEL_PATH}`);
     expect(prompt).toContain("改写选区");
+    expect(prompt).not.toContain("<document>");
+    expect(prompt).not.toContain(SENTINEL_BODY);
   });
 
   it("passes native control commands through unchanged, never wrapped in Obsidian note context", () => {
@@ -140,7 +146,7 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
     expect(prompt).not.toContain(SENTINEL_BODY);
   });
 
-  it("routes a menu-selected skill through the full-document branch when the context capsule is on", () => {
+  it("routes a menu-selected skill through the path-only context branch when the context capsule is on", () => {
     const prompt = buildOutboundPrompt({
       request: "/skill plan 总结这篇笔记",
       isSlashCommand: false,
@@ -149,16 +155,18 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
       selection: undefined,
       documentContext: sentinelDocumentContext(),
       activeNotePath: SENTINEL_PATH,
+      activeNoteAbsolutePath: `${vaultPath}/${SENTINEL_PATH}`,
     });
 
     expect(prompt).toContain('Load and follow the installed Hermes skill named "plan"');
     expect(prompt).toContain("总结这篇笔记");
-    expect(prompt).toContain(`文件：${SENTINEL_PATH}`);
-    expect(prompt).toContain("<document>");
-    expect(prompt).toContain(SENTINEL_BODY);
+    expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(prompt).toContain(`absolute_path: ${vaultPath}/${SENTINEL_PATH}`);
+    expect(prompt).not.toContain("<document>");
+    expect(prompt).not.toContain(SENTINEL_BODY);
   });
 
-  it("gives a menu-selected skill the explicit selection with its document", () => {
+  it("gives a menu-selected skill the explicit selection without full document body", () => {
     const prompt = buildOutboundPrompt({
       request: "/skill plan 改写选区",
       isSlashCommand: false,
@@ -172,9 +180,9 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
     expect(prompt).toContain('Load and follow the installed Hermes skill named "plan"');
     expect(prompt).toContain("改写选区");
     expect(prompt).toContain("<selection>");
-    expect(prompt).toContain("<document>");
     expect(prompt).toContain(SENTINEL_PATH);
-    expect(prompt).toContain(SENTINEL_BODY);
+    expect(prompt).not.toContain("<document>");
+    expect(prompt).not.toContain(SENTINEL_BODY);
   });
 
   it("keeps a menu-selected skill free of any note context when the capsule is off and no selection is attached", () => {
@@ -227,12 +235,14 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
       selection: undefined,
       documentContext: sentinelDocumentContext(),
       activeNotePath: SENTINEL_PATH,
+      activeNoteAbsolutePath: `${vaultPath}/${SENTINEL_PATH}`,
     });
 
     expect(prompt).not.toBe("/skill plan 总结这篇笔记");
     expect(prompt).toContain('Load and follow the installed Hermes skill named "plan"');
-    expect(prompt).toContain(`文件：${SENTINEL_PATH}`);
-    expect(prompt).toContain(SENTINEL_BODY);
+    expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(prompt).toContain(`absolute_path: ${vaultPath}/${SENTINEL_PATH}`);
+    expect(prompt).not.toContain(SENTINEL_BODY);
   });
 
   it("falls back to the active-note marker only when the capsule is on but no document context was captured", () => {
@@ -265,7 +275,7 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
     expect(prompt).not.toMatch(/obsidian_context|document_included|active_note/);
   });
 
-  it("routes a changed-note injection to the note_changed marker without the document body", () => {
+  it("always injects active note paths when capsule is on even if legacy dedupe flags are passed", () => {
     const prompt = buildOutboundPrompt({
       request: "继续总结",
       isSlashCommand: false,
@@ -273,36 +283,19 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
       selection: undefined,
       documentContext: sentinelDocumentContext(),
       activeNotePath: SENTINEL_PATH,
-      noteContextInjection: "changed",
+      activeNoteAbsolutePath: `${vaultPath}/${SENTINEL_PATH}`,
+      noteContextInjection: "none",
     });
 
-    expect(prompt).toContain("note_changed: true");
     expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(prompt).toContain(`absolute_path: ${vaultPath}/${SENTINEL_PATH}`);
     expect(prompt).toContain("document_included: false");
     expect(prompt).toContain("继续总结");
     expect(prompt).not.toContain("<document>");
     expect(prompt).not.toContain(SENTINEL_BODY);
   });
 
-  it("emits only the request for a none injection even when a captured document is available", () => {
-    const prompt = buildOutboundPrompt({
-      request: "继续",
-      isSlashCommand: false,
-      includeCurrentDocumentContext: true,
-      selection: undefined,
-      documentContext: sentinelDocumentContext(),
-      activeNotePath: SENTINEL_PATH,
-      noteContextInjection: "none",
-    });
-
-    expect(prompt).toBe("继续");
-    expect(prompt).not.toContain(SENTINEL_BODY);
-    expect(prompt).not.toContain(SENTINEL_PATH);
-    expect(prompt).not.toContain("active_note");
-    expect(prompt).not.toContain("<obsidian_context>");
-  });
-
-  it("keeps the skill load instruction for a none injection while omitting all note context", () => {
+  it("keeps the skill load instruction and active note paths on every turn while capsule is on", () => {
     const prompt = buildOutboundPrompt({
       request: "/skill plan 继续",
       isSlashCommand: false,
@@ -311,18 +304,19 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
       selection: undefined,
       documentContext: sentinelDocumentContext(),
       activeNotePath: SENTINEL_PATH,
+      activeNoteAbsolutePath: `${vaultPath}/${SENTINEL_PATH}`,
       noteContextInjection: "none",
     });
 
     expect(prompt).toContain('Load and follow the installed Hermes skill named "plan"');
     expect(prompt).toContain("继续");
+    expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
+    expect(prompt).toContain(`absolute_path: ${vaultPath}/${SENTINEL_PATH}`);
     expect(prompt).not.toContain(SENTINEL_BODY);
-    expect(prompt).not.toContain(SENTINEL_PATH);
-    expect(prompt).not.toContain("active_note");
-    expect(prompt).not.toContain("<obsidian_context>");
+    expect(prompt).not.toContain("<document>");
   });
 
-  it("uses the active-note path for a changed injection when no document was captured", () => {
+  it("injects the active-note path when no document was captured", () => {
     const prompt = buildOutboundPrompt({
       request: "继续",
       isSlashCommand: false,
@@ -334,7 +328,7 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
     });
 
     expect(prompt).toContain(`active_note: ${SENTINEL_PATH}`);
-    expect(prompt).toContain("note_changed: true");
+    expect(prompt).toContain("document_included: false");
     expect(prompt).not.toContain("<document>");
   });
 
@@ -350,8 +344,8 @@ describe("buildOutboundPrompt (production send-path routing)", () => {
     });
 
     expect(prompt).toContain("<selection>");
-    expect(prompt).toContain("<document>");
-    expect(prompt).toContain(SENTINEL_BODY);
+    expect(prompt).not.toContain("<document>");
+    expect(prompt).not.toContain(SENTINEL_BODY);
   });
 
   it("ignores a changed override for a native control command", () => {

@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import { loadHermesLocalHistory } from "./hermes-local-history";
 import {
   addIcon,
@@ -606,6 +608,14 @@ export default class HermesianPlugin extends Plugin {
       this.lastMarkdownView?.file?.path ??
       undefined
     );
+  }
+
+  getMarkdownAbsolutePath(filePath: string): string | undefined {
+    try {
+      return join(this.getVaultPath(), filePath);
+    } catch {
+      return undefined;
+    }
   }
 
   private currentMarkdownFilePath(): string | undefined {

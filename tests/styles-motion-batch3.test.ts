@@ -408,6 +408,93 @@ describe("Message entrance and streaming reveal behavior", () => {
     );
   });
 
+  it("does not auto-send a default rewrite prompt when a selection exists with an empty draft, and injects path-only chip when capsule is on", async () => {
+    const tab = { id: "tab-1", sessionId: "sess-1", title: "Chat" };
+    const client = {
+      sessionId: "sess-1",
+      sendPrompt: vi.fn().mockResolvedValue(undefined),
+    };
+    const makeView = (text: string, includeCurrentDocumentContext: boolean) => {
+      const view = Object.create(HermesianSidebarView.prototype);
+      view.conversationWorkspace = { activeTabId: "tab-1", tabs: [tab] };
+      view.activeConversationTab = () => tab;
+      view.controller = {
+        getSnapshot: () => ({
+          tabOperations: new Map([["tab-1", { connection: "ready" }]]),
+        }),
+        setPromptRunning: vi.fn(),
+      };
+      view.controlAvailability = () => ({ send: true });
+      view.isStopping = () => false;
+      view.isTabBusy = () => false;
+      view.isTabLoading = () => false;
+      view.hasPendingPermission = () => false;
+      view.historyRendering = new Map();
+      view.composerDraft = { token: null, text, references: [] };
+      view.includeCurrentDocumentContext = includeCurrentDocumentContext;
+      view.pendingImages = new Map();
+      view.editScopes = new Map();
+      view.tabSelections = new Map();
+      view.plugin = {
+        getClient: () => client,
+        setConversationWorkspace: vi.fn(),
+        getCurrentMarkdownFilePath: () => "Folder/demo.md",
+        getMarkdownAbsolutePath: (p: string) => `/vault/${p}`,
+      };
+      view.turnRuntime = () => ({ busy: false, toolEls: new Map() });
+      view.messageContainer = () => document.createElement("div");
+      view.setCurrentFile = vi.fn();
+      view.resetStreamingMessage = vi.fn();
+      view.clearQueuedSteers = vi.fn();
+      view.renderConversationTabs = vi.fn();
+      view.updateControls = vi.fn();
+      view.setComposerSlashToken = vi.fn();
+      view.renderComposerInlineDraft = vi.fn();
+      view.hideSlashMenu = vi.fn();
+      view.renderSelectionBar = vi.fn();
+      view.renderImageAttachmentBar = vi.fn();
+      view.captureActiveConversationRuntime = vi.fn();
+      view.loadedMessageTabIds = new Set();
+      view.appendUserMessage = vi.fn();
+      return view;
+    };
+
+    const emptyView = makeView("   ", false);
+    emptyView.pendingSelection = {
+      filePath: "Folder/demo.md",
+      absolutePath: "/vault/Folder/demo.md",
+      selectedText: "hello",
+      startLine: 1,
+      endLine: 1,
+      from: { line: 0, ch: 0 },
+      to: { line: 0, ch: 5 },
+      documentContent: "hello",
+      documentHash: "abc",
+      selectionStartOffset: 0,
+      selectionEndOffset: 5,
+    };
+    await (emptyView as any).sendMessage();
+    expect(client.sendPrompt).not.toHaveBeenCalled();
+
+    const capsuleView = makeView("看看这篇", true);
+    await (capsuleView as any).sendMessage();
+    expect(client.sendPrompt).toHaveBeenCalledOnce();
+    const sentText = client.sendPrompt.mock.calls[0]?.[0] as string;
+    expect(sentText).toContain("active_note: Folder/demo.md");
+    expect(sentText).toContain("absolute_path: /vault/Folder/demo.md");
+    expect(sentText).not.toContain("<document>");
+    expect(capsuleView.appendUserMessage).toHaveBeenCalledWith(
+      "看看这篇",
+      undefined,
+      undefined,
+      "tab-1",
+      [],
+      "📄 demo",
+      "Folder/demo.md",
+      { animate: true },
+    );
+  });
+
   it("does not attach .is-entering during history replay", async () => {
     const parent = document.createElement("div");
     const view = Object.create(HermesianSidebarView.prototype);
