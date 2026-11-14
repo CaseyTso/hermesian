@@ -176,7 +176,11 @@ export function createComposerView(
   });
   imageAttachmentBarEl.hide();
 
-  const composerInputRowEl = composerHostEl.createDiv({
+  const composerCardEl = composerHostEl.createDiv({
+    cls: "hermesian-composer-card",
+  });
+
+  const composerInputRowEl = composerCardEl.createDiv({
     cls: "hermesian-composer-input-row",
   });
 
@@ -221,7 +225,7 @@ export function createComposerView(
   });
   renderInlineDraft(composerEl, state.draft, renderOptions());
 
-  const slashMenuEl = composerHostEl.createDiv({
+  const slashMenuEl = composerCardEl.createDiv({
     attr: {
       "aria-label": "Hermes slash commands and skills",
       id: "hermesian-slash-menu",
@@ -231,7 +235,7 @@ export function createComposerView(
   });
   slashMenuEl.hide();
 
-  const composerFooter = composerHostEl.createDiv({ cls: "hermesian-composer-footer" });
+  const composerFooter = composerCardEl.createDiv({ cls: "hermesian-composer-footer" });
   const controlRow = composerFooter.createDiv({ cls: "hermesian-control-row" });
 
   const filePickerContainerEl = controlRow.createDiv({
