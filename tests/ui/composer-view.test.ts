@@ -183,7 +183,7 @@ describe("createComposerView", () => {
     expect(elements.stopButtonEl.style.display).not.toBe("none");
   });
 
-  it("includes a file picker button placed in the current file row before the add selection button", () => {
+  it("keeps the top current-file row purely contextual and places attachment actions on the left of the bottom control row", () => {
     const { elements } = setup();
     expect(elements.filePickerButtonEl).toBeTruthy();
     expect(elements.filePickerButtonEl.classList.contains("hermesian-file-picker")).toBe(
@@ -192,15 +192,21 @@ describe("createComposerView", () => {
     expect(elements.filePickerButtonEl.getAttribute("aria-label")).toBe(
       "Attach file or folder",
     );
-    const row = elements.currentFileBarEl.parentElement!;
-    expect(row.contains(elements.filePickerButtonEl)).toBe(true);
-    expect(row.contains(elements.addSelectionButtonEl)).toBe(true);
-    const children = Array.from(row.children);
-    expect(children.indexOf(elements.currentFileBarEl)).toBeLessThan(
-      children.indexOf(elements.filePickerButtonEl.parentElement!),
-    );
+    const currentFileRow = elements.currentFileBarEl.parentElement!;
+    expect(currentFileRow.children).toHaveLength(1);
+    expect(currentFileRow.contains(elements.filePickerButtonEl)).toBe(false);
+    expect(currentFileRow.contains(elements.addSelectionButtonEl)).toBe(false);
+
+    const controlRow = elements.modelButtonEl.parentElement!;
+    expect(controlRow.classList.contains("hermesian-control-row")).toBe(true);
+    expect(controlRow.contains(elements.filePickerButtonEl)).toBe(true);
+    expect(controlRow.contains(elements.addSelectionButtonEl)).toBe(true);
+    const children = Array.from(controlRow.children);
     expect(children.indexOf(elements.filePickerButtonEl.parentElement!)).toBeLessThan(
       children.indexOf(elements.addSelectionButtonEl),
+    );
+    expect(children.indexOf(elements.addSelectionButtonEl)).toBeLessThan(
+      children.indexOf(elements.modelButtonEl),
     );
   });
 

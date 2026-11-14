@@ -552,4 +552,41 @@ describe("Message entrance and streaming reveal behavior", () => {
     expect(contentEl?.querySelectorAll(".hermesian-stream-reveal").length).toBe(0);
     expect(contentEl?.textContent).toBe("Streaming line 1\nStreaming line 2");
   });
+
+  it("replaces loading transient notice in place and removes it when the first user message arrives", () => {
+    const parent = document.createElement("div");
+    const view = Object.create(HermesianSidebarView.prototype);
+    view.transientSystemMessages = new Map();
+    view.messageContainer = () => parent;
+    view.messagesEl = parent;
+    view.conversationWorkspace = { activeTabId: "tab-1", tabs: [{ id: "tab-1" }] };
+    view.scrollToBottom = vi.fn();
+    view.attachMessageCopyButton = vi.fn();
+
+    (view as any).setTransientSystemMessage(
+      "Starting a new Hermes conversation…",
+      "tab-1",
+      { loading: true },
+    );
+    expect(parent.querySelectorAll(".hermesian-system.is-transient")).toHaveLength(1);
+    const loadingEl = parent.querySelector<HTMLElement>(".hermesian-system.is-transient");
+    expect(loadingEl?.classList.contains("is-loading")).toBe(true);
+    expect(loadingEl?.classList.contains("is-swapping")).toBe(true);
+    expect(loadingEl?.querySelector(".hermesian-system-flow-text")?.textContent).toBe(
+      "Starting a new Hermes conversation…",
+    );
+
+    (view as any).setTransientSystemMessage("New Hermes conversation started.", "tab-1");
+    const noticesAfterStart = parent.querySelectorAll(".hermesian-system.is-transient");
+    expect(noticesAfterStart).toHaveLength(1);
+    expect(noticesAfterStart[0]?.classList.contains("is-loading")).toBe(false);
+    expect(noticesAfterStart[0]?.textContent).toBe("New Hermes conversation started.");
+
+    (view as any).appendUserMessage("你好", undefined, undefined, "tab-1", [], undefined, undefined, {
+      animate: true,
+    });
+    expect(parent.querySelectorAll(".hermesian-system")).toHaveLength(0);
+    expect(parent.querySelectorAll(".hermesian-message.is-user")).toHaveLength(1);
+    expect(parent.querySelector(".hermesian-message-content")?.textContent).toBe("你好");
+  });
 });

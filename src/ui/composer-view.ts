@@ -148,21 +148,6 @@ export function createComposerView(
     cls: "hermesian-current-file-label",
   });
 
-  const filePickerContainerEl = currentFileRowEl.createDiv({
-    cls: "hermesian-file-picker-container",
-  });
-
-  const filePickerButtonEl = filePickerContainerEl.createEl("button", {
-    attr: {
-      "aria-label": "Attach file or folder",
-      title: "Attach file or folder",
-      type: "button",
-    },
-    cls: "clickable-icon hermesian-file-picker",
-  }) as HTMLButtonElement;
-  const filePickerIcon = filePickerButtonEl.createSpan();
-  filePickerIcon.empty();
-
   // Hidden native inputs: the host wires `change` and reads File.path.
   // Single-select file input (no `multiple`), folder input with webkitdirectory.
   const fileInputEl = composerHostEl.createEl("input", {
@@ -183,58 +168,6 @@ export function createComposerView(
     },
   }) as HTMLInputElement;
   folderInputEl.style.display = "none";
-
-  // Dropdown menu: plain div (no Obsidian Menu) toggled by the button; menu
-  // items trigger the matching hidden input and close; outside clicks close.
-  const filePickerMenuEl = filePickerContainerEl.createDiv({ cls: "hermesian-file-picker-menu" });
-  filePickerMenuEl.hide();
-  const pickFileOptionEl = filePickerMenuEl.createEl("button", {
-    attr: { type: "button" },
-    cls: "hermesian-file-picker-option",
-    text: "Select file…",
-  });
-  const pickFolderOptionEl = filePickerMenuEl.createEl("button", {
-    attr: { type: "button" },
-    cls: "hermesian-file-picker-option",
-    text: "Select folder…",
-  });
-  pickFileOptionEl.addEventListener("click", () => {
-    callbacks.onFilePickerOpen?.("file");
-    fileInputEl.click();
-    filePickerMenuEl.hide();
-  });
-  pickFolderOptionEl.addEventListener("click", () => {
-    callbacks.onFilePickerOpen?.("folder");
-    folderInputEl.click();
-    filePickerMenuEl.hide();
-  });
-  filePickerButtonEl.addEventListener("click", () => {
-    if (filePickerMenuEl.style.display === "none") {
-      filePickerMenuEl.show();
-    } else {
-      filePickerMenuEl.hide();
-    }
-  });
-  const outsideClickHandler = (event: MouseEvent): void => {
-    if (
-      !filePickerButtonEl.contains(event.target as Node) &&
-      !filePickerMenuEl.contains(event.target as Node)
-    ) {
-      filePickerMenuEl.hide();
-    }
-  };
-  filePickerMenuEl.ownerDocument.addEventListener("click", outsideClickHandler);
-
-  const addSelectionButtonEl = currentFileRowEl.createEl("button", {
-    attr: {
-      "aria-label": "Add selection",
-      title: "Add selection",
-      type: "button",
-    },
-    cls: "clickable-icon hermesian-add-selection",
-  }) as HTMLButtonElement;
-  const addSelectionIcon = addSelectionButtonEl.createSpan();
-  addSelectionIcon.empty();
 
   const selectionBarEl = composerContexts.createDiv({ cls: "hermesian-selection-bar" });
   selectionBarEl.hide();
@@ -301,9 +234,81 @@ export function createComposerView(
   const composerFooter = composerHostEl.createDiv({ cls: "hermesian-composer-footer" });
   const controlRow = composerFooter.createDiv({ cls: "hermesian-control-row" });
 
+  const filePickerContainerEl = controlRow.createDiv({
+    cls: "hermesian-file-picker-container",
+  });
+
+  const filePickerButtonEl = filePickerContainerEl.createEl("button", {
+    attr: {
+      "aria-label": "Attach file or folder",
+      title: "Attach file or folder",
+      type: "button",
+    },
+    cls: "clickable-icon hermesian-file-picker",
+  }) as HTMLButtonElement;
+  const filePickerIcon = filePickerButtonEl.createSpan();
+  filePickerIcon.empty();
+
+  // Dropdown menu: plain div (no Obsidian Menu) toggled by the button; menu
+  // items trigger the matching hidden input and close; outside clicks close.
+  const filePickerMenuEl = filePickerContainerEl.createDiv({ cls: "hermesian-file-picker-menu" });
+  filePickerMenuEl.hide();
+  const pickFileOptionEl = filePickerMenuEl.createEl("button", {
+    attr: { type: "button" },
+    cls: "hermesian-file-picker-option",
+    text: "Select file…",
+  });
+  const pickFolderOptionEl = filePickerMenuEl.createEl("button", {
+    attr: { type: "button" },
+    cls: "hermesian-file-picker-option",
+    text: "Select folder…",
+  });
+  pickFileOptionEl.addEventListener("click", () => {
+    callbacks.onFilePickerOpen?.("file");
+    fileInputEl.click();
+    filePickerMenuEl.hide();
+  });
+  pickFolderOptionEl.addEventListener("click", () => {
+    callbacks.onFilePickerOpen?.("folder");
+    folderInputEl.click();
+    filePickerMenuEl.hide();
+  });
+  filePickerButtonEl.addEventListener("click", () => {
+    if (filePickerMenuEl.style.display === "none") {
+      filePickerMenuEl.show();
+    } else {
+      filePickerMenuEl.hide();
+    }
+  });
+  const outsideClickHandler = (event: MouseEvent): void => {
+    if (
+      !filePickerButtonEl.contains(event.target as Node) &&
+      !filePickerMenuEl.contains(event.target as Node)
+    ) {
+      filePickerMenuEl.hide();
+    }
+  };
+  filePickerMenuEl.ownerDocument.addEventListener("click", outsideClickHandler);
+
+  const addSelectionButtonEl = controlRow.createEl("button", {
+    attr: {
+      "aria-label": "Add selection",
+      title: "Add selection",
+      type: "button",
+    },
+    cls: "clickable-icon hermesian-add-selection",
+  }) as HTMLButtonElement;
+  const addSelectionIcon = addSelectionButtonEl.createSpan();
+  addSelectionIcon.empty();
+
+  controlRow.createSpan({
+    attr: { "aria-hidden": "true" },
+    cls: "hermesian-control-divider",
+  });
+
   const modelButtonEl = controlRow.createEl("button", {
-    attr: { "aria-label": "Select Hermes model" },
-    cls: "hermesian-model-button",
+    attr: { "aria-label": "Select Hermes model", type: "button" },
+    cls: "clickable-icon hermesian-model-button",
   });
   const modelIcon = modelButtonEl.createSpan({ cls: "hermesian-model-icon" });
   modelIcon.empty();
@@ -315,8 +320,8 @@ export function createComposerView(
   chevron.empty();
 
   const reasoningButtonEl = controlRow.createEl("button", {
-    attr: { "aria-label": "Adjust Hermes thinking depth" },
-    cls: "hermesian-reasoning-button",
+    attr: { "aria-label": "Adjust Hermes thinking depth", type: "button" },
+    cls: "clickable-icon hermesian-reasoning-button",
   });
   const reasoningIcon = reasoningButtonEl.createSpan({ cls: "hermesian-reasoning-icon" });
   reasoningIcon.empty();

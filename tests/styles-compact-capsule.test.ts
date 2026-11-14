@@ -45,24 +45,25 @@ describe("compact control capsules are pills", () => {
   it("keeps the pill token defined once and leaves the rest of the base rules intact", () => {
     expect(css.match(/--hermesian-radius-pill:\s*999px;/g)).toHaveLength(1);
 
-    // The model capsule's layout declarations are untouched by the pill work.
+    // The model capsule sizes to its label without fighting the spacer, and
+    // shrinks gracefully before the thinking-depth capsule.
     const model = ruleBody(".hermesian-model-button");
-    expect(model).toMatch(/flex:\s*1 1 0;/);
-    expect(model).toMatch(/max-width:\s*320px;/);
+    expect(model).toMatch(/flex:\s*0 1 auto;/);
+    expect(model).toMatch(/max-width:\s*240px;/);
     expect(model).toMatch(/min-height:\s*30px;/);
     expect(model).toMatch(/min-width:\s*0;/);
-    expect(model).toMatch(/padding:\s*4px 7px;/);
+    expect(model).toMatch(/padding:\s*4px 8px;/);
 
     const reasoning = ruleBody(".hermesian-reasoning-button");
     // Content-adaptive width: the thinking-depth capsule must size to its
     // label (brain icon + gap + effort word + padding), never to a fixed
     // 155px basis or a 90px floor that forced dead space and pushed the
     // trailing icon buttons out of the narrowest sidebar.
-    expect(reasoning).toMatch(/flex:\s*0 1 auto;/);
+    expect(reasoning).toMatch(/flex:\s*0 0 auto;/);
     expect(reasoning).toMatch(/max-width:\s*112px;/);
     expect(reasoning).toMatch(/min-height:\s*30px;/);
     expect(reasoning).toMatch(/min-width:\s*0;/);
-    expect(reasoning).toMatch(/padding:\s*4px 7px;/);
+    expect(reasoning).toMatch(/padding:\s*4px 8px;/);
   });
 
   it("keeps the brain icon on the thinking-depth capsule (icon-only model button must not blur the two)", () => {

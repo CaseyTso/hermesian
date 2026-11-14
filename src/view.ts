@@ -358,6 +358,7 @@ export class HermesianSidebarView extends ItemView {
   private titlePopoverAnchorEl: HTMLElement | undefined;
   private contextGaugePopover: HermesContextGaugePopover | null = null;
   private readonly tabFirstUserMessages = new Map<string, string>();
+  private readonly transientSystemMessages = new Map<string, HTMLElement>();
   private selectionBarEl!: HTMLElement;
   private sendButtonEl!: HTMLButtonElement;
   private steerButtonEl!: HTMLButtonElement;
@@ -709,7 +710,7 @@ export class HermesianSidebarView extends ItemView {
       }
     });
 
-    this.appendSystemMessage(
+    this.setTransientSystemMessage(
       "Select text in a Markdown note and run 'Ask Hermes about selection' to focus a question or edit on that passage.",
     );
 
@@ -853,8 +854,8 @@ export class HermesianSidebarView extends ItemView {
     setIcon(composerElements.modelButtonEl.querySelector(".hermesian-model-icon")!, "bot");
     setIcon(composerElements.modelButtonEl.querySelector(".hermesian-model-chevron")!, "chevron-down");
     setIcon(composerElements.reasoningButtonEl.querySelector(".hermesian-reasoning-icon")!, "brain");
-    setIcon(composerElements.addSelectionButtonEl.querySelector("span")!, "paperclip");
-    setIcon(composerElements.filePickerButtonEl.querySelector("span")!, "file-plus");
+    setIcon(composerElements.addSelectionButtonEl.querySelector("span")!, "text-select");
+    setIcon(composerElements.filePickerButtonEl.querySelector("span")!, "paperclip");
     setIcon(composerElements.dictationButtonEl.querySelector("span")!, "mic");
     setIcon(composerElements.sendButtonEl.querySelector("span")!, "arrow-right");
     setIcon(composerElements.steerButtonEl.querySelector("span")!, "corner-down-left");
@@ -1186,6 +1187,7 @@ export class HermesianSidebarView extends ItemView {
 
   private forgetConversationMessages(tabId: string): void {
     this.tabFirstUserMessages?.delete(tabId);
+    this.transientSystemMessages?.delete(tabId);
     this.loadedMessageTabIds.delete(tabId);
     this.displayedHistories.delete(tabId);
     this.historyRendering.delete(tabId);
@@ -1510,10 +1512,10 @@ export class HermesianSidebarView extends ItemView {
       this.resetConversationView(pendingTabId);
       this.restoreActiveConversationRuntime();
       this.renderConversationTabs();
-      this.appendSystemMessage(
+      this.setTransientSystemMessage(
         "Starting a new Hermes conversation…",
-        false,
         pendingTabId,
+        { loading: true },
       );
     }
 
@@ -1525,12 +1527,14 @@ export class HermesianSidebarView extends ItemView {
         this.showConversationMessages(result.tabId);
       }
       this.renderConversationTabs();
-      this.appendSystemMessage(
+      this.setTransientSystemMessage(
         "New Hermes conversation started.",
-        false,
         result.tabId,
       );
     } catch (_error) {
+      if (pendingTabId) {
+        this.clearTransientSystemMessage(pendingTabId);
+      }
       this.renderReadinessStatus();
     }
   }
@@ -1570,9 +1574,8 @@ export class HermesianSidebarView extends ItemView {
       // Start owner-scoped hydration for the replacement when needed
       if (result.replacementTabId) {
         this.showConversationMessages(result.replacementTabId);
-        this.appendSystemMessage(
+        this.setTransientSystemMessage(
           "Conversation closed. A new Hermes conversation started.",
-          false,
           result.replacementTabId,
         );
         this.startConversationHydration(result.replacementTabId);
@@ -1644,9 +1647,8 @@ export class HermesianSidebarView extends ItemView {
       } else if (result.started) {
         this.resetConversationView(result.tabId);
         this.loadedMessageTabIds.add(result.tabId);
-        this.appendSystemMessage(
+        this.setTransientSystemMessage(
           "New Hermes conversation started.",
-          false,
           result.tabId,
         );
       }
@@ -1835,7 +1837,7 @@ export class HermesianSidebarView extends ItemView {
     await flushTurn();
     if (!isCurrent()) return;
     if (items.length === 0) {
-      this.appendSystemMessage("This session has no displayable messages.", false, tabId);
+      this.setTransientSystemMessage("This session has no displayable messages.", tabId);
     }
     this.loadedMessageTabIds.add(tabId);
     this.updateComposerPlaceholder();
@@ -3271,7 +3273,7 @@ export class HermesianSidebarView extends ItemView {
       this.conversationWorkspace = result.workspace;
       this.resetConversationView(tabId);
       this.editScopes.set(tabId, undefined);
-      this.appendSystemMessage("New Hermes session started.", false, tabId);
+      this.setTransientSystemMessage("New Hermes session started.", tabId);
       if (this.conversationWorkspace.activeTabId === tabId) {
         this.showConversationMessages(tabId);
         this.restoreActiveConversationRuntime();
@@ -3319,6 +3321,7 @@ export class HermesianSidebarView extends ItemView {
       this.tabFirstUserMessages.set(tabId, text.trim());
       this.renderConversationTabs?.();
     }
+    this.clearTransientSystemMessage?.(tabId);
     const parent = tabId ? this.messageContainer(tabId) : this.messagesEl;
     const isVisibleTab = this.messageRenderer
       ? (tabId ? this.messageRenderer.isVisible(tabId) : true)
@@ -3549,6 +3552,7 @@ export class HermesianSidebarView extends ItemView {
 
   private resetConversationView(tabId: string): void {
     this.tabFirstUserMessages?.delete(tabId);
+    this.transientSystemMessages?.delete(tabId);
     this.turnManager.resetView(tabId);
     this.updateComposerPlaceholder();
   }
@@ -3631,6 +3635,64 @@ export class HermesianSidebarView extends ItemView {
         },
       });
     });
+  }
+
+  private setTransientSystemMessage(
+    text: string,
+    tabId = this.conversationWorkspace?.activeTabId,
+    options?: { loading?: boolean },
+  ): void {
+    const key = tabId ?? "__root__";
+    this.transientSystemMessages.get(key)?.remove?.();
+    if (key !== "__root__") {
+      this.transientSystemMessages.get("__root__")?.remove?.();
+      this.transientSystemMessages.delete("__root__");
+    }
+    const parent = tabId ? this.messageContainer(tabId) : this.messagesEl;
+    const isVisibleTab = this.messageRenderer
+      ? (tabId ? this.messageRenderer.isVisible(tabId) : true)
+      : (this.conversationWorkspace ? tabId === this.conversationWorkspace.activeTabId : true);
+    const loading = options?.loading === true;
+    const message = parent.createDiv({
+      attr: {
+        "aria-live": "polite",
+        role: "status",
+      },
+      cls: `hermesian-system is-transient${loading ? " is-loading" : ""}${isVisibleTab ? " is-swapping" : ""}`,
+    });
+    if (loading) {
+      message.createSpan({
+        cls: "hermesian-system-flow-text",
+        text,
+      });
+    } else {
+      message.setText(text);
+    }
+    if (isVisibleTab) {
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        message.classList.remove("is-swapping");
+      };
+      message.addEventListener?.("animationend", cleanup, { once: true });
+      setTimeout(cleanup, 280);
+    }
+    this.transientSystemMessages.set(key, message);
+    this.scrollToBottom(tabId);
+  }
+
+  private clearTransientSystemMessage(tabId?: string): void {
+    const map = this.transientSystemMessages;
+    if (!map) {
+      return;
+    }
+    if (tabId) {
+      map.get(tabId)?.remove?.();
+      map.delete(tabId);
+    }
+    map.get("__root__")?.remove?.();
+    map.delete("__root__");
   }
 
   private appendSystemMessage(

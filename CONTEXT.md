@@ -115,8 +115,8 @@ The opaque Functional Layer popover opened by left-clicking the Context Ring Gau
 _Avoid_: Context menu, usage tooltip, settings dialog
 
 **Context Tray**:
-The upper composer region containing the active note reference capsule, the file and selection attachment actions on its right, and any active selection or image attachment bars.
-_Avoid_: Note bar, attachment bar, upload area
+The upper composer region containing the active note reference capsule and any active selection or image attachment bars, keeping attachment action buttons in the lower composer control row.
+_Avoid_: Note bar, attachment bar, upload area, top-row action buttons
 
 **Note Title Reference**:
 The canonical way Hermesian names a note in the Visual Shell: the note's title without folders or extension. The full vault path lives only in the hover tooltip, never in the visible label.
