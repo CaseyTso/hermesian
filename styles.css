@@ -2665,7 +2665,8 @@ body,
 .hermesian-title-popover-actions {
   align-items: center;
   display: flex;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .hermesian-title-popover-ai-button {
@@ -2676,6 +2677,7 @@ body,
   color: var(--text-normal);
   cursor: pointer;
   display: inline-flex;
+  flex: 0 0 auto;
   font-size: var(--font-ui-smaller);
   font-weight: 500;
   gap: 6px;
@@ -2707,11 +2709,199 @@ body,
   width: 14px;
 }
 
+.hermesian-title-popover-ai-controls {
+  align-items: center;
+  display: flex;
+  flex: 1 1 auto;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hermesian-title-popover-option-button {
+  align-items: center;
+  background: var(--background-secondary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-pill);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--font-ui-smaller);
+  font-weight: 500;
+  gap: 4px;
+  margin: 0;
+  max-width: 100%;
+  min-width: 0;
+  padding: 4px 8px;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.hermesian-title-popover-option-button:hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+  border-color: var(--hermesian-accent);
+  color: var(--text-normal);
+}
+
+.hermesian-title-popover-option-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.hermesian-title-popover-option-button:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--hermesian-accent);
+  outline: none;
+}
+
+.hermesian-title-popover-model-button {
+  flex: 1 1 0;
+  min-width: 68px;
+}
+
+.hermesian-title-popover-reasoning-button {
+  flex: 0 1 auto;
+}
+
+.hermesian-title-popover-option-icon,
+.hermesian-title-popover-option-chevron {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  opacity: 0.78;
+}
+
+.hermesian-title-popover-option-icon svg,
+.hermesian-title-popover-option-chevron svg {
+  height: 12px;
+  width: 12px;
+}
+
+.hermesian-title-popover-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .hermesian-title-popover-error {
   color: var(--text-error);
   font-size: var(--font-ui-smaller);
   line-height: 1.4;
   padding: 0 4px;
+}
+
+.hermesian-title-popover-picker {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.hermesian-title-popover-subview-header {
+  align-items: center;
+  border-bottom: 1px solid var(--hermesian-border);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 6px 8px;
+}
+
+.hermesian-title-popover-subview-title {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermesian-title-popover-search {
+  background: var(--background-secondary);
+  border: 1px solid var(--hermesian-border);
+  border-radius: var(--hermesian-radius-lg);
+  color: var(--text-normal);
+  flex: 0 0 auto;
+  font-size: var(--font-ui-small);
+  margin: 8px 10px 4px;
+  min-width: 0;
+  padding: 5px 8px;
+}
+
+.hermesian-title-popover-search::placeholder {
+  color: var(--text-faint);
+}
+
+.hermesian-title-popover-search:focus-visible,
+.hermesian-title-popover-back-button:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--hermesian-accent);
+  outline: none;
+}
+
+.hermesian-title-popover-picker-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0 8px;
+}
+
+.hermesian-title-popover-picker-list:focus {
+  outline: none;
+}
+
+.hermesian-title-popover-picker-option {
+  align-items: center;
+  border-radius: var(--hermesian-radius-sm);
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  margin: 0 6px;
+  padding: 6px 10px;
+}
+
+.hermesian-title-popover-picker-option:hover,
+.hermesian-title-popover-picker-option.is-active {
+  background: var(--hermesian-accent-soft);
+}
+
+.hermesian-title-popover-picker-option.is-active {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hermesian-accent) 30%, transparent);
+}
+
+.hermesian-title-popover-picker-option-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.hermesian-title-popover-picker-option-name {
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermesian-title-popover-picker-option-desc {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermesian-title-popover-picker-option-check {
+  color: var(--interactive-accent);
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.hermesian-title-popover-picker-option-check svg {
+  height: 14px;
+  width: 14px;
+}
+
+.hermesian-title-popover-picker-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 12px 14px;
+  text-align: center;
 }
 
 /* ── Context Gauge Popover ────────────────────────────────────────────── */

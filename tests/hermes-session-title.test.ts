@@ -616,4 +616,79 @@ db.close()
       generateHermesSessionTitle(launcher, "", "sess-empty-history", ["   ", ""]),
     ).rejects.toThrow("当前会话暂无消息，无法生成标题");
   });
+
+  it("passes custom provider, model, and reasoning effort overrides to call_llm and restores original call_llm", async () => {
+    const { root, launcher } = createGenerateFixture();
+
+    writeFileSync(
+      join(root, "agent", "title_generator.py"),
+      String.raw`import json, os
+from pathlib import Path
+
+def call_llm(**kwargs):
+    log_path = Path(os.environ["HERMES_HOME"]) / "llm_calls.json"
+    log_path.write_text(json.dumps(kwargs))
+    class _Msg:
+        content = '{"title": "Custom Model Title"}'
+    class _Choice:
+        message = _Msg()
+    class _Resp:
+        choices = [_Choice()]
+    return _Resp()
+
+def generate_title(user_message, timeout=None, failure_callback=None):
+    resp = call_llm(
+        task="title_generation",
+        messages=[{"role": "user", "content": user_message}],
+        max_tokens=512,
+        timeout=timeout,
+        reasoning_config={"enabled": False},
+    )
+    return json.loads(resp.choices[0].message.content)["title"]
+`,
+    );
+
+    const title = await generateHermesSessionTitle(
+      launcher,
+      "",
+      "sess-custom",
+      ["Optimize Vitest coverage"],
+      {
+        model: {
+          providerId: "custom:future-grok",
+          modelId: "custom:future-grok:grok-4.5",
+        },
+        reasoningEffort: "high",
+      },
+    );
+    expect(title).toBe("Custom Model Title");
+
+    const llmCall = JSON.parse(
+      execFileSync("cat", [join(root, "llm_calls.json")], { encoding: "utf8" }),
+    );
+    expect(llmCall.provider).toBe("custom:future-grok");
+    expect(llmCall.model).toBe("grok-4.5");
+    expect(llmCall.reasoning_config).toEqual({ enabled: true, effort: "high" });
+    expect(llmCall.max_tokens).toBe(4096);
+    expect(llmCall.timeout).toBe(50);
+
+    const defaultEffortTitle = await generateHermesSessionTitle(
+      launcher,
+      "",
+      "sess-default-effort",
+      ["Optimize Vitest coverage"],
+      {
+        reasoningEffort: "default",
+      },
+    );
+    expect(defaultEffortTitle).toBe("Custom Model Title");
+
+    const defaultCall = JSON.parse(
+      execFileSync("cat", [join(root, "llm_calls.json")], { encoding: "utf8" }),
+    );
+    expect(defaultCall.provider).toBeUndefined();
+    expect(defaultCall.model).toBeUndefined();
+    expect(defaultCall.reasoning_config).toBeNull();
+    expect(defaultCall.max_tokens).toBe(2048);
+  });
 });

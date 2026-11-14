@@ -28,6 +28,7 @@ import type {
 import { HERMESIAN_ICON_ID, HERMESIAN_ICON_SVG } from "./hermes-icon";
 import { chooseMarkdownSource } from "./markdown-source";
 import { isReasoningEffort } from "./session-history";
+import { normalizeTitleGenerationModel } from "./session-state";
 import {
   createDocumentContext,
   createSelectionContext,
@@ -411,6 +412,29 @@ export default class HermesianPlugin extends Plugin {
     return this.hiddenModelSaveCoordinator.save(switchIds);
   }
 
+  async saveTitleGenerationPreferences(next: {
+    model?: HermesModelOption;
+    reasoningEffort: ReasoningEffort;
+  }): Promise<void> {
+    if (!isReasoningEffort(next.reasoningEffort)) {
+      throw new Error(`Invalid reasoning effort: ${String(next.reasoningEffort)}`);
+    }
+    const previousModel = this.settings.titleGenerationModel;
+    const previousEffort = this.settings.titleGenerationReasoningEffort;
+    this.settings.titleGenerationModel = normalizeTitleGenerationModel(next.model);
+    this.settings.titleGenerationReasoningEffort = next.reasoningEffort;
+    try {
+      await this.savePluginSettings();
+    } catch (error) {
+      this.settings.titleGenerationModel = previousModel;
+      this.settings.titleGenerationReasoningEffort = previousEffort;
+      new Notice(
+        `Hermesian: failed to save title generation settings — ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw error;
+    }
+  }
+
   getConnectionSettings(): Pick<
     HermesianSettings,
     "acceptHooks" | "hermesExecutable" | "profile"
@@ -663,6 +687,14 @@ export default class HermesianPlugin extends Plugin {
         isReasoningEffort(saved.reasoningEffort)
           ? saved.reasoningEffort
           : DEFAULT_SETTINGS.reasoningEffort,
+      titleGenerationModel: normalizeTitleGenerationModel(
+        saved.titleGenerationModel,
+      ),
+      titleGenerationReasoningEffort:
+        typeof saved.titleGenerationReasoningEffort === "string" &&
+        isReasoningEffort(saved.titleGenerationReasoningEffort)
+          ? saved.titleGenerationReasoningEffort
+          : DEFAULT_SETTINGS.titleGenerationReasoningEffort,
     };
     this.conversationWorkspace = normalizeConversationWorkspace(
       saved.conversationWorkspace,

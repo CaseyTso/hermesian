@@ -2,6 +2,12 @@ import { spawn } from "node:child_process";
 
 import { loadHermesLocalHistory } from "./hermes-local-history";
 import { buildHermesPythonArgs, resolveHermesPythonCommand } from "./hermes-model-catalog";
+import type { ReasoningEffort } from "./types";
+
+export interface GenerateHermesSessionTitleOptions {
+  model?: { providerId: string; modelId: string };
+  reasoningEffort?: ReasoningEffort;
+}
 
 export const HERMES_SESSION_TITLE_MARKER = "HERMESIAN_SESSION_TITLE=";
 
@@ -54,6 +60,9 @@ import os
 import sys
 
 profile, raw_session_id, user_message = sys.argv[1:4]
+custom_provider = sys.argv[4].strip() if len(sys.argv) > 4 else ""
+custom_model = sys.argv[5].strip() if len(sys.argv) > 5 else ""
+custom_reasoning = sys.argv[6].strip().lower() if len(sys.argv) > 6 else ""
 if profile.strip():
     from hermes_cli.profiles import resolve_profile_env
     os.environ["HERMES_HOME"] = resolve_profile_env(profile.strip())
@@ -69,7 +78,8 @@ if not user_message.strip():
     raise SystemExit(0)
 
 try:
-    from agent.title_generator import generate_title
+    import agent.title_generator as _title_mod
+    generate_title = _title_mod.generate_title
 except Exception as exc:
     print("${HERMES_SESSION_TITLE_MARKER}" + json.dumps({"ok": False, "error": f"AI 标题生成器不可用: {exc}"}, ensure_ascii=False))
     raise SystemExit(0)
@@ -81,12 +91,36 @@ def on_fail(*args, **kwargs):
     elif "error" in kwargs:
         fail_reasons.append(str(kwargs["error"]))
 
+use_override = bool(
+    custom_provider or custom_model or (custom_reasoning and custom_reasoning != "none")
+)
+orig_call_llm = getattr(_title_mod, "call_llm", None) if use_override else None
+if callable(orig_call_llm):
+    def _custom_call_llm(*args, **kwargs):
+        if custom_provider:
+            kwargs["provider"] = custom_provider
+        if custom_model:
+            kwargs["model"] = custom_model
+        if custom_reasoning == "default":
+            kwargs["reasoning_config"] = None
+            kwargs["max_tokens"] = max(int(kwargs.get("max_tokens") or 0), 2048)
+        elif custom_reasoning and custom_reasoning != "none":
+            kwargs["reasoning_config"] = {"enabled": True, "effort": custom_reasoning}
+            min_tokens = 4096 if custom_reasoning in ("high", "xhigh", "max", "ultra") else 2048
+            kwargs["max_tokens"] = max(int(kwargs.get("max_tokens") or 0), min_tokens)
+        return orig_call_llm(*args, **kwargs)
+    _title_mod.call_llm = _custom_call_llm
+
+call_timeout = 50.0 if (custom_reasoning and custom_reasoning != "none") else 25.0
 try:
-    generated = generate_title(user_message, timeout=25.0, failure_callback=on_fail)
+    generated = generate_title(user_message, timeout=call_timeout, failure_callback=on_fail)
 except Exception as exc:
     generated = None
     if not fail_reasons:
         fail_reasons.append(str(exc))
+finally:
+    if callable(orig_call_llm):
+        _title_mod.call_llm = orig_call_llm
 
 if not generated or not str(generated).strip():
     err = fail_reasons[-1] if fail_reasons else "AI 未能生成有效标题"
@@ -323,6 +357,7 @@ export async function generateHermesSessionTitle(
   profile: string,
   sessionId: string,
   fallbackUserMessages?: readonly string[],
+  options?: GenerateHermesSessionTitleOptions,
 ): Promise<string> {
   const cleanSessionId = typeof sessionId === "string" ? sessionId.trim() : "";
   if (!cleanSessionId) {
@@ -358,11 +393,25 @@ export async function generateHermesSessionTitle(
     throw new Error("当前会话暂无消息，无法生成标题");
   }
 
+  const providerId = options?.model?.providerId?.trim() || "";
+  const rawModelId = options?.model?.modelId?.trim() || "";
+  const modelId =
+    providerId && rawModelId.startsWith(`${providerId}:`)
+      ? rawModelId.slice(providerId.length + 1)
+      : rawModelId;
+  const reasoningEffort = options?.reasoningEffort?.trim() || "none";
+  const hasReasoningOverride = reasoningEffort !== "" && reasoningEffort !== "none";
+  const scriptArgs =
+    providerId || modelId || hasReasoningOverride
+      ? [cleanSessionId, userSnippet, providerId, modelId, reasoningEffort]
+      : [cleanSessionId, userSnippet];
+  const timeoutMs = hasReasoningOverride ? 90_000 : 60_000;
+
   return runHermesSessionTitleScript(
     hermesExecutable,
     profile || "",
     HERMES_GENERATE_TITLE_SCRIPT,
-    [cleanSessionId, userSnippet],
-    60_000,
+    scriptArgs,
+    timeoutMs,
   );
 }

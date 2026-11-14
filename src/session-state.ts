@@ -386,3 +386,41 @@ export function calculateRemainingTokens(
   return Math.max(0, usage.size - usage.used);
 }
 
+export function normalizeTitleGenerationModel(
+  value: unknown,
+): HermesModelOption | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const providerId =
+    typeof record.providerId === "string" ? record.providerId.trim() : "";
+  const modelId =
+    typeof record.modelId === "string" ? record.modelId.trim() : "";
+  if (!providerId || !modelId) {
+    return undefined;
+  }
+  const name =
+    typeof record.name === "string" && record.name.trim()
+      ? record.name.trim()
+      : modelId;
+  const providerName =
+    typeof record.providerName === "string" && record.providerName.trim()
+      ? record.providerName.trim()
+      : providerId;
+  const switchId =
+    typeof record.switchId === "string" && record.switchId.trim()
+      ? record.switchId.trim()
+      : modelSwitchId(providerId, modelId);
+  const description =
+    typeof record.description === "string" ? record.description : "";
+  return {
+    description,
+    modelId,
+    name,
+    providerId,
+    providerName,
+    switchId,
+  };
+}
+

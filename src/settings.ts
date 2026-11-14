@@ -2,7 +2,7 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 
 import { loadHermesModelCatalog } from "./hermes-model-catalog";
 import type HermesianPlugin from "./main";
-import type { ReasoningEffort } from "./types";
+import type { HermesModelOption, ReasoningEffort } from "./types";
 
 export interface HermesianSettings {
   acceptHooks: boolean;
@@ -12,6 +12,8 @@ export interface HermesianSettings {
   hiddenModelSwitchIds: string[];
   profile: string;
   reasoningEffort: ReasoningEffort;
+  titleGenerationModel?: HermesModelOption;
+  titleGenerationReasoningEffort?: ReasoningEffort;
 }
 
 export const DEFAULT_SETTINGS: HermesianSettings = {
@@ -22,6 +24,8 @@ export const DEFAULT_SETTINGS: HermesianSettings = {
   hiddenModelSwitchIds: [],
   profile: "default",
   reasoningEffort: "default",
+  titleGenerationModel: undefined,
+  titleGenerationReasoningEffort: "none",
 };
 
 export class HermesianSettingTab extends PluginSettingTab {

@@ -377,4 +377,125 @@ describe("HermesTitlePopover", () => {
     expect(aiBtn.getAttribute("aria-disabled")).toBe("true");
     expect(aiBtn.title).toBe("发送消息后可用");
   });
+
+  it("renders model and reasoning selector capsules beside AI generate button and lets user pick them", () => {
+    const sampleModels = [
+      {
+        description: "Fast & cheap",
+        modelId: "gpt-4o-mini",
+        name: "gpt-4o-mini",
+        providerId: "openrouter",
+        providerName: "OpenRouter",
+        switchId: "openrouter:gpt-4o-mini",
+      },
+      {
+        description: "Claude Haiku",
+        modelId: "claude-3-5-haiku",
+        name: "claude-3-5-haiku",
+        providerId: "anthropic",
+        providerName: "Anthropic",
+        switchId: "anthropic:claude-3-5-haiku",
+      },
+    ];
+    const onSelectAiModel = vi.fn();
+    const onSelectAiReasoning = vi.fn();
+    const { container, onClose, popover } = openPopover({
+      canGenerateAi: true,
+      models: sampleModels,
+      onSelectAiModel,
+      onSelectAiReasoning,
+    });
+
+    const modelBtn = container.querySelector<HTMLButtonElement>(
+      ".hermesian-title-popover-model-button",
+    )!;
+    const reasoningBtn = container.querySelector<HTMLButtonElement>(
+      ".hermesian-title-popover-reasoning-button",
+    )!;
+    expect(modelBtn.textContent).toContain("默认模型");
+    expect(reasoningBtn.textContent).toContain("none");
+
+    // 1. Open model sub-picker
+    modelBtn.click();
+    const searchEl = container.querySelector<HTMLInputElement>(
+      ".hermesian-title-popover-search",
+    )!;
+    expect(searchEl.style.display).not.toBe("none");
+
+    // Search for haiku
+    searchEl.value = "haiku";
+    searchEl.dispatchEvent(new Event("input", { bubbles: true }));
+    const options = Array.from(
+      container.querySelectorAll<HTMLElement>(".hermesian-title-popover-picker-option"),
+    );
+    expect(options).toHaveLength(1);
+    expect(options[0].textContent).toContain("claude-3-5-haiku");
+
+    // Click to select
+    options[0].click();
+    expect(onSelectAiModel).toHaveBeenCalledWith(sampleModels[1]);
+    expect(modelBtn.textContent).toContain("claude-3-5-haiku");
+    expect(modelBtn.title).toContain("Anthropic · claude-3-5-haiku");
+
+    // 2. Open model sub-picker again and select "跟随 Hermes 默认"
+    modelBtn.click();
+    const allOptions = Array.from(
+      container.querySelectorAll<HTMLElement>(".hermesian-title-popover-picker-option"),
+    );
+    expect(allOptions[0].textContent).toContain("跟随 Hermes 默认");
+    allOptions[0].click();
+    expect(onSelectAiModel).toHaveBeenLastCalledWith(undefined);
+    expect(modelBtn.textContent).toContain("默认模型");
+
+    // 3. Open reasoning sub-picker and press Escape -> returns to main without closing popover
+    reasoningBtn.click();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(popover.isOpen()).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+
+    // 4. Open reasoning sub-picker and choose "high"
+    reasoningBtn.click();
+    const reasoningOptions = Array.from(
+      container.querySelectorAll<HTMLElement>(".hermesian-title-popover-picker-option"),
+    );
+    const highOption = reasoningOptions.find((el) => el.textContent?.includes("high"))!;
+    highOption.click();
+    expect(onSelectAiReasoning).toHaveBeenCalledWith("high");
+    expect(reasoningBtn.textContent).toContain("high");
+  });
+
+  it("updates model list dynamically via updateAiOptions while popover is open", () => {
+    const { container, popover } = openPopover({
+      models: [],
+      catalogLoading: true,
+    });
+
+    const modelBtn = container.querySelector<HTMLButtonElement>(
+      ".hermesian-title-popover-model-button",
+    )!;
+    modelBtn.click();
+    expect(
+      container.querySelector(".hermesian-title-popover-picker-empty")?.textContent,
+    ).toContain("正在加载");
+
+    popover.updateAiOptions({
+      catalogLoading: false,
+      models: [
+        {
+          description: "",
+          modelId: "gpt-4o-mini",
+          name: "gpt-4o-mini",
+          providerId: "openrouter",
+          providerName: "OpenRouter",
+          switchId: "openrouter:gpt-4o-mini",
+        },
+      ],
+    });
+    const options = Array.from(
+      container.querySelectorAll<HTMLElement>(".hermesian-title-popover-picker-option"),
+    );
+    expect(options.some((el) => el.textContent?.includes("gpt-4o-mini"))).toBe(true);
+  });
 });

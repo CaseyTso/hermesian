@@ -59,6 +59,7 @@ import {
   contextUsageLevel,
   contextUsagePercent,
   formatContextUsage,
+  normalizeTitleGenerationModel,
 } from "./session-state";
 import {
   buildDocumentCaption,
@@ -66,7 +67,8 @@ import {
   buildSelectionCaption,
   noteTitle,
 } from "./selection-context";
-import { reasoningEffortLabel } from "./session-history";
+import { isReasoningEffort, reasoningEffortLabel } from "./session-history";
+import { loadHermesModelCatalog } from "./hermes-model-catalog";
 import { HermesHistorySuggestModal } from "./ui/conversation-modals";
 import {
   TableModal,
@@ -356,6 +358,8 @@ export class HermesianSidebarView extends ItemView {
   private reasoningPicker: HermesReasoningPickerPopover | null = null;
   private titlePopover: HermesTitlePopover | null = null;
   private titlePopoverAnchorEl: HTMLElement | undefined;
+  private cachedTitleCatalogModels: HermesModelOption[] = [];
+  private titleCatalogLoading = false;
   private contextGaugePopover: HermesContextGaugePopover | null = null;
   private readonly tabFirstUserMessages = new Map<string, string>();
   private readonly transientSystemMessages = new Map<string, HTMLElement>();
@@ -1363,6 +1367,9 @@ export class HermesianSidebarView extends ItemView {
     const currentTitle = resolveConversationTabTitle(tab, this.firstUserMessageForTab(tabId));
     const hasCustomTitle = Boolean(tab.title?.trim());
     const canGenerateAi = Boolean(tab.sessionId) && this.tabHasMessages(tabId);
+    const availableModels = this.getAvailableTitleModels(tabId);
+    const sessionCatalogLoading =
+      this.controller?.getSnapshot().sessionStates.get(tabId)?.catalogLoading ?? false;
 
     this.titlePopoverAnchorEl = anchorEl;
     this.titlePopover = new HermesTitlePopover({
@@ -1372,11 +1379,18 @@ export class HermesianSidebarView extends ItemView {
       currentTitle,
       hasCustomTitle,
       canGenerateAi,
+      models: availableModels,
+      catalogLoading: sessionCatalogLoading || this.titleCatalogLoading,
+      hiddenModelSwitchIds: this.plugin.settings.hiddenModelSwitchIds,
+      selectedAiModel: this.getTitleAiModelPreference(),
+      selectedAiReasoningEffort: this.getTitleAiReasoningPreference(),
       getContainerRect: () => {
         const rect = this.sidebarRootEl.getBoundingClientRect();
         return { left: rect.left, width: rect.width };
       },
       iconRenderer: (element, icon) => setIcon(element, icon),
+      onSelectAiModel: async (model) => await this.saveTitleAiModelPreference(model),
+      onSelectAiReasoning: async (effort) => await this.saveTitleAiReasoningPreference(effort),
       onRename: async (nextTitle) => await this.renameConversationTitle(tabId, nextTitle),
       onGenerateAi: async () => await this.generateAiConversationTitle(tabId),
       onClose: () => {
@@ -1385,6 +1399,106 @@ export class HermesianSidebarView extends ItemView {
       },
     });
     this.titlePopover.open();
+
+    if (
+      availableModels.length === 0 &&
+      !this.titleCatalogLoading &&
+      typeof this.plugin.settings?.hermesExecutable === "string" &&
+      this.plugin.settings.hermesExecutable.trim()
+    ) {
+      void this.loadFallbackTitleModels();
+    }
+  }
+
+  private getTitleAiModelPreference(): HermesModelOption | undefined {
+    return normalizeTitleGenerationModel(this.plugin.settings?.titleGenerationModel);
+  }
+
+  private getTitleAiReasoningPreference(): ReasoningEffort {
+    const raw = this.plugin.settings?.titleGenerationReasoningEffort;
+    return typeof raw === "string" && isReasoningEffort(raw) ? raw : "none";
+  }
+
+  private async saveTitleAiModelPreference(
+    model: HermesModelOption | undefined,
+  ): Promise<void> {
+    const normalized = normalizeTitleGenerationModel(model);
+    const effort = this.getTitleAiReasoningPreference();
+    if (typeof this.plugin.saveTitleGenerationPreferences === "function") {
+      await this.plugin.saveTitleGenerationPreferences({
+        model: normalized,
+        reasoningEffort: effort,
+      });
+      return;
+    }
+    this.plugin.settings.titleGenerationModel = normalized;
+    await this.plugin.savePluginSettings?.();
+  }
+
+  private async saveTitleAiReasoningPreference(
+    effort: ReasoningEffort,
+  ): Promise<void> {
+    const model = this.getTitleAiModelPreference();
+    if (typeof this.plugin.saveTitleGenerationPreferences === "function") {
+      await this.plugin.saveTitleGenerationPreferences({
+        model,
+        reasoningEffort: effort,
+      });
+      return;
+    }
+    this.plugin.settings.titleGenerationReasoningEffort = effort;
+    await this.plugin.savePluginSettings?.();
+  }
+
+  private getAvailableTitleModels(tabId: string): HermesModelOption[] {
+    const snapshot = this.controller?.getSnapshot();
+    const tabModels = snapshot?.sessionStates.get(tabId)?.models;
+    if (tabModels && tabModels.length > 0) {
+      return tabModels;
+    }
+    if (snapshot) {
+      for (const sessionState of snapshot.sessionStates.values()) {
+        if (sessionState.models.length > 0) {
+          return sessionState.models;
+        }
+      }
+    }
+    return this.cachedTitleCatalogModels;
+  }
+
+  private async loadFallbackTitleModels(): Promise<void> {
+    if (this.titleCatalogLoading) {
+      return;
+    }
+    this.titleCatalogLoading = true;
+    this.titlePopover?.updateAiOptions({ catalogLoading: true });
+    try {
+      const catalog = await loadHermesModelCatalog(
+        resolveHermesExecutable(this.plugin.settings.hermesExecutable),
+        this.plugin.settings.profile,
+      );
+      const models: HermesModelOption[] = [];
+      for (const provider of catalog.providers) {
+        for (const model of provider.models) {
+          models.push(model);
+        }
+      }
+      this.cachedTitleCatalogModels = models;
+      if (this.titlePopover?.isOpen()) {
+        const popoverTabId = this.titlePopover.getTabId();
+        const latest = this.getAvailableTitleModels(popoverTabId);
+        this.titlePopover.updateAiOptions({
+          models: latest,
+          catalogLoading: false,
+        });
+      }
+    } catch {
+      if (this.titlePopover?.isOpen()) {
+        this.titlePopover.updateAiOptions({ catalogLoading: false });
+      }
+    } finally {
+      this.titleCatalogLoading = false;
+    }
   }
 
   private async renameConversationTitle(
@@ -1419,6 +1533,10 @@ export class HermesianSidebarView extends ItemView {
       this.plugin.settings.profile,
       tab.sessionId,
       this.userMessagesForTab(tabId),
+      {
+        model: this.getTitleAiModelPreference(),
+        reasoningEffort: this.getTitleAiReasoningPreference(),
+      },
     );
     await this.controller?.setConversationTitle(tabId, saved, tab.sessionId);
     this.renderConversationTabs();
@@ -2096,6 +2214,14 @@ export class HermesianSidebarView extends ItemView {
     }
     if (this.contextGaugePopover?.isOpen()) {
       this.contextGaugePopover.update(state.contextUsage, this.canCompressContext());
+    }
+    if (this.titlePopover?.isOpen()) {
+      const popoverTabId = this.titlePopover.getTabId();
+      this.titlePopover.updateAiOptions({
+        models: this.getAvailableTitleModels(popoverTabId),
+        catalogLoading: state.catalogLoading || this.titleCatalogLoading,
+        hiddenModelSwitchIds: this.plugin.settings.hiddenModelSwitchIds,
+      });
     }
     if (this.composerInlineDraftIsSlashCommand()) {
       this.renderSlashMenu(false);

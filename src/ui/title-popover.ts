@@ -1,3 +1,9 @@
+import type { HermesModelOption, ReasoningEffort } from "../types";
+import {
+  filterVisibleModels,
+  groupModelsByProvider,
+  searchModels,
+} from "./model-picker-popover";
 import { resolveDownwardPickerPlacement } from "./picker-geometry";
 
 export interface HermesTitlePopoverOptions {
@@ -7,6 +13,13 @@ export interface HermesTitlePopoverOptions {
   currentTitle: string;
   hasCustomTitle: boolean;
   canGenerateAi: boolean;
+  models?: HermesModelOption[];
+  catalogLoading?: boolean;
+  hiddenModelSwitchIds?: string[];
+  selectedAiModel?: HermesModelOption;
+  selectedAiReasoningEffort?: ReasoningEffort;
+  onSelectAiModel?: (model: HermesModelOption | undefined) => void | Promise<void>;
+  onSelectAiReasoning?: (effort: ReasoningEffort) => void | Promise<void>;
   onRename: (nextTitle: string) => Promise<string>;
   onGenerateAi: () => Promise<string>;
   onClose?: () => void;
@@ -16,26 +29,87 @@ export interface HermesTitlePopoverOptions {
 }
 
 const POPOVER_HEIGHT_MAX = 320;
+const PICKER_POPOVER_HEIGHT_MAX = 420;
 const OPEN_ANIMATION_DELAY_MS = 20;
+
+const TITLE_REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  "none",
+  "default",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+];
+
+const TITLE_EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
+  none: "关闭思考（默认，最快）",
+  default: "跟随所选模型/提供商默认设置",
+  minimal: "极简思考",
+  low: "轻度思考",
+  medium: "适度思考",
+  high: "深度思考",
+  xhigh: "极深思考",
+  max: "最大思考",
+  ultra: "最高可用思考",
+};
+
+function titleEffortCapsuleLabel(effort: ReasoningEffort): string {
+  return effort === "default" ? "默认" : effort;
+}
+
+function titleEffortOptionLabel(effort: ReasoningEffort): string {
+  if (effort === "none") {
+    return "none (关闭思考)";
+  }
+  if (effort === "default") {
+    return "Provider default";
+  }
+  return effort;
+}
 
 export class HermesTitlePopover {
   private readonly options: HermesTitlePopoverOptions;
   private currentTitle: string;
   private hasCustomTitle: boolean;
   private canGenerateAi: boolean;
+  private models: HermesModelOption[];
+  private catalogLoading: boolean;
+  private hiddenModelSwitchIds: string[];
+  private selectedAiModel: HermesModelOption | undefined;
+  private selectedAiReasoningEffort: ReasoningEffort;
+
   private isOpenFlag = false;
   private isEditing = false;
   private isBusy = false;
+  private mode: "main" | "model" | "reasoning" = "main";
+  private modelQuery = "";
+  private activePickerIndex = -1;
+  private renderedPickerActions: Array<{ el: HTMLElement; onChoose: () => void }> = [];
   private openFrame = 0;
   private reducedMotionClassAdded = false;
 
   private readonly containerEl: HTMLElement;
+  private readonly mainBodyEl: HTMLElement;
   private readonly displayEl: HTMLButtonElement;
   private readonly titleTextEl: HTMLElement;
   private readonly inputEl: HTMLInputElement;
   private readonly aiButtonEl: HTMLButtonElement;
   private readonly aiButtonLabelEl: HTMLElement;
+  private readonly aiModelButtonEl: HTMLButtonElement;
+  private readonly aiModelLabelEl: HTMLElement;
+  private readonly aiReasoningButtonEl: HTMLButtonElement;
+  private readonly aiReasoningLabelEl: HTMLElement;
   private readonly errorEl: HTMLElement;
+
+  private readonly pickerPaneEl: HTMLElement;
+  private readonly pickerBackButtonEl: HTMLButtonElement;
+  private readonly pickerTitleEl: HTMLElement;
+  private readonly pickerSearchEl: HTMLInputElement;
+  private readonly pickerListEl: HTMLElement;
+
   private readonly iconRenderer: (element: HTMLElement, icon: string) => void;
 
   private readonly onDocumentKeyDown = (event: KeyboardEvent): void => {
@@ -45,11 +119,43 @@ export class HermesTitlePopover {
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      if (this.isEditing) {
+      if (this.mode !== "main") {
+        this.exitSubPickerMode();
+      } else if (this.isEditing) {
         this.exitEditMode();
       } else {
         this.detach();
       }
+    }
+  };
+
+  private readonly onContainerKeyDown = (event: KeyboardEvent): void => {
+    if (!this.isOpenFlag || this.mode === "main") {
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      if (this.renderedPickerActions.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      this.setActivePickerIndex(this.activePickerIndex + 1);
+    } else if (event.key === "ArrowUp") {
+      if (this.renderedPickerActions.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      this.setActivePickerIndex(
+        this.activePickerIndex < 0
+          ? this.renderedPickerActions.length - 1
+          : this.activePickerIndex - 1,
+      );
+    } else if (event.key === "Enter" && !event.isComposing) {
+      if (this.activePickerIndex < 0 || this.activePickerIndex >= this.renderedPickerActions.length) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      this.renderedPickerActions[this.activePickerIndex].onChoose();
     }
   };
 
@@ -77,6 +183,13 @@ export class HermesTitlePopover {
     this.currentTitle = options.currentTitle;
     this.hasCustomTitle = options.hasCustomTitle;
     this.canGenerateAi = options.canGenerateAi;
+    this.models = options.models ? [...options.models] : [];
+    this.catalogLoading = Boolean(options.catalogLoading);
+    this.hiddenModelSwitchIds = options.hiddenModelSwitchIds
+      ? [...options.hiddenModelSwitchIds]
+      : [];
+    this.selectedAiModel = options.selectedAiModel;
+    this.selectedAiReasoningEffort = options.selectedAiReasoningEffort ?? "none";
     this.iconRenderer = options.iconRenderer ?? (() => {});
 
     this.containerEl = document.createElement("div");
@@ -84,6 +197,7 @@ export class HermesTitlePopover {
     this.containerEl.tabIndex = -1;
     this.containerEl.setAttribute("role", "dialog");
     this.containerEl.setAttribute("aria-label", "Conversation title");
+    this.containerEl.addEventListener("keydown", this.onContainerKeyDown);
 
     // Header (no close button inside popover per Q1)
     const headerEl = document.createElement("div");
@@ -94,9 +208,9 @@ export class HermesTitlePopover {
     headingEl.textContent = `CONVERSATION ${options.tabLabel}`;
     headerEl.appendChild(headingEl);
 
-    // Body
-    const bodyEl = document.createElement("div");
-    bodyEl.className = "hermesian-title-popover-body";
+    // Main body
+    this.mainBodyEl = document.createElement("div");
+    this.mainBodyEl.className = "hermesian-title-popover-body";
 
     // Display row (clickable to edit)
     this.displayEl = document.createElement("button");
@@ -132,7 +246,7 @@ export class HermesTitlePopover {
       }
     });
 
-    // Actions row (AI generate button)
+    // Actions row (AI generate button + model & reasoning selectors)
     const actionsEl = document.createElement("div");
     actionsEl.className = "hermesian-title-popover-actions";
 
@@ -149,12 +263,46 @@ export class HermesTitlePopover {
     this.aiButtonLabelEl.textContent = "AI 生成标题";
 
     this.aiButtonEl.append(aiIconEl, this.aiButtonLabelEl);
-    this.updateAiButtonState();
-
     this.aiButtonEl.addEventListener("click", () => {
       void this.runAiGenerate();
     });
-    actionsEl.appendChild(this.aiButtonEl);
+
+    const aiControlsEl = document.createElement("div");
+    aiControlsEl.className = "hermesian-title-popover-ai-controls";
+
+    this.aiModelButtonEl = document.createElement("button");
+    this.aiModelButtonEl.type = "button";
+    this.aiModelButtonEl.className =
+      "hermesian-title-popover-option-button hermesian-title-popover-model-button";
+    const modelIconEl = document.createElement("span");
+    modelIconEl.className = "hermesian-title-popover-option-icon";
+    this.iconRenderer(modelIconEl, "bot");
+    this.aiModelLabelEl = document.createElement("span");
+    this.aiModelLabelEl.className = "hermesian-title-popover-option-label";
+    const modelChevronEl = document.createElement("span");
+    modelChevronEl.className = "hermesian-title-popover-option-chevron";
+    this.iconRenderer(modelChevronEl, "chevron-down");
+    this.aiModelButtonEl.append(modelIconEl, this.aiModelLabelEl, modelChevronEl);
+    this.aiModelButtonEl.addEventListener("click", () => {
+      this.enterSubPickerMode("model");
+    });
+
+    this.aiReasoningButtonEl = document.createElement("button");
+    this.aiReasoningButtonEl.type = "button";
+    this.aiReasoningButtonEl.className =
+      "hermesian-title-popover-option-button hermesian-title-popover-reasoning-button";
+    const reasoningIconEl = document.createElement("span");
+    reasoningIconEl.className = "hermesian-title-popover-option-icon";
+    this.iconRenderer(reasoningIconEl, "brain");
+    this.aiReasoningLabelEl = document.createElement("span");
+    this.aiReasoningLabelEl.className = "hermesian-title-popover-option-label";
+    this.aiReasoningButtonEl.append(reasoningIconEl, this.aiReasoningLabelEl);
+    this.aiReasoningButtonEl.addEventListener("click", () => {
+      this.enterSubPickerMode("reasoning");
+    });
+
+    aiControlsEl.append(this.aiModelButtonEl, this.aiReasoningButtonEl);
+    actionsEl.append(this.aiButtonEl, aiControlsEl);
 
     // Error alert
     this.errorEl = document.createElement("div");
@@ -162,8 +310,55 @@ export class HermesTitlePopover {
     this.errorEl.setAttribute("role", "alert");
     this.errorEl.style.display = "none";
 
-    bodyEl.append(this.displayEl, this.inputEl, actionsEl, this.errorEl);
-    this.containerEl.append(headerEl, bodyEl);
+    this.mainBodyEl.append(this.displayEl, this.inputEl, actionsEl, this.errorEl);
+
+    // Sub-picker pane (hidden in main mode)
+    this.pickerPaneEl = document.createElement("div");
+    this.pickerPaneEl.className = "hermesian-title-popover-picker";
+    this.pickerPaneEl.style.display = "none";
+
+    const subHeaderEl = document.createElement("div");
+    subHeaderEl.className = "hermesian-title-popover-subview-header";
+
+    this.pickerBackButtonEl = document.createElement("button");
+    this.pickerBackButtonEl.type = "button";
+    this.pickerBackButtonEl.className =
+      "clickable-icon hermesian-title-popover-back-button";
+    this.pickerBackButtonEl.title = "返回";
+    this.pickerBackButtonEl.setAttribute("aria-label", "返回");
+    const backIconEl = document.createElement("span");
+    this.pickerBackButtonEl.appendChild(backIconEl);
+    this.iconRenderer(backIconEl, "chevron-left");
+    this.pickerBackButtonEl.addEventListener("click", () => {
+      this.exitSubPickerMode();
+    });
+
+    this.pickerTitleEl = document.createElement("span");
+    this.pickerTitleEl.className = "hermesian-title-popover-subview-title";
+    subHeaderEl.append(this.pickerBackButtonEl, this.pickerTitleEl);
+
+    this.pickerSearchEl = document.createElement("input");
+    this.pickerSearchEl.type = "text";
+    this.pickerSearchEl.className = "hermesian-title-popover-search";
+    this.pickerSearchEl.placeholder = "搜索模型或提供商…";
+    this.pickerSearchEl.setAttribute("aria-label", "搜索标题生成模型");
+    this.pickerSearchEl.addEventListener("input", () => {
+      this.modelQuery = this.pickerSearchEl.value;
+      if (this.mode === "model") {
+        this.renderModelPickerList();
+      }
+    });
+
+    this.pickerListEl = document.createElement("div");
+    this.pickerListEl.className = "hermesian-title-popover-picker-list";
+    this.pickerListEl.setAttribute("role", "listbox");
+    this.pickerListEl.tabIndex = -1;
+
+    this.pickerPaneEl.append(subHeaderEl, this.pickerSearchEl, this.pickerListEl);
+    this.containerEl.append(headerEl, this.mainBodyEl, this.pickerPaneEl);
+
+    this.updateAiButtonState();
+    this.renderAiOptionControls();
   }
 
   open(): void {
@@ -188,6 +383,7 @@ export class HermesTitlePopover {
       return;
     }
     this.isOpenFlag = false;
+    this.mode = "main";
     window.clearTimeout(this.openFrame);
     document.removeEventListener("pointerdown", this.onPointerDown, true);
     document.removeEventListener("keydown", this.onDocumentKeyDown, true);
@@ -231,6 +427,290 @@ export class HermesTitlePopover {
     }
     this.currentTitle = title;
     this.titleTextEl.textContent = title;
+  }
+
+  updateAiOptions(options: {
+    models?: HermesModelOption[];
+    catalogLoading?: boolean;
+    hiddenModelSwitchIds?: string[];
+    selectedAiModel?: HermesModelOption;
+    selectedAiReasoningEffort?: ReasoningEffort;
+  }): void {
+    if (options.models !== undefined) {
+      this.models = [...options.models];
+    }
+    if (options.catalogLoading !== undefined) {
+      this.catalogLoading = options.catalogLoading;
+    }
+    if (options.hiddenModelSwitchIds !== undefined) {
+      this.hiddenModelSwitchIds = [...options.hiddenModelSwitchIds];
+    }
+    if ("selectedAiModel" in options) {
+      this.selectedAiModel = options.selectedAiModel;
+    }
+    if (options.selectedAiReasoningEffort !== undefined) {
+      this.selectedAiReasoningEffort = options.selectedAiReasoningEffort;
+    }
+    this.renderAiOptionControls();
+    if (this.mode === "model") {
+      this.renderModelPickerList();
+    } else if (this.mode === "reasoning") {
+      this.renderReasoningPickerList();
+    }
+  }
+
+  private renderAiOptionControls(): void {
+    const model = this.selectedAiModel;
+    const modelLabel = model ? model.modelId : "默认模型";
+    const modelTooltip = model
+      ? `标题生成模型: ${model.providerName} · ${model.modelId}`
+      : "标题生成模型: 跟随 Hermes 默认配置";
+    this.aiModelLabelEl.textContent = modelLabel;
+    this.aiModelButtonEl.title = modelTooltip;
+    this.aiModelButtonEl.setAttribute("aria-label", modelTooltip);
+
+    const effort = this.selectedAiReasoningEffort;
+    const effortLabel = titleEffortCapsuleLabel(effort);
+    const effortTooltip = `标题生成思考度: ${effort} (${TITLE_EFFORT_DESCRIPTIONS[effort]})`;
+    this.aiReasoningLabelEl.textContent = effortLabel;
+    this.aiReasoningButtonEl.title = effortTooltip;
+    this.aiReasoningButtonEl.setAttribute("aria-label", effortTooltip);
+  }
+
+  private enterSubPickerMode(nextMode: "model" | "reasoning"): void {
+    if (this.isBusy) {
+      return;
+    }
+    this.mode = nextMode;
+    this.clearError();
+    this.mainBodyEl.style.display = "none";
+    this.pickerPaneEl.style.display = "";
+
+    if (nextMode === "model") {
+      this.pickerTitleEl.textContent = "标题生成模型";
+      this.modelQuery = "";
+      this.pickerSearchEl.value = "";
+      this.pickerSearchEl.style.display = "";
+      this.renderModelPickerList();
+      this.position();
+      this.pickerSearchEl.focus();
+    } else {
+      this.pickerTitleEl.textContent = "标题生成思考度";
+      this.pickerSearchEl.style.display = "none";
+      this.renderReasoningPickerList();
+      this.position();
+      this.pickerListEl.focus();
+    }
+  }
+
+  private exitSubPickerMode(): void {
+    const previousMode = this.mode;
+    this.mode = "main";
+    this.renderedPickerActions = [];
+    this.activePickerIndex = -1;
+    this.pickerPaneEl.style.display = "none";
+    this.mainBodyEl.style.display = "";
+    this.position();
+    if (previousMode === "model") {
+      this.aiModelButtonEl.focus();
+    } else if (previousMode === "reasoning") {
+      this.aiReasoningButtonEl.focus();
+    } else {
+      this.displayEl.focus();
+    }
+  }
+
+  private setActivePickerIndex(index: number): void {
+    if (this.renderedPickerActions.length === 0 || index < 0) {
+      this.activePickerIndex = -1;
+      return;
+    }
+    this.activePickerIndex =
+      ((index % this.renderedPickerActions.length) + this.renderedPickerActions.length) %
+      this.renderedPickerActions.length;
+    this.renderedPickerActions.forEach(({ el }, i) => {
+      el.classList.toggle("is-active", i === this.activePickerIndex);
+      if (i === this.activePickerIndex) {
+        el.scrollIntoView?.({ block: "nearest" });
+      }
+    });
+  }
+
+  private renderModelPickerList(): void {
+    this.pickerListEl.replaceChildren();
+    this.renderedPickerActions = [];
+    this.activePickerIndex = -1;
+    this.pickerListEl.setAttribute("aria-label", "可选标题生成模型");
+
+    const fragment = document.createDocumentFragment();
+    const normalizedQuery = this.modelQuery.trim().toLowerCase();
+    const showDefaultOption =
+      !normalizedQuery ||
+      "默认模型 跟随 hermes default auto".includes(normalizedQuery);
+
+    if (showDefaultOption) {
+      const defaultRow = this.createPickerOptionRow({
+        title: "跟随 Hermes 默认",
+        subtitle: "使用 Hermes auxiliary.title_generation 配置",
+        selected: !this.selectedAiModel,
+        onChoose: () => this.chooseAiModel(undefined),
+      });
+      fragment.appendChild(defaultRow);
+    }
+
+    const visibleModels = searchModels(
+      filterVisibleModels(
+        this.models,
+        this.hiddenModelSwitchIds,
+        this.selectedAiModel?.switchId,
+      ),
+      this.modelQuery,
+    );
+
+    for (const group of groupModelsByProvider(visibleModels)) {
+      const groupEl = document.createElement("div");
+      groupEl.className = "hermesian-model-group";
+      const labelEl = document.createElement("div");
+      labelEl.className = "hermesian-model-group-label";
+      labelEl.textContent = group.label;
+      groupEl.appendChild(labelEl);
+
+      for (const model of group.models) {
+        const optionEl = this.createPickerOptionRow({
+          title: model.name,
+          subtitle: model.description
+            ? `${model.providerName} · ${model.description}`
+            : model.providerName,
+          selected: model.switchId === this.selectedAiModel?.switchId,
+          onChoose: () => this.chooseAiModel(model),
+        });
+        groupEl.appendChild(optionEl);
+      }
+      fragment.appendChild(groupEl);
+    }
+
+    if (!showDefaultOption && visibleModels.length === 0) {
+      const emptyEl = document.createElement("div");
+      emptyEl.className = "hermesian-title-popover-picker-empty";
+      emptyEl.textContent = "没有匹配的模型";
+      fragment.appendChild(emptyEl);
+    } else if (this.models.length === 0) {
+      const hintEl = document.createElement("div");
+      hintEl.className = "hermesian-title-popover-picker-empty";
+      hintEl.textContent = this.catalogLoading
+        ? "正在加载 Hermes 模型列表…"
+        : "暂无更多可用模型（可先连接任意会话）";
+      fragment.appendChild(hintEl);
+    }
+
+    this.pickerListEl.appendChild(fragment);
+
+    const selectedIdx = this.renderedPickerActions.findIndex(
+      ({ el }) => el.getAttribute("aria-selected") === "true",
+    );
+    if (selectedIdx >= 0) {
+      this.setActivePickerIndex(selectedIdx);
+    } else if (this.renderedPickerActions.length > 0) {
+      this.setActivePickerIndex(0);
+    }
+  }
+
+  private renderReasoningPickerList(): void {
+    this.pickerListEl.replaceChildren();
+    this.renderedPickerActions = [];
+    this.activePickerIndex = -1;
+    this.pickerListEl.setAttribute("aria-label", "可选思考度");
+
+    const fragment = document.createDocumentFragment();
+    for (const effort of TITLE_REASONING_EFFORTS) {
+      const optionEl = this.createPickerOptionRow({
+        title: titleEffortOptionLabel(effort),
+        subtitle: TITLE_EFFORT_DESCRIPTIONS[effort],
+        selected: effort === this.selectedAiReasoningEffort,
+        onChoose: () => this.chooseAiReasoning(effort),
+      });
+      fragment.appendChild(optionEl);
+    }
+    this.pickerListEl.appendChild(fragment);
+
+    const selectedIdx = this.renderedPickerActions.findIndex(
+      ({ el }) => el.getAttribute("aria-selected") === "true",
+    );
+    this.setActivePickerIndex(selectedIdx >= 0 ? selectedIdx : 0);
+  }
+
+  private createPickerOptionRow(params: {
+    title: string;
+    subtitle: string;
+    selected: boolean;
+    onChoose: () => void;
+  }): HTMLElement {
+    const optionEl = document.createElement("div");
+    optionEl.className = "hermesian-title-popover-picker-option";
+    optionEl.setAttribute("role", "option");
+    optionEl.setAttribute("aria-selected", String(params.selected));
+    optionEl.tabIndex = -1;
+
+    const copyEl = document.createElement("div");
+    copyEl.className = "hermesian-title-popover-picker-option-copy";
+    const titleEl = document.createElement("div");
+    titleEl.className = "hermesian-title-popover-picker-option-name";
+    titleEl.textContent = params.title;
+    const subtitleEl = document.createElement("div");
+    subtitleEl.className = "hermesian-title-popover-picker-option-desc";
+    subtitleEl.textContent = params.subtitle;
+    copyEl.append(titleEl, subtitleEl);
+    optionEl.appendChild(copyEl);
+
+    if (params.selected) {
+      const checkEl = document.createElement("span");
+      checkEl.className = "hermesian-title-popover-picker-option-check";
+      checkEl.setAttribute("aria-hidden", "true");
+      this.iconRenderer(checkEl, "check");
+      optionEl.appendChild(checkEl);
+    }
+
+    const index = this.renderedPickerActions.length;
+    optionEl.addEventListener("pointerenter", () => {
+      this.setActivePickerIndex(index);
+    });
+    optionEl.addEventListener("click", () => {
+      params.onChoose();
+    });
+    this.renderedPickerActions.push({ el: optionEl, onChoose: params.onChoose });
+    return optionEl;
+  }
+
+  private chooseAiModel(model: HermesModelOption | undefined): void {
+    const previous = this.selectedAiModel;
+    this.selectedAiModel = model;
+    this.renderAiOptionControls();
+    this.exitSubPickerMode();
+    if (!this.options.onSelectAiModel) {
+      return;
+    }
+    void Promise.resolve(this.options.onSelectAiModel(model)).catch((error) => {
+      this.selectedAiModel = previous;
+      this.renderAiOptionControls();
+      const message = error instanceof Error ? error.message : String(error);
+      this.showError(message);
+    });
+  }
+
+  private chooseAiReasoning(effort: ReasoningEffort): void {
+    const previous = this.selectedAiReasoningEffort;
+    this.selectedAiReasoningEffort = effort;
+    this.renderAiOptionControls();
+    this.exitSubPickerMode();
+    if (!this.options.onSelectAiReasoning) {
+      return;
+    }
+    void Promise.resolve(this.options.onSelectAiReasoning(effort)).catch((error) => {
+      this.selectedAiReasoningEffort = previous;
+      this.renderAiOptionControls();
+      const message = error instanceof Error ? error.message : String(error);
+      this.showError(message);
+    });
   }
 
   private enterEditMode(): void {
@@ -288,6 +768,8 @@ export class HermesTitlePopover {
   private setBusy(busy: boolean, isAi = false): void {
     this.isBusy = busy;
     this.inputEl.disabled = busy;
+    this.aiModelButtonEl.disabled = busy;
+    this.aiReasoningButtonEl.disabled = busy;
     if (busy) {
       if (isAi) {
         this.aiButtonLabelEl.textContent = "生成中…";
@@ -351,7 +833,7 @@ export class HermesTitlePopover {
       this.titleTextEl.textContent = this.currentTitle;
     } finally {
       this.setBusy(false);
-      if (this.isOpenFlag && !this.isEditing) {
+      if (this.isOpenFlag && !this.isEditing && this.mode === "main") {
         this.displayEl.focus();
       }
     }
@@ -372,7 +854,8 @@ export class HermesTitlePopover {
       anchorRect: { bottom: rect.bottom },
       containerRect,
       viewport,
-      popoverHeightMax: POPOVER_HEIGHT_MAX,
+      popoverHeightMax:
+        this.mode === "main" ? POPOVER_HEIGHT_MAX : PICKER_POPOVER_HEIGHT_MAX,
     });
     this.containerEl.style.width = `${placement.width}px`;
     this.containerEl.style.left = `${placement.left}px`;
