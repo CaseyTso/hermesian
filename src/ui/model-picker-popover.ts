@@ -386,6 +386,10 @@ export class HermesModelPickerPopover {
     return this.isOpenFlag;
   }
 
+  contains(target: Node): boolean {
+    return this.isOpenFlag && this.containerEl.contains(target);
+  }
+
   private setMode(mode: "select" | "manage"): void {
     this.mode = mode;
     this.containerEl.classList.toggle("is-manage", mode === "manage");

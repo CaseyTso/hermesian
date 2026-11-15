@@ -57,12 +57,16 @@ A Conversation Tab preference identifying both its provider and model; same mode
 _Avoid_: Bare model name, global model, active model
 
 **File Attachment Capsule**:
-An inline reference capsule in the composer that holds an absolute file or folder path, inserted by the file picker button instead of by paste.
-_Avoid_: File chip, file pill, file token
+An inline reference capsule in the composer that holds the absolute path of a file of any type or a folder, inserted by the file picker button instead of by paste. It is a path reference, not a promise that Hermesian will parse, read, or upload the referenced content.
+_Avoid_: File chip, file pill, file token, uploaded attachment
 
 **File Picker Button**:
 A composer toolbar button that opens the system file dialog to select files or folders, inserting their absolute paths as capsules.
 _Avoid_: File upload button, attach button
+
+**Conversation Shortcut**:
+A keyboard shortcut that creates a new Conversation Tab with Option+N or closes the current Conversation Tab with Option+W only while keyboard focus is inside the Hermesian sidebar, including its inputs, buttons, conversation content, and Hermesian-owned popovers. It is not an Obsidian-wide command and is not configurable through Obsidian's hotkey settings.
+_Avoid_: Obsidian command, global hotkey, window shortcut
 
 ## Design Language
 

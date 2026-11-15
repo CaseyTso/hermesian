@@ -638,6 +638,23 @@ describe("serializeComposerInlineDraft", () => {
     ).toBe(text);
   });
 
+  it("keeps a picked PDF path with spaces and Chinese characters verbatim when sent", () => {
+    const file = new File(["PDF"], "研究 报告.pdf");
+    const filePath = "/Users/测试/My Papers/研究 报告.pdf";
+    expect(resolvePickedFilePath(file, () => filePath)).toBe(filePath);
+    const inserted = insertInlineReference(draft(), 0, {
+      kind: "path",
+      value: filePath,
+    });
+    expect(referenceTokenDisplayLabel(inserted.references[0]!)).toBe("研究 报告.pdf");
+
+    const container = document.createElement("div");
+    renderInlineDraft(container, inserted);
+    const capsule = container.querySelector<HTMLElement>(".hermesian-inline-ref");
+    expect(capsule?.getAttribute("title")).toBe(filePath);
+    expect(serializeComposerInlineDraft(inserted)).toBe(filePath);
+  });
+
   it("keeps every reference value exactly once and in place", () => {
     const text = `${URL_A} 与 ${PATH_C} 与 ${URL_A} 重复`;
     const references: InlineReference[] = [

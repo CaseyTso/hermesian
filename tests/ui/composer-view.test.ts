@@ -214,6 +214,7 @@ describe("createComposerView", () => {
     const { elements } = setup();
     expect(elements.fileInputEl.type).toBe("file");
     expect(elements.fileInputEl.style.display).toBe("none");
+    expect(elements.fileInputEl.hasAttribute("accept")).toBe(false);
     expect(elements.fileInputEl.hasAttribute("multiple")).toBe(false);
     expect(elements.folderInputEl.type).toBe("file");
     expect(elements.folderInputEl.getAttribute("webkitdirectory")).toBe("");

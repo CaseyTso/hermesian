@@ -193,6 +193,10 @@ export class HermesReasoningPickerPopover {
     return this.isOpenFlag;
   }
 
+  contains(target: Node): boolean {
+    return this.isOpenFlag && this.containerEl.contains(target);
+  }
+
   private choose(effort: ReasoningEffort): void {
     if (this.settled) {
       return;

@@ -22,6 +22,7 @@ import {
   type ConversationControllerSnapshot,
   type ConversationHistory,
 } from "./conversation-controller";
+import { conversationShortcutForEvent } from "./conversation-shortcuts";
 import {
   cycleConversationTabId,
   isActiveConversationSession,
@@ -401,6 +402,7 @@ export class HermesianSidebarView extends ItemView {
   private dictationBridge: DictationBridge | undefined;
   private stopAndSend: StopAndSendCoordinator | undefined;
   private escapeKeyBound = false;
+  private conversationShortcutsBound = false;
   private readonly logger: DebugLogger;
 
   constructor(
@@ -432,6 +434,7 @@ export class HermesianSidebarView extends ItemView {
     this.plugin.attachView(this);
     this.bindStartupStatusRetry();
     this.bindEscapeToStop();
+    this.bindConversationShortcuts();
     this.ensureConversationController();
     this.restoreActiveConversationRuntime();
     if (this.conversationWorkspace) {
@@ -3082,6 +3085,56 @@ export class HermesianSidebarView extends ItemView {
     });
   }
 
+  private bindConversationShortcuts(): void {
+    if (this.conversationShortcutsBound) {
+      return;
+    }
+    this.conversationShortcutsBound = true;
+    this.registerDomEvent(this.containerEl.ownerDocument, "keydown", (event: KeyboardEvent) => {
+      const shortcut = conversationShortcutForEvent(event);
+      if (!shortcut || !this.isHermesianInteractionFocused()) {
+        return;
+      }
+      const activeTab = this.activeConversationTab();
+      if (!activeTab) {
+        return;
+      }
+      // Always consume the matching key inside Hermesian, even when its
+      // normal tab guard refuses the action. No Option character should leak
+      // into the draft or trigger another Obsidian handler.
+      event.preventDefault();
+      event.stopPropagation();
+      // Keyboard shortcuts do not cause the pickers' pointer-down outside
+      // handler to run. Close them so a later choice cannot target the tab
+      // that was active before this shortcut switched or closed it.
+      this.modelPicker?.detach();
+      this.modelPicker = null;
+      this.reasoningPicker?.detach();
+      this.reasoningPicker = null;
+      if (shortcut === "add") {
+        void this.addConversation();
+      } else {
+        void this.closeConversation(activeTab.id);
+      }
+    });
+  }
+
+  private isHermesianInteractionFocused(): boolean {
+    const activeElement = this.containerEl.ownerDocument.activeElement;
+    if (!activeElement) {
+      return false;
+    }
+    return (
+      this.containerEl.contains(activeElement) ||
+      Boolean(
+        this.titlePopover?.contains(activeElement) ||
+        this.modelPicker?.contains(activeElement) ||
+        this.reasoningPicker?.contains(activeElement) ||
+        this.contextGaugePopover?.contains(activeElement)
+      )
+    );
+  }
+
   private async handleDictationToggle(): Promise<void> {
     if (this.dictationPhase === "transcribing") {
       return;
@@ -3298,6 +3351,7 @@ export class HermesianSidebarView extends ItemView {
     const filePath = resolvePickedFilePath(file, electronWebUtilsResolver);
     if (!filePath) {
       input.value = "";
+      new Notice("Hermesian could not access the selected file path.");
       return;
     }
     let value = filePath;

@@ -234,6 +234,10 @@ export class HermesContextGaugePopover {
     return this.isOpenFlag;
   }
 
+  contains(target: Node): boolean {
+    return this.isOpenFlag && this.containerEl.contains(target);
+  }
+
   update(
     contextUsage: SessionContextUsage | undefined,
     canCompress: { available: boolean; reason?: string },

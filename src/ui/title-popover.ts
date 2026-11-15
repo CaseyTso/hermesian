@@ -426,6 +426,10 @@ export class HermesTitlePopover {
     return this.isOpenFlag;
   }
 
+  contains(target: Node): boolean {
+    return this.isOpenFlag && this.containerEl.contains(target);
+  }
+
   getTabId(): string {
     return this.options.tabId;
   }
