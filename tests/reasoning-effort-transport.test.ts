@@ -26,6 +26,7 @@ function createClient(options: {
       debugLogging: false,
       hermesExecutable: "hermes",
       hiddenModelSwitchIds: [],
+      modelProviderExpansion: {},
       profile: "default",
       reasoningEffort: "default",
     }),

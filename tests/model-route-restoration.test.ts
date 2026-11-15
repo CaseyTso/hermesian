@@ -97,6 +97,7 @@ function createMockClient(options: {
       debugLogging: false,
       hermesExecutable: "hermes",
       hiddenModelSwitchIds: [],
+      modelProviderExpansion: {},
       profile: "default",
       reasoningEffort: "default",
     }),
