@@ -168,18 +168,22 @@ function joinCaptionParts(parts: readonly string[]): string {
 }
 
 /**
- * Note title reference: only the file name without its `.md` suffix is ever
- * visible; the vault path belongs in the tooltip.
+ * Markdown note title: only the basename without its `.md` suffix is visible.
+ * Other active files (PDF, images, and so on) retain their full basename.
  */
-export function noteTitle(filePath: string | undefined): string {
+export function activeFileTitle(filePath: string | undefined): string {
   const raw = (filePath ?? "").trim();
   if (!raw) {
     return "";
   }
   const segments = raw.split("/");
   const basename = segments[segments.length - 1] ?? "";
-  return basename.replace(/\.md$/i, "") || basename;
+  return raw.toLowerCase().endsWith(".md")
+    ? basename.replace(/\.md$/i, "") || basename
+    : basename;
 }
+
+export const noteTitle = activeFileTitle;
 
 export function buildSelectionCaption(
   selection: SelectionCaptionInput,

@@ -122,8 +122,12 @@ _Avoid_: Context menu, usage tooltip, settings dialog
 The upper composer region containing the active note reference capsule and any active selection or image attachment bars, keeping attachment action buttons in the lower composer control row.
 _Avoid_: Note bar, attachment bar, upload area, top-row action buttons
 
+**Active File Reference**:
+The capsule identifying the active vault file as prompt context. For Markdown notes, its visible label is the Note Title Reference; for PDFs and other file types, it is the basename including its extension. Its full vault path lives only in the hover tooltip, and only the file's path references—not its content—are sent for non-Markdown files.
+_Avoid_: Current Markdown capsule, uploaded PDF, parsed PDF context
+
 **Note Title Reference**:
-The canonical way Hermesian names a note in the Visual Shell: the note's title without folders or extension. The full vault path lives only in the hover tooltip, never in the visible label.
+The canonical way Hermesian names a Markdown note in the Visual Shell: the note's title without folders or extension. The full vault path lives only in the hover tooltip, never in the visible label.
 _Avoid_: Full-path label, truncated path display, breadcrumb in place of title
 
 **Selection Reference**:

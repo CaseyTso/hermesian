@@ -2395,7 +2395,7 @@ export class HermesianSidebarView extends ItemView {
   private renderCurrentFile(): void {
     const label = this.currentFilePath
       ? noteTitle(this.currentFilePath)
-      : "No Markdown note";
+      : "No active file";
     this.currentFileLabelEl.setText(label);
     this.currentFileBarEl.disabled = !this.currentFilePath;
     this.currentFileBarEl.toggleClass(
@@ -2410,7 +2410,7 @@ export class HermesianSidebarView extends ItemView {
       "title",
       this.currentFilePath
         ? `${this.includeCurrentDocumentContext ? "Exclude" : "Include"} ${this.currentFilePath} as context`
-        : "Open a Markdown note to use it as context",
+        : "Open a file to use its path as context",
     );
     this.currentFileBarEl.dataset.empty = this.currentFilePath ? "false" : "true";
   }
@@ -2573,7 +2573,7 @@ export class HermesianSidebarView extends ItemView {
     if (!this.getComposerCanonicalDraft().trim() && !images.length) return;
     const selection = routing.isNativeSlashCommand ? undefined : this.pendingSelection;
     const include = !routing.isNativeSlashCommand && !selection && this.includeCurrentDocumentContext;
-    const activeNotePath = include ? this.plugin.getCurrentMarkdownFilePath() : undefined;
+    const activeNotePath = include ? this.plugin.getCurrentFilePath() : undefined;
     const activeNoteAbsolutePath =
       include && activeNotePath
         ? this.plugin.getMarkdownAbsolutePath?.(activeNotePath)
@@ -2745,7 +2745,7 @@ export class HermesianSidebarView extends ItemView {
     if (includeNotePath) {
       activeNotePath = pending
         ? pending.activeNotePath
-        : this.plugin.getCurrentMarkdownFilePath();
+        : this.plugin.getCurrentFilePath();
       activeNoteAbsolutePath = activeNotePath
         ? (pending
             ? pending.activeNoteAbsolutePath

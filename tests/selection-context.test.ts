@@ -209,6 +209,15 @@ describe("noteTitle", () => {
     expect(noteTitle("note.md.md")).toBe("note.md");
   });
 
+  it("keeps the PDF basename including its extension and its vault path in the tooltip", () => {
+    const filePath = "05 Literature/论文 文件夹/xuProteasomeguidedHaemSignalling2026.pdf";
+    expect(noteTitle(filePath)).toBe("xuProteasomeguidedHaemSignalling2026.pdf");
+    expect(buildDocumentCaption(filePath)).toEqual({
+      text: "📄 xuProteasomeguidedHaemSignalling2026.pdf",
+      title: filePath,
+    });
+  });
+
   it("is safe for empty and undefined input", () => {
     expect(noteTitle("")).toBe("");
     expect(noteTitle(undefined)).toBe("");

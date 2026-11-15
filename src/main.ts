@@ -4,6 +4,7 @@ import { loadHermesLocalHistory } from "./hermes-local-history";
 import {
   addIcon,
   FileSystemAdapter,
+  FileView,
   type MarkdownFileInfo,
   MarkdownView,
   Notice,
@@ -107,6 +108,7 @@ export default class HermesianPlugin extends Plugin {
   private conversationWorkspace: PersistedConversationWorkspace | undefined;
   private conversationWorkspaceSaveTimer: number | undefined;
   private lastMarkdownView: MarkdownView | undefined;
+  private activeFilePath: string | undefined;
   private sidebarView: HermesianSidebarView | undefined;
 
   async onload(): Promise<void> {
@@ -115,24 +117,42 @@ export default class HermesianPlugin extends Plugin {
 
     this.lastMarkdownView =
       this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
+    this.activeFilePath =
+      this.app.workspace.getActiveFile()?.path ?? this.lastMarkdownView?.file?.path;
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf?.view instanceof HermesianSidebarView) {
+          return;
+        }
         if (leaf?.view instanceof MarkdownView && leaf.view.file) {
           this.rememberMarkdownView(leaf.view);
+        }
+        if (leaf?.view instanceof FileView) {
+          // The leaf identifies the actual current page; getActiveFile() may
+          // still report a background file while that page is loading.
+          this.setActiveFile(leaf.view.file?.path);
         }
       }),
     );
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
-        if (file?.extension !== "md") {
-          return;
-        }
         const activeView =
           this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
-        if (activeView?.file?.path === file.path) {
+        const activeLeaf = this.app.workspace.activeLeaf;
+        if (
+          activeView &&
+          file &&
+          activeView.file?.path === file.path &&
+          activeLeaf?.view === activeView
+        ) {
           this.rememberMarkdownView(activeView);
-        } else {
-          this.sidebarView?.setCurrentFile(file.path);
+        }
+        if (activeLeaf?.view instanceof FileView) {
+          this.setActiveFile(activeLeaf.view.file?.path);
+        } else if (!file) {
+          this.setActiveFile(undefined);
+        } else if (this.app.workspace.getActiveFile()?.path === file.path) {
+          this.setActiveFile(file.path);
         }
       }),
     );
@@ -237,7 +257,7 @@ export default class HermesianPlugin extends Plugin {
 
   attachView(view: HermesianSidebarView): void {
     this.sidebarView = view;
-    view.setCurrentFile(this.currentMarkdownFilePath());
+    view.setCurrentFile(this.getCurrentFilePath());
   }
 
   async releaseView(view: HermesianSidebarView): Promise<void> {
@@ -653,8 +673,13 @@ export default class HermesianPlugin extends Plugin {
     }
   }
 
-  private currentMarkdownFilePath(): string | undefined {
-    return this.getCurrentMarkdownFilePath();
+  getCurrentFilePath(): string | undefined {
+    return this.activeFilePath;
+  }
+
+  private setActiveFile(filePath: string | undefined): void {
+    this.activeFilePath = filePath;
+    this.sidebarView?.setCurrentFile(filePath);
   }
 
   private rememberMarkdownView(view: MarkdownView): void {

@@ -55,6 +55,7 @@ describe("Conversation tab switching commands", () => {
     const fakeApp = {
       workspace: {
         getActiveViewOfType: () => undefined,
+        getActiveFile: () => null,
         on: () => {},
       },
     };
@@ -78,6 +79,7 @@ describe("Conversation tab switching commands", () => {
     const fakeApp = {
       workspace: {
         getActiveViewOfType: () => undefined,
+        getActiveFile: () => null,
         on: () => {},
       },
     };

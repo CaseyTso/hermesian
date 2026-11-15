@@ -439,6 +439,7 @@ describe("Message entrance and streaming reveal behavior", () => {
         getClient: () => client,
         setConversationWorkspace: vi.fn(),
         getCurrentMarkdownFilePath: () => "Folder/demo.md",
+        getCurrentFilePath: () => "Folder/demo.md",
         getMarkdownAbsolutePath: (p: string) => `/vault/${p}`,
       };
       view.turnRuntime = () => ({ busy: false, toolEls: new Map() });
@@ -476,23 +477,30 @@ describe("Message entrance and streaming reveal behavior", () => {
     await (emptyView as any).sendMessage();
     expect(client.sendPrompt).not.toHaveBeenCalled();
 
-    const capsuleView = makeView("看看这篇", true);
-    await (capsuleView as any).sendMessage();
-    expect(client.sendPrompt).toHaveBeenCalledOnce();
-    const sentText = client.sendPrompt.mock.calls[0]?.[0] as string;
-    expect(sentText).toContain("active_note: Folder/demo.md");
-    expect(sentText).toContain("absolute_path: /vault/Folder/demo.md");
-    expect(sentText).not.toContain("<document>");
-    expect(capsuleView.appendUserMessage).toHaveBeenCalledWith(
-      "看看这篇",
-      undefined,
-      undefined,
-      "tab-1",
-      [],
-      "📄 demo",
-      "Folder/demo.md",
-      { animate: true },
-    );
+    for (const [filePath, expectedCaption] of [
+      ["Folder/demo.md", "📄 demo"],
+      ["05 Literature/研究 报告.pdf", "📄 研究 报告.pdf"],
+    ]) {
+      client.sendPrompt.mockClear();
+      const capsuleView = makeView("看看这篇", true);
+      capsuleView.plugin.getCurrentFilePath = () => filePath;
+      await (capsuleView as any).sendMessage();
+      expect(client.sendPrompt).toHaveBeenCalledOnce();
+      const sentText = client.sendPrompt.mock.calls[0]?.[0] as string;
+      expect(sentText).toContain(`active_note: ${filePath}`);
+      expect(sentText).toContain(`absolute_path: /vault/${filePath}`);
+      expect(sentText).not.toContain("<document>");
+      expect(capsuleView.appendUserMessage).toHaveBeenCalledWith(
+        "看看这篇",
+        undefined,
+        undefined,
+        "tab-1",
+        [],
+        expectedCaption,
+        filePath,
+        { animate: true },
+      );
+    }
   });
 
   it("does not attach .is-entering during history replay", async () => {
