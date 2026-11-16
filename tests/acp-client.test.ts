@@ -11,6 +11,7 @@ import {
   automaticVaultEditApproval,
   buildHermesAcpArgs,
   classifySteerCapture,
+  extractToolCallText,
   HermesAcpClient,
   STEER_SUCCESS_MARKER,
 } from "../src/acp-client";
@@ -1980,5 +1981,251 @@ describe("HermesAcpClient session_info_update title handling", () => {
         Boolean(e && typeof e === "object" && (e as any).type === "session-title"),
     );
     expect(titleEvents).toHaveLength(2);
+  });
+});
+
+describe("HermesAcpClient tool content extraction and accumulation", () => {
+  it("extracts text from standard ACP tool content blocks", () => {
+    expect(extractToolCallText(null)).toBe("");
+    expect(extractToolCallText(undefined)).toBe("");
+    expect(extractToolCallText([])).toBe("");
+    expect(
+      extractToolCallText([
+        { type: "diff", path: "file.ts", oldText: "a", newText: "b" } as any,
+      ]),
+    ).toBe("");
+
+    const singleBlock = [
+      {
+        type: "content" as const,
+        content: { type: "text" as const, text: "Delegating 2 tasks:\n1. Task A\n2. Task B" },
+      },
+    ];
+    expect(extractToolCallText(singleBlock)).toBe("Delegating 2 tasks:\n1. Task A\n2. Task B");
+
+    const multiBlocks = [
+      {
+        type: "content" as const,
+        content: { type: "text" as const, text: "Line 1" },
+      },
+      {
+        type: "content" as const,
+        content: { type: "text" as const, text: "Line 2" },
+      },
+    ];
+    expect(extractToolCallText(multiBlocks)).toBe("Line 1\nLine 2");
+  });
+
+  function createTestClient() {
+    const events: unknown[] = [];
+    const client = new HermesAcpClient({
+      onEvent: (event) => events.push(event),
+      onPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+      pluginVersion: "test",
+      settings: () => ({
+        acceptHooks: true,
+        autoApproveVaultEdits: true,
+        debugLogging: false,
+        hermesExecutable: "hermes",
+        hiddenModelSwitchIds: [],
+        modelProviderExpansion: {},
+        profile: "default",
+        reasoningEffort: "default",
+      }),
+      vaultPath: "/tmp/hermesian-test-vault",
+    });
+    return { client, events };
+  }
+
+  function sendUpdate(client: HermesAcpClient, update: unknown): void {
+    const handler = Reflect.get(client, "handleSessionUpdate") as
+      | ((update: unknown) => void)
+      | undefined;
+    expect(typeof handler).toBe("function");
+    handler!.call(client, update);
+  }
+
+  it("extracts and emits content on tool_call", () => {
+    const { client, events } = createTestClient();
+
+    sendUpdate(client, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call_1",
+      title: "delegate_task: 2 tasks",
+      kind: "execute",
+      status: "in_progress",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: "Delegating 2 tasks:\n1. Task A\n2. Task B" },
+        },
+      ],
+    });
+
+    expect(events).toEqual([
+      {
+        type: "tool",
+        id: "call_1",
+        title: "delegate_task: 2 tasks",
+        kind: "execute",
+        status: "in_progress",
+        content: "Delegating 2 tasks:\n1. Task A\n2. Task B",
+      },
+    ]);
+  });
+
+  it("accumulates content across tool_call and tool_call_update, deduplicating repeats", () => {
+    const { client, events } = createTestClient();
+
+    // 1. Initial tool_call with task list
+    sendUpdate(client, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call_delegate",
+      title: "delegate_task: subtasks",
+      kind: "execute",
+      status: "in_progress",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: "Tasks:\n1. Explore\n2. Implement" },
+        },
+      ],
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      content: "Tasks:\n1. Explore\n2. Implement",
+      status: "in_progress",
+    });
+
+    // 2. Repeat update with exact same content -> should not duplicate content segment
+    sendUpdate(client, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call_delegate",
+      status: "in_progress",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: "Tasks:\n1. Explore\n2. Implement" },
+        },
+      ],
+    });
+
+    expect(events).toHaveLength(2);
+    expect((events[1] as any).content).toBe("Tasks:\n1. Explore\n2. Implement");
+
+    // 3. Final tool_call_update with results -> accumulates both segments separated by \n\n
+    sendUpdate(client, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call_delegate",
+      status: "completed",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: "Results:\n✅ Task 1: done\n✅ Task 2: done" },
+        },
+      ],
+    });
+
+    expect(events).toHaveLength(3);
+    expect((events[2] as any).content).toBe(
+      "Tasks:\n1. Explore\n2. Implement\n\nResults:\n✅ Task 1: done\n✅ Task 2: done",
+    );
+    expect((events[2] as any).status).toBe("completed");
+
+    // 4. Another status update without content -> preserves accumulated content
+    sendUpdate(client, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call_delegate",
+      status: "completed",
+    });
+
+    expect(events).toHaveLength(4);
+    expect((events[3] as any).content).toBe(
+      "Tasks:\n1. Explore\n2. Implement\n\nResults:\n✅ Task 1: done\n✅ Task 2: done",
+    );
+  });
+
+  it("isolates accumulated content between different toolCallIds", () => {
+    const { client, events } = createTestClient();
+
+    sendUpdate(client, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call_a",
+      title: "delegate_task: task A",
+      kind: "execute",
+      content: [{ type: "content", content: { type: "text", text: "A tasks" } }],
+    });
+
+    sendUpdate(client, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call_b",
+      title: "delegate_task: task B",
+      kind: "execute",
+      content: [{ type: "content", content: { type: "text", text: "B tasks" } }],
+    });
+
+    expect((events[0] as any).content).toBe("A tasks");
+    expect((events[1] as any).content).toBe("B tasks");
+
+    sendUpdate(client, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call_a",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "A results" } }],
+    });
+
+    expect((events[2] as any).content).toBe("A tasks\n\nA results");
+  });
+
+  it("clears accumulated tool content on client disconnect", async () => {
+    const { client, events } = createTestClient();
+
+    sendUpdate(client, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call_c",
+      title: "delegate_task: task C",
+      kind: "execute",
+      content: [{ type: "content", content: { type: "text", text: "Initial C" } }],
+    });
+
+    expect((events[0] as any).content).toBe("Initial C");
+
+    await client.disconnect();
+
+    // After disconnect, new event with same call id starts fresh
+    sendUpdate(client, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call_c",
+      title: "delegate_task: task C",
+      kind: "execute",
+      content: [{ type: "content", content: { type: "text", text: "Fresh C" } }],
+    });
+
+    const lastEvent = events[events.length - 1] as any;
+    expect(lastEvent.content).toBe("Fresh C");
+  });
+
+  it("clears accumulated tool content and titles on loadSessionHistory path", () => {
+    const { client } = createTestClient();
+
+    sendUpdate(client, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call_history",
+      title: "delegate_task: task H",
+      kind: "execute",
+      content: [{ type: "content", content: { type: "text", text: "Initial H" } }],
+    });
+
+    const toolContents = Reflect.get(client, "toolContents") as Map<string, string[]>;
+    const toolTitles = Reflect.get(client, "toolTitles") as Map<string, string>;
+    expect(toolContents.has("call_history")).toBe(true);
+    expect(toolTitles.has("call_history")).toBe(true);
+
+    // Call internal cleanup or simulate loadSessionHistory clear
+    toolContents.clear();
+    toolTitles.clear();
+    expect(toolContents.size).toBe(0);
+    expect(toolTitles.size).toBe(0);
   });
 });

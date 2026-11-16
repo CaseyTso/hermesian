@@ -98,6 +98,7 @@ import {
   type TurnCallbacks,
 } from "./ui/message-renderer";
 import { ScrollFollowController } from "./ui/scroll-lock";
+import { TurnRail } from "./ui/turn-rail";
 import {
   applyComposerSlashToken,
   applyComposerState,
@@ -348,6 +349,7 @@ export class HermesianSidebarView extends ItemView {
   private readonly loadedMessageTabIds = new Set<string>();
   private messageRenderer!: MessageRenderer;
   private scrollFollow!: ScrollFollowController;
+  private turnRail!: TurnRail;
   private turnManager!: TurnManager;
   private readonly editScopes = new Map<
     string,
@@ -468,6 +470,7 @@ export class HermesianSidebarView extends ItemView {
     this.composerDispose?.();
     this.composerDispose = undefined;
     this.messageRenderer?.destroy();
+    this.turnRail?.destroy();
     this.modelPicker?.detach();
     this.modelPicker = null;
     this.reasoningPicker?.detach();
@@ -681,6 +684,14 @@ export class HermesianSidebarView extends ItemView {
     this.messageRenderer = new MessageRenderer(this.messagesEl, {
       scrollFollow: this.scrollFollow,
     });
+    this.turnRail = new TurnRail({
+      messagesEl: this.messagesEl,
+      hostEl: shell.messagesContainerEl ?? this.messagesEl.parentElement ?? this.messagesEl,
+      scrollFollow: this.scrollFollow,
+      onScrollToBottom: (tabId) => {
+        this.scrollToBottom(tabId, { force: true });
+      },
+    });
 
     const turnCallbacks: TurnCallbacks = {
       onTurnComplete: (tabId: string) => {
@@ -691,6 +702,7 @@ export class HermesianSidebarView extends ItemView {
         if (this.conversationWorkspace?.activeTabId === tabId) {
           this.updateControls(false);
         }
+        this.turnRail?.setActiveTurn(tabId, false);
       },
       onAssistantMessageCreated: (messageEl: HTMLElement) => {
         this.attachMessageCopyButton(messageEl);
@@ -1190,6 +1202,7 @@ export class HermesianSidebarView extends ItemView {
 
   private showConversationMessages(tabId: string): void {
     this.messageRenderer.show(tabId);
+    this.turnRail?.switchTab(tabId);
   }
 
   private forgetConversationMessages(tabId: string): void {
@@ -1199,6 +1212,7 @@ export class HermesianSidebarView extends ItemView {
     this.displayedHistories.delete(tabId);
     this.historyRendering.delete(tabId);
     this.messageRenderer.forget(tabId);
+    this.turnRail?.forget(tabId);
   }
 
   private async revealActiveTurnForPermission(tabId: string): Promise<void> {
@@ -1976,6 +1990,7 @@ export class HermesianSidebarView extends ItemView {
     tabId: string,
   ): Promise<void> {
     const turn = this.messageContainer(tabId).createDiv({ cls: "hermesian-turn" });
+    this.turnRail?.registerTurn(tabId, turn);
     const activity = turn.createDiv({ cls: "hermesian-turn-activity" });
     let assistantText = "";
     for (const item of items) {
@@ -2808,6 +2823,8 @@ export class HermesianSidebarView extends ItemView {
     runtime.activeTurnEl = this.messageContainer(activeTab.id).createDiv({
       cls: "hermesian-turn",
     });
+    this.turnRail?.registerTurn(activeTab.id, runtime.activeTurnEl);
+    this.turnRail?.setActiveTurn(activeTab.id, true);
     this.loadedMessageTabIds.add(activeTab.id);
     this.renderConversationTabs();
     // Stop-and-send: snapshot is already on the outbound prompt and the user
@@ -3578,6 +3595,9 @@ export class HermesianSidebarView extends ItemView {
         });
       }
     }
+    if (this.turnRail && tabId) {
+      this.turnRail.registerUserMessage(tabId, message, displayText);
+    }
     // Sending / replaying a user bubble means intent to follow the latest output.
     this.scrollToBottom(tabId, { force: true });
     return message;
@@ -3740,6 +3760,7 @@ export class HermesianSidebarView extends ItemView {
     this.tabFirstUserMessages?.delete(tabId);
     this.transientSystemMessages?.delete(tabId);
     this.turnManager.resetView(tabId);
+    this.turnRail?.clearTab(tabId);
     this.updateComposerPlaceholder();
   }
 
@@ -3750,17 +3771,44 @@ export class HermesianSidebarView extends ItemView {
     const runtime = this.turnRuntime(tabId);
     let element = runtime.toolEls.get(event.id);
     if (!element) {
-      element = this.ensureTurnActivity(tabId).createDiv({ cls: "hermesian-tool" });
+      const isDelegation = event.title.startsWith("delegate_task:");
+      element = isDelegation
+        ? (this.ensureTurnActivity(tabId).createEl("details", {
+            cls: "hermesian-delegation",
+          }) as HTMLDetailsElement)
+        : this.ensureTurnActivity(tabId).createDiv({ cls: "hermesian-tool" });
       runtime.toolEls.set(event.id, element);
     }
-    element.empty();
-    const icon = element.createSpan();
-    setIcon(icon, event.kind === "edit" ? "file-pen-line" : "wrench");
-    element.createSpan({ text: event.title, cls: "hermesian-tool-title" });
-    element.createSpan({
-      text: event.status ?? "pending",
-      cls: "hermesian-tool-status",
-    });
+    const isDelegation =
+      (typeof HTMLDetailsElement !== "undefined" && element instanceof HTMLDetailsElement) ||
+      element.tagName.toUpperCase() === "DETAILS";
+    if (isDelegation) {
+      const details = element as HTMLDetailsElement;
+      const isFinished =
+        event.status === "completed" || event.status === "failed";
+      details.open = !isFinished;
+      element.empty();
+      const summary = details.createEl("summary");
+      const icon = summary.createSpan();
+      setIcon(icon, event.kind === "edit" ? "file-pen-line" : "wrench");
+      summary.createSpan({ text: event.title, cls: "hermesian-tool-title" });
+      summary.createSpan({
+        text: event.status ?? "pending",
+        cls: "hermesian-tool-status",
+      });
+      if (event.content) {
+        details.createEl("pre", { text: event.content });
+      }
+    } else {
+      element.empty();
+      const icon = element.createSpan();
+      setIcon(icon, event.kind === "edit" ? "file-pen-line" : "wrench");
+      element.createSpan({ text: event.title, cls: "hermesian-tool-title" });
+      element.createSpan({
+        text: event.status ?? "pending",
+        cls: "hermesian-tool-status",
+      });
+    }
     this.scrollToBottom(tabId);
   }
 

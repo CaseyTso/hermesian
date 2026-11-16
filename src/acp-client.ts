@@ -358,6 +358,7 @@ export class HermesAcpClient {
   };
   private readonly sessionStateListeners = new Set<SessionStateListener>();
   private readonly toolTitles = new Map<string, string>();
+  private readonly toolContents = new Map<string, string[]>();
 
   constructor(private readonly options: HermesAcpClientOptions) {
     this.#logger = createDebugLogger(options.debugLogging === true);
@@ -815,6 +816,7 @@ export class HermesAcpClient {
         settings.profile,
       );
       this.toolTitles.clear();
+      this.toolContents.clear();
       this.emit({
         type: "status",
         status: "connected",
@@ -906,6 +908,8 @@ export class HermesAcpClient {
         this.activeSession?.dispose();
         this.activeSession = undefined;
         this.resumedSessionId = sessionId;
+        this.toolTitles.clear();
+        this.toolContents.clear();
         const settings = this.options.settings();
         this.initializeSessionState(
           response as NewSessionResponseCompat,
@@ -1435,6 +1439,8 @@ export class HermesAcpClient {
         // Process already exited or cleanup failed — continue
       }
     }
+    this.toolTitles.clear();
+    this.toolContents.clear();
     this.resetSessionState();
     this.emit({ type: "status", status: "disconnected" });
   }
@@ -1496,28 +1502,39 @@ export class HermesAcpClient {
           this.emit({ type: "thought-delta", text: update.content.text });
         }
         return;
-      case "tool_call":
+      case "tool_call": {
         this.toolTitles.set(update.toolCallId, update.title);
+        const content = this.accumulateToolContent(
+          update.toolCallId,
+          update.content,
+        );
         this.emit({
           type: "tool",
           id: update.toolCallId,
           title: update.title,
           kind: update.kind,
           status: update.status,
+          content,
         });
         return;
+      }
       case "tool_call_update": {
         const title =
           update.title ?? this.toolTitles.get(update.toolCallId) ?? "Hermes tool";
         if (update.title) {
           this.toolTitles.set(update.toolCallId, update.title);
         }
+        const content = this.accumulateToolContent(
+          update.toolCallId,
+          update.content,
+        );
         this.emit({
           type: "tool",
           id: update.toolCallId,
           title,
           kind: update.kind,
           status: update.status,
+          content,
         });
         return;
       }
@@ -1743,7 +1760,61 @@ export class HermesAcpClient {
     }
   }
 
+  private accumulateToolContent(
+    toolCallId: string,
+    rawContent?: Array<acp.ToolCallContent> | null,
+  ): string | undefined {
+    const text = extractToolCallText(rawContent);
+    const segments = this.toolContents.get(toolCallId) ?? [];
+    if (text) {
+      const last = segments[segments.length - 1];
+      if (last !== text) {
+        segments.push(text);
+        this.toolContents.set(toolCallId, segments);
+      }
+    }
+    return segments.length > 0 ? segments.join("\n\n") : undefined;
+  }
+
   private emit(event: HermesUiEvent): void {
     this.options.onEvent(event);
   }
 }
+
+export function extractToolCallText(
+  contents?: Array<acp.ToolCallContent> | null,
+): string {
+  if (!contents || !Array.isArray(contents)) {
+    return "";
+  }
+  const texts: string[] = [];
+  for (const item of contents) {
+    if (!item) continue;
+    if (
+      item.type === "content" &&
+      item.content &&
+      item.content.type === "text" &&
+      typeof item.content.text === "string"
+    ) {
+      const trimmed = item.content.text.trim();
+      if (trimmed) {
+        texts.push(trimmed);
+      }
+    } else if (
+      item.type === "content" &&
+      typeof (item as unknown as { content: unknown }).content === "string"
+    ) {
+      const trimmed = (item as unknown as { content: string }).content.trim();
+      if (trimmed) {
+        texts.push(trimmed);
+      }
+    } else if ("text" in item && typeof (item as unknown as { text: unknown }).text === "string") {
+      const trimmed = (item as unknown as { text: string }).text.trim();
+      if (trimmed) {
+        texts.push(trimmed);
+      }
+    }
+  }
+  return texts.join("\n");
+}
+

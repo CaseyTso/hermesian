@@ -94,9 +94,17 @@ _Avoid_: Fixed Apple skin, glassmorphism, frosted content card, transparent pick
 A compact, expandable Content Layer record of Thinking or Tool activity that opens during live work and collapses after completion while keeping its details accessible.
 _Avoid_: Message bubble, permanent activity card, hidden log
 
+**Delegation Row**:
+An Activity Row representing Hermes's delegation tool, through which subagents run. It opens during the delegation showing the delegated task list, and after completion keeps each subtask's outcome accessible by expanding. The protocol delivers no updates while subagents run, so the row honestly shows no live progress in between — it is a record of the delegation, never a window into the subagents' own work.
+_Avoid_: Subagent conversation, nested dialog, live subagent stream
+
 **Sidebar Density**:
 Hermesian's compact desktop layout rhythm for a narrow, continuously resizable Obsidian sidebar.
 _Avoid_: iPad spacing, touch-first layout, mobile density
+
+**Turn Rail**:
+A narrow vertical rail overlaid on the right edge of the message area, carrying one dot per turn of the active Conversation Tab. It stays semi-transparent until hovered. Hovering a dot reveals the opening words of that turn's user message; clicking a dot scrolls the conversation to that turn and pauses auto-follow. It shows only the most recent page of turns; when older turns exist, an arrow at its top pages backward through them.
+_Avoid_: Scrollbar, timeline, minimap, turn list
 
 **Quiet Motion**:
 Hermesian's short, single-shot, interruptible motion that marks a state transition in the Visual Shell — content arriving, a task completing, a mode changing. Motion exists to explain *that something changed*; looped or ambient animation that merely decorates is forbidden.

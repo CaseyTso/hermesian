@@ -123,6 +123,7 @@ export type HermesUiEvent =
       title: string;
       kind?: string | null;
       status?: string | null;
+      content?: string;
     }
   | { type: "notice"; text: string }
   | { type: "error"; message: string; terminal: boolean }

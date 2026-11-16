@@ -4,6 +4,7 @@ export interface SidebarShellElements {
   contextGaugeFillEl: SVGCircleElement;
   conversationTabsEl: HTMLElement;
   historyButtonEl: HTMLButtonElement;
+  messagesContainerEl: HTMLElement;
   messagesEl: HTMLElement;
   root: HTMLElement;
   statusEl: HTMLElement;
@@ -110,8 +111,9 @@ export function createSidebarShell(
     cls: "clickable-icon",
   }) as HTMLButtonElement;
 
-  // --- Messages ---
-  const messagesEl = root.createDiv({ cls: "hermesian-messages" });
+  // --- Messages Container (holds scrollable messages and absolute overlays) ---
+  const messagesContainerEl = root.createDiv({ cls: "hermesian-messages-container" });
+  const messagesEl = messagesContainerEl.createDiv({ cls: "hermesian-messages" });
 
   // Wire callbacks
   addConversationButtonEl.addEventListener("click", () => {
@@ -130,6 +132,7 @@ export function createSidebarShell(
     contextGaugeFillEl,
     conversationTabsEl,
     historyButtonEl,
+    messagesContainerEl,
     messagesEl,
     root,
     statusEl,
