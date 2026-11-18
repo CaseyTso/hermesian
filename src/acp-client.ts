@@ -643,7 +643,12 @@ export class HermesAcpClient {
           this.handleSessionUpdate(ctx.params.update);
           return;
         }
-        if (this.busy && this.resumedSessionId === sessionId) {
+        // Server-initiated (queued) turns arrive after the main prompt RPC
+        // resolved, i.e. while the client is idle: live updates for the active
+        // session must never be gated on `busy`, or a queued steer turn's
+        // thought/tools/answer would be silently dropped (ADR-0005 Amendment 4).
+        // History replay is diverted by historyCapture above before this point.
+        if (this.resumedSessionId === sessionId) {
           this.handleSessionUpdate(ctx.params.update);
           await yieldToUi();
         }
@@ -1505,7 +1510,11 @@ export class HermesAcpClient {
               return;
             }
           }
-          this.emit({ type: "assistant-delta", text: update.content.text });
+          this.emit({
+            type: "assistant-delta",
+            text: update.content.text,
+            messageId: (update as { messageId?: string }).messageId,
+          });
         }
         return;
       case "agent_thought_chunk":

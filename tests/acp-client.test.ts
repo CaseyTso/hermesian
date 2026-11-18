@@ -1,10 +1,14 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import * as acp from "@agentclientprotocol/sdk";
 import type { RequestPermissionRequest } from "@agentclientprotocol/sdk";
+
+import { AcpProcess } from "../src/acp-process";
 
 import {
   aggregateSteerCapture,
@@ -2335,5 +2339,204 @@ describe("HermesAcpClient tool content extraction and accumulation", () => {
     toolTitles.clear();
     expect(toolContents.size).toBe(0);
     expect(toolTitles.size).toBe(0);
+  });
+});
+
+describe("HermesAcpClient session/update notification gate (queued steer turns)", () => {
+  async function createConnectedGateTestClient(): Promise<{
+    client: HermesAcpClient;
+    events: unknown[];
+    handler: { handleMessage: (message: unknown, context: unknown) => Promise<unknown> };
+    context: unknown;
+    close: () => Promise<void>;
+  }> {
+    const tempDir = mkdtempSync(join(tmpdir(), "hermesian-gate-test-"));
+    const launcherPath = join(tempDir, "hermes");
+    writeFileSync(launcherPath, "#!/usr/bin/env python3\n", "utf8");
+
+    const events: unknown[] = [];
+    const client = new HermesAcpClient({
+      onEvent: (event) => events.push(event),
+      onPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+      pluginVersion: "test",
+      settings: () => ({
+        acceptHooks: true,
+        autoApproveVaultEdits: true,
+        debugLogging: false,
+        hermesExecutable: launcherPath,
+        hiddenModelSwitchIds: [],
+        modelProviderExpansion: {},
+        profile: "default",
+        reasoningEffort: "default",
+      }),
+      vaultPath: "/tmp/hermesian-test-vault",
+    });
+
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    let buffer = "";
+    stdin.on("data", (chunk: Buffer | string) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line) as { id?: number; method?: string };
+        if (msg.method === acp.methods.agent.initialize && msg.id !== undefined) {
+          stdout.write(
+            `${JSON.stringify({
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                agentCapabilities: {},
+              },
+            })}\n`,
+          );
+        }
+      }
+    });
+
+    const fakeProcess = {
+      stdin,
+      stdout,
+      stderrTail: () => "",
+      waitForExit: () => new Promise<never>(() => {}),
+      terminate: vi.fn(async () => ({ code: 0, signal: null })),
+    } as unknown as AcpProcess;
+
+    const spawnSpy = vi.spyOn(AcpProcess, "spawn").mockReturnValue(fakeProcess);
+    try {
+      const ensureTransport = Reflect.get(client, "ensureTransport") as () => Promise<void>;
+      await ensureTransport.call(client);
+    } finally {
+      spawnSpy.mockRestore();
+    }
+
+    const raw = (client as any).connection?.connection;
+    const handlers: any[] = raw?.staticHandlers ?? [];
+    const handler = handlers.find(
+      (x) =>
+        typeof x?.describe === "function" &&
+        (x.describe().includes("notification:session/update") ||
+          x.describe().endsWith(":session/update")),
+    );
+    expect(handler).toBeDefined();
+    events.length = 0;
+
+    return {
+      client,
+      events,
+      handler,
+      context: raw.context,
+      close: async () => {
+        await client.disconnect();
+        stdin.destroy();
+        stdout.destroy();
+        rmSync(tempDir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  it("delivers live updates (with messageId) for resumedSessionId even when busy is false", async () => {
+    const { client, events, handler, context, close } = await createConnectedGateTestClient();
+    try {
+      Reflect.set(client, "busy", false);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const sendNotification = async (update: unknown) => {
+        await handler.handleMessage(
+          {
+            kind: "notification",
+            method: "session/update",
+            params: { sessionId: "live-session", update },
+          },
+          context,
+        );
+      };
+
+      await sendNotification({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "1+1=2" },
+        messageId: "m2",
+      });
+      await sendNotification({
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "thinking" },
+      });
+      await sendNotification({
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        title: "terminal",
+        kind: "execute",
+        status: "pending",
+      });
+      await sendNotification({
+        sessionUpdate: "usage_update",
+        used: 100,
+        size: 1000,
+      });
+
+      expect(events).toEqual([
+        { type: "assistant-delta", text: "1+1=2", messageId: "m2" },
+        { type: "thought-delta", text: "thinking" },
+        {
+          type: "tool",
+          id: "t1",
+          title: "terminal",
+          kind: "execute",
+          status: "pending",
+          content: undefined,
+        },
+        { type: "usage" },
+      ]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("drops live updates when busy is false and sessionId does not match resumedSessionId", async () => {
+    const { client, events, handler, context, close } = await createConnectedGateTestClient();
+    try {
+      Reflect.set(client, "busy", false);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const sendNotification = async (update: unknown) => {
+        await handler.handleMessage(
+          {
+            kind: "notification",
+            method: "session/update",
+            params: { sessionId: "other-session", update },
+          },
+          context,
+        );
+      };
+
+      await sendNotification({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "stale" },
+        messageId: "m-stale",
+      });
+      await sendNotification({
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "stale thought" },
+      });
+      await sendNotification({
+        sessionUpdate: "tool_call",
+        toolCallId: "t-stale",
+        title: "terminal",
+        kind: "execute",
+        status: "pending",
+      });
+      await sendNotification({
+        sessionUpdate: "usage_update",
+        used: 50,
+        size: 1000,
+      });
+
+      expect(events).toEqual([]);
+    } finally {
+      await close();
+    }
   });
 });

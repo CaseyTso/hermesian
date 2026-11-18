@@ -115,7 +115,7 @@ export type HermesHistoryItem =
 
 export type HermesUiEvent =
   | { type: "status"; status: ConnectionStatus; detail?: string }
-  | { type: "assistant-delta"; text: string }
+  | { type: "assistant-delta"; text: string; messageId?: string }
   | { type: "thought-delta"; text: string }
   | {
       type: "tool";

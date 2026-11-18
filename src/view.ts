@@ -382,6 +382,8 @@ export class HermesianSidebarView extends ItemView {
   private composerHint: string | undefined;
   /** True while a pure-text steer request is outstanding (disables Steer). */
   private steerInFlight = false;
+  /** Last gateway reply-grouping id per tab; a change starts a new bubble. */
+  private lastAssistantMessageId = new Map<string, string>();
   steerPendingRowEl: HTMLElement | undefined;
   steerPendingChipEl: HTMLElement | undefined;
   steerPendingIconEl: HTMLElement | undefined;
@@ -533,7 +535,7 @@ export class HermesianSidebarView extends ItemView {
         this.statusEl.setAttribute("aria-label", event.detail ?? event.status);
         return;
       case "assistant-delta":
-        this.appendAssistantDelta(tabId, event.text);
+        this.appendAssistantDelta(tabId, event.text, event.messageId);
         return;
       case "thought-delta":
         this.appendThoughtDelta(tabId, event.text);
@@ -3681,7 +3683,18 @@ export class HermesianSidebarView extends ItemView {
     return message;
   }
 
-  private appendAssistantDelta(tabId: string, text: string): void {
+  private appendAssistantDelta(tabId: string, text: string, messageId?: string): void {
+    if (messageId) {
+      const previous = this.lastAssistantMessageId.get(tabId);
+      if (previous && previous !== messageId) {
+        // A new gateway reply (e.g. a server-initiated queued steer turn):
+        // finalize the previous bubble before the new one starts, and retire
+        // queued steer markers — the queued turn is now on screen.
+        void this.finalizeAssistantMessage(tabId);
+        this.clearQueuedSteers(tabId);
+      }
+      this.lastAssistantMessageId.set(tabId, messageId);
+    }
     this.turnManager.appendDelta(tabId, text);
     this.scrollToBottom(tabId);
   }
@@ -3907,6 +3920,7 @@ export class HermesianSidebarView extends ItemView {
   private resetConversationView(tabId: string): void {
     this.tabFirstUserMessages?.delete(tabId);
     this.transientSystemMessages?.delete(tabId);
+    this.lastAssistantMessageId.delete(tabId);
     this.turnManager.resetView(tabId);
     this.turnRail?.clearTab(tabId);
     this.updateComposerPlaceholder();
