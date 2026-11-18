@@ -128,6 +128,8 @@ export type HermesUiEvent =
   | { type: "notice"; text: string }
   | { type: "error"; message: string; terminal: boolean }
   | { type: "turn-stop"; reason: string }
+  | { type: "turn-split"; text: string }
+  | { type: "usage" }
   | { type: "session-title"; title: string };
 
 /**

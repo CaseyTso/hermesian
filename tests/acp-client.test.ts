@@ -948,7 +948,7 @@ describe("HermesAcpClient steer", () => {
     return { deltas, all: () => deltas.join("") };
   }
 
-  it("classifies the exact redirect marker as success and replays only non-marker text", async () => {
+  it("classifies the exact redirect marker as success and streams non-marker text live", async () => {
     const client = steerClient();
     const capture = assistantDeltas(client);
     const pending = steerDeferred<{ stopReason: string }>();
@@ -971,7 +971,11 @@ describe("HermesAcpClient steer", () => {
     // Both fresh nextUpdate-loop and resumed notification routes converge on
     // handleSessionUpdate; drive it directly to cover the capture path.
     pushSteerUpdate(client, steerChunk("Redirected the active turn with your correction."));
+    expect(capture.deltas).toEqual([]);
+
     pushSteerUpdate(client, steerChunk("main stream keeps flowing"));
+    expect(capture.deltas).toEqual(["main stream keeps flowing"]);
+
     pending.resolve({ stopReason: "end_turn" });
 
     await expect(steer).resolves.toEqual({ ok: true });
@@ -1149,7 +1153,7 @@ describe("HermesAcpClient steer", () => {
     expect(events.join("")).not.toContain("Queued for the next turn");
   });
 
-  it("replays interleaved prose in order and suppresses every receipt tail", async () => {
+  it("streams interleaved prose live in order and suppresses every receipt tail", async () => {
     const client = steerClient();
     const capture = assistantDeltas(client);
     const pending = steerDeferred<{ stopReason: string }>();
@@ -1166,7 +1170,7 @@ describe("HermesAcpClient steer", () => {
     pending.resolve({ stopReason: "end_turn" });
 
     await expect(steer).resolves.toEqual({ ok: false, reason: "steer_failed" });
-    expect(capture.deltas).toEqual(["first half second half"]);
+    expect(capture.deltas).toEqual(["first half ", "second half"]);
     expect(capture.all()).not.toContain("Queued for the next turn");
     expect(capture.all()).not.toContain("Steer failed");
   });
@@ -1187,7 +1191,10 @@ describe("HermesAcpClient steer", () => {
     pending.resolve({ stopReason: "end_turn" });
 
     await expect(steer).resolves.toEqual({ ok: false, reason: "steer_failed" });
-    expect(capture.deltas).toEqual(["I won't say Steer failedThe ⚠️ icon warns"]);
+    expect(capture.deltas).toEqual([
+      "I won't say Steer failed",
+      "The ⚠️ icon warns",
+    ]);
     expect(capture.all()).not.toContain("⚠️ Steer failed");
   });
 
@@ -1571,7 +1578,7 @@ describe("HermesAcpClient steer", () => {
     }
   });
 
-  it("replays captured prose exactly once across a timeout and a late settle", async () => {
+  it("streams prose live without buffering across a timeout and a late settle", async () => {
     vi.useFakeTimers();
     try {
       const client = steerClient();
@@ -1588,12 +1595,14 @@ describe("HermesAcpClient steer", () => {
 
       const steer = client.steerActiveTurn("correction");
       pushSteerUpdate(client, steerChunk("prose during the steer window"));
+      // Emitted immediately live:
+      expect(capture.deltas).toEqual(["prose during the steer window"]);
       await vi.advanceTimersByTimeAsync(30_001);
       await expect(steer).resolves.toEqual({ ok: true });
       expect(capture.deltas).toEqual(["prose during the steer window"]);
 
       // The unresolved request finally settles: the slot releases and the
-      // captured prose is not replayed a second time.
+      // prose is not re-emitted.
       resolveRequest({ stopReason: "end_turn" });
       await Promise.resolve();
       await Promise.resolve();
@@ -1669,7 +1678,7 @@ describe("HermesAcpClient steer", () => {
     }
   });
 
-  it("replays post-timeout captured prose at main-turn terminal, exactly once", async () => {
+  it("streams post-timeout prose live and suppresses receipt tails without replay", async () => {
     vi.useFakeTimers();
     try {
       const client = steerClient();
@@ -1684,27 +1693,65 @@ describe("HermesAcpClient steer", () => {
       pushSteerUpdate(client, steerChunk("early prose "));
       await vi.advanceTimersByTimeAsync(30_001);
       await expect(steer).resolves.toEqual({ ok: true });
-      // Prose captured before the timeout is replayed at the bounded timeout.
+      // Prose was already emitted live:
       expect(capture.deltas).toEqual(["early prose "]);
 
-      // The unresolved request keeps the slot (and the capture buffer) alive:
-      // prose streamed after the timeout is still captured, not emitted.
+      // Prose streamed after the timeout is emitted live immediately, while receipt is suppressed
       pushSteerUpdate(client, steerChunk("late prose "));
       pushSteerUpdate(client, steerChunk("Queued for the next turn. (2 queued)"));
       pushSteerUpdate(client, steerChunk("keeps flowing"));
-      expect(capture.deltas).toEqual(["early prose "]);
+      expect(capture.deltas).toEqual(["early prose ", "late prose ", "keeps flowing"]);
+      expect(capture.all()).not.toContain("Queued for the next turn");
 
       // Main-turn terminal: sendPrompt's finally performs this exact cleanup.
       const closeSteerWindow = Reflect.get(client, "closeSteerWindow") as () => void;
       closeSteerWindow.call(client);
 
-      // The window's captured prose is replayed exactly once as
-      // assistant-delta; receipt tails are classified and never rendered.
-      expect(capture.deltas).toEqual(["early prose ", "late prose keeps flowing"]);
+      // No replay occurs at terminal: deltas remain unchanged
+      expect(capture.deltas).toEqual(["early prose ", "late prose ", "keeps flowing"]);
       expect(capture.all()).not.toContain("Queued for the next turn");
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("emits ordinary prose immediately as assistant-delta during in-flight steer without buffering", () => {
+    const client = steerClient();
+    const capture = assistantDeltas(client);
+    const pending = steerDeferred<{ stopReason: string }>();
+    steerTransport(client, vi.fn(() => pending.promise));
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "mainTurnActive", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    void client.steerActiveTurn("steer text");
+
+    pushSteerUpdate(client, steerChunk("immediate chunk 1 "));
+    expect(capture.deltas).toEqual(["immediate chunk 1 "]);
+
+    pushSteerUpdate(client, steerChunk("Redirected the active turn with your correction."));
+    expect(capture.deltas).toEqual(["immediate chunk 1 "]);
+
+    pushSteerUpdate(client, steerChunk("immediate chunk 2"));
+    expect(capture.deltas).toEqual(["immediate chunk 1 ", "immediate chunk 2"]);
+  });
+
+  it("emits turn-split event with text on user_message_chunk", () => {
+    const events: unknown[] = [];
+    const client = steerClient((event) => {
+      events.push(event);
+    });
+    Reflect.set(client, "busy", true);
+    Reflect.set(client, "resumedSessionId", "live-session");
+
+    pushSteerUpdate(client, {
+      sessionUpdate: "user_message_chunk",
+      content: { type: "text", text: "Queued user guidance prompt" },
+    });
+
+    expect(events).toEqual([
+      { type: "turn-split", text: "Queued user guidance prompt" },
+    ]);
   });
   });
 });

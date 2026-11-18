@@ -350,6 +350,7 @@ export class HermesianSidebarView extends ItemView {
   private contextGaugePopover: HermesContextGaugePopover | null = null;
   private readonly tabFirstUserMessages = new Map<string, string>();
   private readonly transientSystemMessages = new Map<string, HTMLElement>();
+  private readonly pendingUsageFinalizes = new Set<string>();
   private selectionBarEl!: HTMLElement;
   private sendButtonEl!: HTMLButtonElement;
   private steerButtonEl!: HTMLButtonElement;
@@ -554,6 +555,12 @@ export class HermesianSidebarView extends ItemView {
         this.editScopes.set(tabId, undefined);
         void this.finishTurn(tabId, event.reason);
         return;
+      case "turn-split":
+        void this.handleTurnSplit(tabId, event.text);
+        return;
+      case "usage":
+        this.scheduleUsageFinalize(tabId);
+        return;
       case "session-title":
         void this.controller?.setConversationTitle(tabId, event.title).catch(() => {});
         return;
@@ -564,6 +571,9 @@ export class HermesianSidebarView extends ItemView {
     this.controller?.updateClientState(tabId, state);
     if (!this.conversationWorkspace || this.conversationWorkspace.activeTabId === tabId) {
       this.renderSessionState(state);
+    }
+    if (state.contextUsage) {
+      this.scheduleUsageFinalize(tabId);
     }
   }
 
@@ -3015,7 +3025,7 @@ export class HermesianSidebarView extends ItemView {
       return;
     }
     if (result.reason === "queued") {
-      this.composerHint = "Steer queued — will take effect at next turn.";
+      this.composerHint = "Steer queued — it will run as its own turn when the current one finishes.";
       this.updateControls(false);
       this.composerEl.focus();
       return;
@@ -3681,14 +3691,84 @@ export class HermesianSidebarView extends ItemView {
     this.scrollToBottom(tabId);
   }
 
-  private async finalizeAssistantMessage(tabId: string): Promise<void> {
+  private async handleTurnSplit(tabId: string, text: string): Promise<void> {
     const runtime = this.turnRuntime(tabId);
-    const target = runtime.assistantContentEl;
-    const text = runtime.assistantText;
+    let target = runtime.assistantContentEl;
+    let body = runtime.assistantText;
     runtime.assistantContentEl = undefined;
     runtime.assistantText = "";
     runtime.thoughtContentEl = undefined;
-    if (!target || !text) {
+    if (!target) {
+      const streamingEl = this.messageRenderer
+        ?.containerFor(tabId)
+        .querySelector<HTMLElement>(".hermesian-message-content.is-streaming");
+      if (streamingEl) {
+        target = streamingEl;
+        if (!body) {
+          // appendSteer detaches the streaming container mid-turn and drops
+          // the runtime body; recover it from live DOM text so the orphaned
+          // container still renders instead of staying raw.
+          body = streamingEl.textContent ?? "";
+        }
+      }
+    }
+    this.turnManager.splitTurn(tabId);
+    this.appendUserMessage(text, undefined, undefined, tabId);
+    this.clearQueuedSteers(tabId);
+
+    if (target && body) {
+      await this.renderMarkdown(target, body, this.editScopes.get(tabId)?.filePath);
+      this.scrollToBottom(tabId);
+    } else if (target) {
+      target.classList.remove("is-streaming");
+    }
+  }
+
+  private scheduleUsageFinalize(tabId: string): void {
+    if (this.pendingUsageFinalizes.has(tabId)) {
+      return;
+    }
+    this.pendingUsageFinalizes.add(tabId);
+    queueMicrotask(() => {
+      this.pendingUsageFinalizes.delete(tabId);
+      const runtime = this.turnRuntime(tabId);
+      const container = this.messageRenderer?.containerFor(tabId);
+      const hasStreaming = Boolean(
+        runtime.assistantContentEl ||
+        container?.querySelector(".hermesian-message-content.is-streaming")
+      );
+      if (hasStreaming) {
+        if (runtime.thoughtDetailsEl) {
+          runtime.thoughtDetailsEl.open = false;
+        }
+        void this.finalizeAssistantMessage(tabId);
+      }
+    });
+  }
+
+  private async finalizeAssistantMessage(tabId: string): Promise<void> {
+    const runtime = this.turnRuntime(tabId);
+    let target = runtime.assistantContentEl;
+    let text = runtime.assistantText;
+    runtime.assistantContentEl = undefined;
+    runtime.assistantText = "";
+    runtime.thoughtContentEl = undefined;
+    if (!target) {
+      const streamingEl = this.messageRenderer
+        ?.containerFor(tabId)
+        .querySelector<HTMLElement>(".hermesian-message-content.is-streaming");
+      if (streamingEl) {
+        target = streamingEl;
+        if (!text) {
+          text = streamingEl.textContent ?? "";
+        }
+      }
+    }
+    if (!target) {
+      return;
+    }
+    if (!text) {
+      target.classList.remove("is-streaming");
       return;
     }
     await this.renderMarkdown(target, text, this.editScopes.get(tabId)?.filePath);
@@ -3701,7 +3781,7 @@ export class HermesianSidebarView extends ItemView {
     sourceFilePath?: string,
   ): Promise<void> {
     target.empty();
-    target.removeClass("is-streaming");
+    target.classList.remove("is-streaming");
     const sourcePath = sourceFilePath ?? this.currentFilePath ?? "";
     target.dataset.sourcePath = sourcePath;
 

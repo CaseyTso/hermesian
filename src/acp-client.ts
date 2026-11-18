@@ -315,9 +315,9 @@ export class HermesAcpClient {
   private mainTurnCommit:
     | { fire: () => void; promise: Promise<boolean> }
     | undefined;
-  /** In-flight steer capture; at most one steer runs at a time. */
+  /** In-flight steer tracking; at most one steer runs at a time. */
   private pendingSteer:
-    | { captured: string[]; replayed: boolean }
+    | { receipt?: "queued" | "steer_failed" }
     | undefined;
   /**
    * Concurrency reservation held while a steer is waiting on the main-turn
@@ -1289,7 +1289,7 @@ export class HermesAcpClient {
         this.steerPending = false;
       }
     }
-    const steer = { captured: [] as string[], replayed: false };
+    const steer: { receipt?: "queued" | "steer_failed" } = {};
     this.pendingSteer = steer;
     try {
       const sessionId = this.sessionId;
@@ -1304,17 +1304,14 @@ export class HermesAcpClient {
       });
       this.steerReceiptWindow = true;
       // The settle handler owns the single-flight slot: it releases
-      // pendingSteer and replays captured prose exactly once when the
-      // underlying request eventually settles (resolve or reject). The
-      // bounded withTimeout below only decides this call's return value —
-      // after a timeout the slot stays reserved until settle / main-turn
-      // terminal / disconnect releases it.
+      // pendingSteer when the underlying request eventually settles
+      // (resolve or reject). The bounded withTimeout below only decides
+      // this call's return value — after a timeout the slot stays reserved
+      // until settle / main-turn terminal / disconnect releases it.
       void request.then(
         () => this.onSteerRequestSettled(steer),
         () => this.onSteerRequestSettled(steer),
       );
-      let classification: SteerCaptureClassification = aggregateSteerCapture([]);
-      let isTimeout = false;
       try {
         await withTimeout(
           request,
@@ -1323,30 +1320,21 @@ export class HermesAcpClient {
         );
       } catch (error) {
         if (error instanceof Error && error.message.includes("timed out")) {
-          isTimeout = true;
-        } else {
-          // RPC rejected / JSON-RPC error / transport error:
-          classification = aggregateSteerCapture(steer.captured);
-          if (!steer.replayed) {
-            steer.replayed = true;
-            this.replaySteerCapture(classification);
-          }
-          return { ok: false, reason: "steer_failed" };
+          // 超时 = applied
+          return { ok: true };
         }
+        // RPC rejected / JSON-RPC error / transport error:
+        return { ok: false, reason: "steer_failed" };
       }
 
-      classification = aggregateSteerCapture(steer.captured);
-      if (isTimeout) {
-        if (!steer.replayed) {
-          steer.replayed = true;
-          this.replaySteerCapture(classification);
-        }
-        steer.captured = [];
-        steer.replayed = false;
+      if (steer.receipt === "steer_failed") {
+        return { ok: false, reason: "steer_failed" };
       }
-      return classification.ok
-        ? { ok: true }
-        : { ok: false, reason: classification.reason ?? "steer_failed" };
+      if (steer.receipt === "queued") {
+        return { ok: false, reason: "queued" };
+      }
+      // resolve 无回执 = applied
+      return { ok: true };
     } catch {
       // Synchronous dispatch failure: nothing went on the wire.
       this.pendingSteer = undefined;
@@ -1355,18 +1343,12 @@ export class HermesAcpClient {
   }
 
   /**
-   * Settle handler for an in-flight steer request (success path included).
-   * Releases the single-flight slot and replays captured prose exactly once.
-   * On the bounded timeout path the method already replayed and set
-   * `replayed`, so a late settle only releases the slot.
+   * Settle handler for an in-flight steer request.
+   * Releases the single-flight slot.
    */
-  private onSteerRequestSettled(steer: { captured: string[]; replayed: boolean }): void {
+  private onSteerRequestSettled(steer: { receipt?: "queued" | "steer_failed" }): void {
     if (this.pendingSteer === steer) {
       this.pendingSteer = undefined;
-    }
-    if (!steer.replayed) {
-      steer.replayed = true;
-      this.replaySteerCapture(aggregateSteerCapture(steer.captured));
     }
   }
 
@@ -1374,26 +1356,11 @@ export class HermesAcpClient {
    * Close the steer lifecycle at a main-turn terminal / disconnect /
    * connection close: release any single-flight slot still held by an
    * unresolved steer request and close the late-receipt window so the next
-   * turn starts clean. Captured main-turn prose that was never replayed
-   * (e.g. streamed after a timed-out steer whose request never settles) is
-   * classified and replayed exactly once before the window closes.
+   * turn starts clean.
    */
   private closeSteerWindow(): void {
-    const steer = this.pendingSteer;
     this.pendingSteer = undefined;
     this.steerReceiptWindow = false;
-    // The settle handler guards on `pendingSteer === steer` plus `replayed`,
-    // so a late settle can never double-replay what we emit here.
-    if (steer && !steer.replayed) {
-      steer.replayed = true;
-      this.replaySteerCapture(aggregateSteerCapture(steer.captured));
-    }
-  }
-
-  private replaySteerCapture(classification: SteerCaptureClassification): void {
-    if (classification.body.trim()) {
-      this.emit({ type: "assistant-delta", text: classification.body });
-    }
   }
 
   async disconnect(): Promise<void> {
@@ -1464,28 +1431,24 @@ export class HermesAcpClient {
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
         if (update.content.type === "text") {
-          // While a steer is in flight, streamed agent text goes into the
-          // steer capture buffer instead of assistant-delta; it is classified
-          // and replayed once the steer request settles. This covers both the
-          // fresh-session nextUpdate loop and the resumed notification route,
-          // which converge here.
-          if (this.pendingSteer) {
-            this.pendingSteer.captured.push(update.content.text);
-            return;
-          }
-          // No steer in flight, but the late-receipt window may still be
-          // open for a steer that settled while its request (or the main
-          // turn) is still live: a complete late success/queue/failure
-          // receipt must never render as assistant text. Ordinary prose
-          // passes through verbatim. Outside the window (no steer ever ran)
-          // every chunk — even one shaped exactly like a marker — is
-          // ordinary main-stream text.
+          // While the steer receipt window is open, check if this chunk is a
+          // receipt sentence (redirect success, queued, or failure). If so,
+          // record the outcome for the in-flight steer and swallow the chunk
+          // so marker copy never enters the assistant stream. Ordinary prose
+          // passes through immediately as assistant-delta.
           if (this.steerReceiptWindow) {
             const classification = classifySteerCapture(update.content.text);
-            if (
-              !classification.ok ||
-              classification.body === ""
-            ) {
+            if (classification.reason) {
+              if (
+                classification.reason === "steer_failed" ||
+                !this.pendingSteer?.receipt
+              ) {
+                if (this.pendingSteer) {
+                  this.pendingSteer.receipt = classification.reason;
+                }
+              }
+            }
+            if (!classification.ok || classification.body === "") {
               return;
             }
           }
@@ -1572,6 +1535,14 @@ export class HermesAcpClient {
         return;
       }
       case "user_message_chunk":
+        // Hermes ACP adapter sends user_message_chunk when draining queued prompts
+        // before running the queued prompt as its own server-initiated turn.
+        // The server sends the entire prompt text in a single chunk (update_user_message_text).
+        // Defensive check: only emit turn-split when content has text.
+        if (update.content.type === "text") {
+          this.emit({ type: "turn-split", text: update.content.text });
+        }
+        return;
       case "current_mode_update":
       case "config_option_update":
         return;
@@ -1588,6 +1559,7 @@ export class HermesAcpClient {
       }
       case "usage_update":
         this.handleUsageUpdate(update);
+        this.emit({ type: "usage" });
         return;
     }
   }

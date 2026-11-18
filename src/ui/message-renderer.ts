@@ -506,6 +506,27 @@ export class TurnManager {
     runtime.thoughtDetailsEl = undefined;
   }
 
+  /**
+   * Splits a turn boundary (e.g. on server-initiated queued prompt execution):
+   * resets the active turn container, streaming element, thought container,
+   * tool mappings, and completion promise so that subsequent events create a fresh turn,
+   * while keeping `busy = true` if the agent is still running.
+   */
+  splitTurn(tabId: string): void {
+    const runtime = this.ensure(tabId);
+    if (runtime.thoughtDetailsEl) {
+      runtime.thoughtDetailsEl.open = false;
+    }
+    runtime.activeTurnEl = undefined;
+    runtime.turnActivityEl = undefined;
+    runtime.assistantContentEl = undefined;
+    runtime.assistantText = "";
+    runtime.thoughtContentEl = undefined;
+    runtime.thoughtDetailsEl = undefined;
+    runtime.toolEls.clear();
+    runtime.completionPromise = undefined;
+  }
+
   /** Clears all messages and streaming state for a tab. */
   resetView(tabId: string): void {
     this.#renderer.containerFor(tabId).empty();

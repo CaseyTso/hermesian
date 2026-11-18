@@ -37,6 +37,7 @@ beforeEach(() => {
   (HTMLElement.prototype as any).show = function () { this.style.display = ""; };
   (HTMLElement.prototype as any).hide = function () { this.style.display = "none"; };
   (HTMLElement.prototype as any).setText = function (text: string) { this.textContent = text; };
+  (HTMLElement.prototype as any).removeClass = function (cls: string) { this.classList.remove(cls); };
   (HTMLElement.prototype as any).createDiv = function (options: any = {}) {
     const el = document.createElement("div");
     if (options.cls) el.className = options.cls;
@@ -501,7 +502,7 @@ describe("steer outcome handling in view (standard E)", () => {
 
     expect(h.view.composerDraft.text).toBe("");
     expect(h.view.steerPendingRowEl.style.display).toBe("none");
-    expect(h.view.composerHint).toBe("Steer queued — will take effect at next turn.");
+    expect(h.view.composerHint).toBe("Steer queued — it will run as its own turn when the current one finishes.");
     expect(/fail|error|could not|denied/i.test(h.view.composerHint!)).toBe(false);
     expect(NoticeMock).not.toHaveBeenCalled();
 
@@ -566,5 +567,215 @@ describe("steer outcome handling in view (standard E)", () => {
 
     const container = h.view.messageRenderer.containerFor(activeTabId);
     expect(container.querySelector(".hermesian-steer-record")).toBeNull();
+  });
+
+  it("turn-split: finalizes previous assistant streaming container, inserts user bubble, and clears queued marker", async () => {
+    const h = viewHarness({ readLocalHistory: async () => [] });
+    const activeTabId = h.view.conversationWorkspace.activeTabId;
+    const messagesEl = document.createElement("div");
+    const renderer = new MessageRenderer(messagesEl);
+    const turnManager = new TurnManager(renderer);
+    h.view.messageRenderer = renderer;
+    h.view.turnManager = turnManager;
+    h.view.messagesEl = messagesEl;
+
+    // Simulate in-flight first turn with an assistant stream and a queued steer record
+    turnManager.appendDelta(activeTabId, "Initial response prose");
+    turnManager.appendSteer(activeTabId, "Queued steering guidance", true);
+
+    const container = renderer.containerFor(activeTabId);
+    const streamingEl = container.querySelector(".hermesian-message-content.is-streaming");
+    expect(streamingEl).not.toBeNull();
+    const queuedRecord = container.querySelector(".hermesian-steer-record.is-queued");
+    expect(queuedRecord).not.toBeNull();
+    expect(queuedRecord!.querySelector(".hermesian-steer-marker")).not.toBeNull();
+
+    // Trigger turn-split with the echoed user message from server
+    h.view.handleHermesEvent(activeTabId, {
+      type: "turn-split",
+      text: "Queued steering guidance",
+    });
+    await tick();
+
+    // 1. Previous assistant container must be finalized (is-streaming removed)
+    expect(streamingEl!.classList.contains("is-streaming")).toBe(false);
+
+    // 2. User bubble inserted with the echoed text
+    const userMessages = Array.from(container.querySelectorAll(".hermesian-message.is-user"));
+    expect(userMessages.length).toBe(1);
+    expect(userMessages[0].textContent).toContain("Queued steering guidance");
+
+    // 3. Queued steer record marker cleared
+    expect(queuedRecord!.classList.contains("is-queued")).toBe(false);
+    expect(queuedRecord!.querySelector(".hermesian-steer-marker")).toBeNull();
+
+    // 4. Subsequent assistant delta starts a fresh turn below the user bubble
+    turnManager.appendDelta(activeTabId, "Second turn output");
+    const assistantMessages = Array.from(container.querySelectorAll(".hermesian-message.is-assistant"));
+    expect(assistantMessages.length).toBe(2);
+  });
+
+  it("usage event: provides fallback finalize for streaming assistant container", async () => {
+    const h = viewHarness({ readLocalHistory: async () => [] });
+    const activeTabId = h.view.conversationWorkspace.activeTabId;
+    const messagesEl = document.createElement("div");
+    const renderer = new MessageRenderer(messagesEl);
+    const turnManager = new TurnManager(renderer);
+    h.view.messageRenderer = renderer;
+    h.view.turnManager = turnManager;
+    h.view.messagesEl = messagesEl;
+
+    // Simulate streaming assistant message without stop signal
+    turnManager.appendDelta(activeTabId, "Server-initiated turn streaming prose");
+    const container = renderer.containerFor(activeTabId);
+    const streamingEl = container.querySelector(".hermesian-message-content.is-streaming");
+    expect(streamingEl).not.toBeNull();
+
+    // Server emits usage update (no turn-stop signal)
+    h.view.handleHermesEvent(activeTabId, { type: "usage" });
+    await tick();
+
+    // Fallback finalize removes is-streaming
+    expect(streamingEl!.classList.contains("is-streaming")).toBe(false);
+
+    // Repeated usage event or subsequent finishTurn is a safe no-op
+    expect(() => {
+      h.view.handleHermesEvent(activeTabId, { type: "usage" });
+    }).not.toThrow();
+    await tick();
+    expect(streamingEl!.classList.contains("is-streaming")).toBe(false);
+  });
+
+  it("turn-split race: new delta arriving while finalize/render is pending starts new turn below user bubble and finalizes via turn-stop", async () => {
+    const MarkdownRendererMock = vi.mocked((await import("obsidian")).MarkdownRenderer);
+    MarkdownRendererMock.render.mockClear();
+
+    const h = viewHarness({ readLocalHistory: async () => [] });
+    const activeTabId = h.view.conversationWorkspace.activeTabId;
+    const messagesEl = document.createElement("div");
+    const renderer = new MessageRenderer(messagesEl);
+    const turnManager = new TurnManager(renderer);
+    h.view.messageRenderer = renderer;
+    h.view.turnManager = turnManager;
+    h.view.messagesEl = messagesEl;
+
+    // Simulate in-flight first turn with an assistant stream and a queued steer record
+    turnManager.appendDelta(activeTabId, "Initial response prose");
+    turnManager.appendSteer(activeTabId, "Queued steering guidance", true);
+
+    const container = renderer.containerFor(activeTabId);
+    const streamingEl1 = container.querySelector(".hermesian-message-content.is-streaming");
+    expect(streamingEl1).not.toBeNull();
+
+    // Gate the first render call to simulate async MarkdownRenderer.render
+    const renderGate = deferred<void>();
+    MarkdownRendererMock.render.mockImplementationOnce(() => renderGate.promise);
+
+    // Trigger turn-split with the echoed user message from server
+    h.view.handleHermesEvent(activeTabId, {
+      type: "turn-split",
+      text: "Queued steering guidance",
+    });
+
+    // While turn 1 markdown render is pending, new turn assistant delta arrives
+    h.view.handleHermesEvent(activeTabId, {
+      type: "assistant-delta",
+      text: "Second turn streaming output",
+    });
+
+    // User message bubble must have been inserted synchronously before the second turn's assistant container
+    const userMessages = Array.from(container.querySelectorAll<HTMLElement>(".hermesian-message.is-user"));
+    const assistantMessages = Array.from(container.querySelectorAll<HTMLElement>(".hermesian-message.is-assistant"));
+    const turns = Array.from(container.querySelectorAll<HTMLElement>(".hermesian-turn"));
+    expect(userMessages.length).toBe(1);
+    expect(assistantMessages.length).toBe(2);
+    expect(turns.length).toBe(2);
+
+    const userBubble = userMessages[0];
+    const secondAssistant = assistantMessages[1];
+    expect(userBubble.compareDocumentPosition(secondAssistant) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(assistantMessages[0].compareDocumentPosition(userBubble) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const children = Array.from(container.children);
+    expect(children.indexOf(turns[0])).toBeLessThan(children.indexOf(userBubble));
+    expect(children.indexOf(userBubble)).toBeLessThan(children.indexOf(turns[1]));
+
+    // Resolve the first turn's markdown render
+    renderGate.resolve();
+    await tick();
+
+    // First turn streaming is done
+    expect(streamingEl1!.classList.contains("is-streaming")).toBe(false);
+
+    // Now emit turn-stop to finalize the second turn
+    h.view.handleHermesEvent(activeTabId, {
+      type: "turn-stop",
+      reason: "end_turn",
+    });
+    await tick();
+
+    // Assert:
+    // 1. New delta falls into the new turn container and was finalized/rendered
+    expect(MarkdownRendererMock.render).toHaveBeenCalledTimes(2);
+    expect(MarkdownRendererMock.render.mock.calls[0][1]).toContain("Initial response prose");
+    expect(MarkdownRendererMock.render.mock.calls[1][1]).toContain("Second turn streaming output");
+    expect(MarkdownRendererMock.render.mock.calls[1][2]).toBe(
+      secondAssistant.querySelector(".hermesian-message-content"),
+    );
+
+    // 2. User bubble is positioned before the new turn assistant container
+    expect(userBubble.compareDocumentPosition(secondAssistant) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // 3. No orphan is-streaming remains anywhere in container
+    expect(container.querySelectorAll(".is-streaming").length).toBe(0);
+  });
+
+  it("turn-split race: new delta arriving while finalize/render is pending is finalized by usage event", async () => {
+    const MarkdownRendererMock = vi.mocked((await import("obsidian")).MarkdownRenderer);
+    MarkdownRendererMock.render.mockClear();
+
+    const h = viewHarness({ readLocalHistory: async () => [] });
+    const activeTabId = h.view.conversationWorkspace.activeTabId;
+    const messagesEl = document.createElement("div");
+    const renderer = new MessageRenderer(messagesEl);
+    const turnManager = new TurnManager(renderer);
+    h.view.messageRenderer = renderer;
+    h.view.turnManager = turnManager;
+    h.view.messagesEl = messagesEl;
+
+    turnManager.appendDelta(activeTabId, "Initial turn output");
+    turnManager.appendSteer(activeTabId, "Steer guidance", true);
+
+    const container = renderer.containerFor(activeTabId);
+
+    const renderGate = deferred<void>();
+    MarkdownRendererMock.render.mockImplementationOnce(() => renderGate.promise);
+
+    h.view.handleHermesEvent(activeTabId, {
+      type: "turn-split",
+      text: "Steer guidance",
+    });
+
+    h.view.handleHermesEvent(activeTabId, {
+      type: "assistant-delta",
+      text: "Turn two output text",
+    });
+
+    renderGate.resolve();
+    await tick();
+
+    // Emit usage event as the finalize trigger
+    h.view.handleHermesEvent(activeTabId, { type: "usage" });
+    await tick();
+
+    const assistantMessages = Array.from(container.querySelectorAll<HTMLElement>(".hermesian-message.is-assistant"));
+    const userMessages = Array.from(container.querySelectorAll<HTMLElement>(".hermesian-message.is-user"));
+    expect(assistantMessages.length).toBe(2);
+    expect(userMessages.length).toBe(1);
+
+    expect(userMessages[0].compareDocumentPosition(assistantMessages[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(MarkdownRendererMock.render).toHaveBeenCalledTimes(2);
+    expect(MarkdownRendererMock.render.mock.calls[1][1]).toContain("Turn two output text");
+    expect(container.querySelectorAll(".is-streaming").length).toBe(0);
   });
 });
