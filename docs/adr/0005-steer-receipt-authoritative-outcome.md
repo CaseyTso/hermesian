@@ -1,0 +1,5 @@
+# Steer outcome is receipt-authoritative; silence means applied
+
+Hermesian used to verify a Steer by watching the live session stream for one verbatim English confirmation sentence, and reported "Steer could not be verified. Draft kept." whenever that sentence never arrived (model rephrasing, other languages, or the 30s timeout). That turned successful steers into false failures and made users resend guidance. We decided the explicit receipts Hermes returns (applied / queued / failed) are the only authority for a Steer's outcome: explicit rejection or a dead session keeps the draft with a red error; a queued receipt clears the draft and records a queued Steer Record; a request that returns with no receipt at all counts as applied, clears the draft, and records a Steer Record. Verbatim stream matching is removed.
+
+Considered options: keeping verbatim matching (rejected: the steer RPC resolves right after injection, so the request response is already strong delivery evidence, and the sentence match only adds false negatives); fuzzy keyword matching (rejected: still pattern-matching model prose, same failure class with softer edges).

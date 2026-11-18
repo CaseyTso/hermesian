@@ -104,7 +104,7 @@ describe("composerSubmitIntent", () => {
     ).toEqual({ kind: "send" });
   });
 
-  it("routes running pure-text Enter to steer", () => {
+  it("routes running pure-text Enter to steer only when steerAvailable is true (same source)", () => {
     expect(
       composerSubmitIntent({
         stopAvailable: true,
@@ -114,6 +114,17 @@ describe("composerSubmitIntent", () => {
         sendAvailable: false,
       }),
     ).toEqual({ kind: "steer" });
+
+    // When steerAvailable is false (e.g. steerInFlight or tab gate), pure text does NOT fallback to steer
+    expect(
+      composerSubmitIntent({
+        stopAvailable: true,
+        steerAvailable: false,
+        facts: pure,
+        stopping: false,
+        sendAvailable: false,
+      }),
+    ).toEqual({ kind: "noop" });
   });
 
   it("rejects rich content during an active turn and keeps the draft", () => {
@@ -122,6 +133,16 @@ describe("composerSubmitIntent", () => {
         stopAvailable: true,
         steerAvailable: false,
         facts: { ...pure, hasPendingImages: true },
+        stopping: false,
+        sendAvailable: false,
+      }),
+    ).toEqual({ kind: "reject-rich", reason: STEER_RICH_CONTENT_HINT });
+
+    expect(
+      composerSubmitIntent({
+        stopAvailable: true,
+        steerAvailable: false,
+        facts: { ...pure, hasReferenceCapsules: true },
         stopping: false,
         sendAvailable: false,
       }),

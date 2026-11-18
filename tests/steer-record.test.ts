@@ -68,11 +68,6 @@ describe("shouldRecordSteer", () => {
     expect(shouldRecordSteer(result)).toEqual({ record: false });
   });
 
-  it("does not record on unverifiable", () => {
-    const result: SteerResult = { ok: false, reason: "unverifiable" };
-    expect(shouldRecordSteer(result)).toEqual({ record: false });
-  });
-
   it("does not record on no_active_turn", () => {
     const result: SteerResult = { ok: false, reason: "no_active_turn" };
     expect(shouldRecordSteer(result)).toEqual({ record: false });
@@ -155,20 +150,14 @@ describe("Steer Record visualization", () => {
     expect(activity!.contains(record!)).toBe(true);
   });
 
-  // Requirement 3: On other failures: no record (steer_failed / unverifiable insert nothing)
-  it("(c) steer_failed and unverifiable insert nothing", () => {
+  // Requirement 3: On other failures: no record (steer_failed inserts nothing)
+  it("(c) steer_failed inserts nothing", () => {
     const { turns, messagesEl } = setupEnvironment();
 
     const failedDisp = shouldRecordSteer({ ok: false, reason: "steer_failed" });
     expect(failedDisp.record).toBe(false);
     if (failedDisp.record) {
       turns.appendSteer("tab-1", "should not be called", failedDisp.queued);
-    }
-
-    const unverifiableDisp = shouldRecordSteer({ ok: false, reason: "unverifiable" });
-    expect(unverifiableDisp.record).toBe(false);
-    if (unverifiableDisp.record) {
-      turns.appendSteer("tab-1", "should not be called", unverifiableDisp.queued);
     }
 
     expect(messagesEl.querySelector(".hermesian-steer-record")).toBeNull();

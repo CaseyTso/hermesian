@@ -203,12 +203,8 @@ const DISABLED_CONVERSATION_CONTROLS: ConversationControlAvailability =
 
 function steerFailureMessage(reason: string): string {
   switch (reason) {
-    case "queued":
-      return "Steer was queued by Hermes instead of applying to the active turn. Draft kept.";
     case "steer_failed":
       return "Steer failed. Draft kept.";
-    case "unverifiable":
-      return "Steer could not be verified. Draft kept.";
     case "no_active_turn":
       return "No active turn to steer.";
     case "steer_in_flight":
@@ -765,34 +761,7 @@ export class HermesianSidebarView extends ItemView {
         this.pendingFilePickerCaret = getCaretOffset(this.composerEl);
       },
       onKeydown: (event: KeyboardEvent) => {
-        if (this.hasPendingSend()) return;
-        if (this.handleSlashMenuKeydown(event)) {
-          return;
-        }
-        const result = handleInlineEditorKeydown(
-          this.composerEl,
-          event,
-          this.composerDraft,
-          this.inlineRenderOptions(),
-        );
-        if (!result.handled) {
-          return;
-        }
-        event.preventDefault();
-        if (result.draft) {
-          this.composerDraft = result.draft;
-          this.composerHint = undefined;
-          this.captureActiveConversationRuntime();
-          this.updateControls(false);
-        }
-        if (result.sendRequested) {
-          void this.handleComposerSubmit();
-        } else if (result.slashClearRequested) {
-          this.setComposerSlashToken(null);
-          this.captureActiveConversationRuntime();
-          this.renderSlashMenu(true);
-          this.composerEl.focus();
-        }
+        this.handleComposerKeydown(event);
       },
       onCopy: (event: ClipboardEvent) => {
         const payload = inlineCutPayload(this.composerEl, this.composerDraft);
@@ -2345,6 +2314,42 @@ export class HermesianSidebarView extends ItemView {
     }
   }
 
+  private handleComposerKeydown(event: KeyboardEvent): void {
+    if (this.hasPendingSend()) return;
+    if (this.handleSlashMenuKeydown(event)) {
+      return;
+    }
+    const result = handleInlineEditorKeydown(
+      this.composerEl,
+      event,
+      this.composerDraft,
+      this.inlineRenderOptions(),
+    );
+    if (!result.handled) {
+      return;
+    }
+    event.preventDefault();
+    if (result.draft) {
+      this.composerDraft = result.draft;
+      this.composerHint = undefined;
+      this.captureActiveConversationRuntime();
+      this.updateControls(false);
+    }
+    if (result.sendRequested) {
+      void this.handleComposerSubmit();
+    } else if (result.slashClearRequested) {
+      this.setComposerSlashToken(null);
+      this.captureActiveConversationRuntime();
+      if (
+        this.composerDraft.text.length === 0 &&
+        this.composerDraft.references.length === 0
+      ) {
+        this.renderSlashMenu(true);
+      }
+      this.composerEl.focus();
+    }
+  }
+
   private handleSlashMenuKeydown(event: KeyboardEvent): boolean {
     if (this.slashMenuItems.length === 0) {
       return false;
@@ -2948,7 +2953,7 @@ export class HermesianSidebarView extends ItemView {
       this.appendSteerRecord(activeTab.id, text, steerDisposition.queued);
     }
     if (result.ok) {
-      // Clear pure-text draft only after a verified steer success.
+      // Clear pure-text draft after an applied steer (receipt-authoritative).
       this.composerDraft = {
         token: this.composerDraft.token,
         text: "",
@@ -2957,6 +2962,19 @@ export class HermesianSidebarView extends ItemView {
       this.renderComposerInlineDraft();
       this.captureActiveConversationRuntime();
       this.composerHint = undefined;
+      this.updateControls(false);
+      this.composerEl.focus();
+      return;
+    }
+    if (result.reason === "queued") {
+      this.composerDraft = {
+        token: this.composerDraft.token,
+        text: "",
+        references: this.composerDraft.references,
+      };
+      this.renderComposerInlineDraft();
+      this.captureActiveConversationRuntime();
+      this.composerHint = "Steer queued — will take effect at next turn.";
       this.updateControls(false);
       this.composerEl.focus();
       return;
@@ -4016,7 +4034,16 @@ export class HermesianSidebarView extends ItemView {
         this.removeComposerReference(index);
       },
       renderIcon: (iconEl, kind) => {
-        setIcon(iconEl, kind === "url" ? "link" : "file");
+        if (kind === "skill") {
+          setIcon(iconEl, "sparkles");
+        } else if (kind === "command") {
+          setIcon(iconEl, "terminal");
+        } else {
+          setIcon(iconEl, kind === "url" ? "link" : "file");
+        }
+      },
+      renderSlashIcon: (iconEl, token) => {
+        setIcon(iconEl, token.kind === "skill" ? "sparkles" : "terminal");
       },
     };
   }

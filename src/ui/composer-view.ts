@@ -1,5 +1,4 @@
 import type { ComposerSlashToken } from "../slash-menu";
-import { visibleSlashTokenLabel } from "../slash-menu";
 import {
   referenceTokenDisplayLabel,
   type ReferenceToken,
@@ -8,6 +7,7 @@ import {
 import type { ComposerInlineDraft } from "../composer-reference-tokens";
 import {
   handleInlineEditorInput,
+  readInlineDraftFromDom,
   renderInlineDraft,
   type InlineEditorRenderOptions,
 } from "../composer-inline-editor";
@@ -355,6 +355,17 @@ export function createComposerView(
   const sendIcon = sendButtonEl.createSpan();
   sendIcon.empty();
 
+  const stopButtonEl = controlRow.createEl("button", {
+    attr: {
+      "aria-label": "Stop response",
+      title: "Stop response",
+      type: "button",
+    },
+    cls: "clickable-icon hermesian-primary-action is-stop",
+  });
+  const stopIcon = stopButtonEl.createSpan();
+  stopIcon.empty();
+
   const steerButtonEl = controlRow.createEl("button", {
     attr: {
       "aria-label": "Steer active turn",
@@ -369,17 +380,6 @@ export function createComposerView(
     text: "Steer",
     cls: "hermesian-steer-label",
   });
-
-  const stopButtonEl = controlRow.createEl("button", {
-    attr: {
-      "aria-label": "Stop response",
-      title: "Stop response",
-      type: "button",
-    },
-    cls: "clickable-icon hermesian-primary-action is-stop",
-  });
-  const stopIcon = stopButtonEl.createSpan();
-  stopIcon.empty();
 
   const statusEl = composerFooter.createDiv({
     attr: { "aria-live": "polite", role: "status" },
@@ -428,6 +428,11 @@ export function createComposerView(
   composerEl.addEventListener("input", () => {
     // Always read the host's LIVE draft — never a creation-time snapshot —
     // so tokens applied by external restores / tab switches survive typing.
+    const updated = handleInlineEditorInput(composerEl, callbacks.getDraft());
+    callbacks.onDraftChange(updated);
+  });
+
+  composerEl.addEventListener("compositionend", () => {
     const updated = handleInlineEditorInput(composerEl, callbacks.getDraft());
     callbacks.onDraftChange(updated);
   });
@@ -579,6 +584,7 @@ export function applyComposerState(
   }
 
   elements.stopButtonEl.disabled = !stopEnabled;
+  elements.stopButtonEl.classList.toggle("is-secondary", mode === "stop-steer");
   if (mode === "stopping") {
     elements.stopButtonEl.setAttribute("aria-label", STOPPING_LABEL);
     elements.stopButtonEl.setAttribute("title", STOPPING_LABEL);
@@ -738,26 +744,25 @@ export function applyComposerSlashToken(
   >,
   token: ComposerSlashToken | null,
 ): void {
-  if (!token) {
-    elements.slashTokenEl.hide();
-    elements.slashTokenEl.classList.remove("is-skill", "is-command", "is-capsule");
-    elements.slashTokenEl.removeAttribute("aria-label");
-    elements.slashTokenEl.setAttribute("aria-hidden", "true");
-    elements.slashTokenLabelEl.textContent = "";
-    elements.slashTokenIconEl.empty();
-    return;
-  }
+  // External slashTokenEl no longer displays the slash token.
+  // It is kept hidden as an empty shell to avoid duplicate display.
+  elements.slashTokenEl.hide();
+  elements.slashTokenEl.classList.remove("is-skill", "is-command", "is-capsule");
+  elements.slashTokenEl.removeAttribute("aria-label");
+  elements.slashTokenEl.setAttribute("aria-hidden", "true");
+  elements.slashTokenLabelEl.textContent = "";
+  elements.slashTokenIconEl.empty();
 
-  const label = visibleSlashTokenLabel(token);
-  const isSkill = token.kind === "skill";
-  elements.slashTokenEl.classList.toggle("is-skill", isSkill);
-  elements.slashTokenEl.classList.toggle("is-command", !isSkill);
-  elements.slashTokenEl.classList.toggle("is-capsule", isSkill);
-  elements.slashTokenEl.setAttribute(
-    "aria-label",
-    isSkill ? `Skill ${label}` : `Command ${label}`,
-  );
-  elements.slashTokenEl.setAttribute("aria-hidden", "false");
-  elements.slashTokenLabelEl.textContent = label;
-  elements.slashTokenEl.show();
+  if (elements.composerEl) {
+    const current = readInlineDraftFromDom(elements.composerEl);
+    const tokenChanged =
+      (current.token === null && token !== null) ||
+      (current.token !== null && token === null) ||
+      (current.token !== null &&
+        token !== null &&
+        (current.token.kind !== token.kind || current.token.name !== token.name));
+    if (tokenChanged) {
+      renderInlineDraft(elements.composerEl, { ...current, token });
+    }
+  }
 }

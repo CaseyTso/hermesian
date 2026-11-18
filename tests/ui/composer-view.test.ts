@@ -21,6 +21,7 @@ import {
 import {
   handleInlineEditorKeydown,
   readInlineDraftFromDom,
+  setCaretOffset,
 } from "../../src/composer-inline-editor";
 import {
   composerSlashTokenFromMenuItem,
@@ -400,7 +401,7 @@ describe("applyComposerState", () => {
     expect(elements.sendButtonEl.style.display).not.toBe("none");
   });
 
-  it("shows Stop + Steer together for steerable active turns", () => {
+  it("shows Stop + Steer together for steerable active turns with steer in primary position and stop in secondary", () => {
     applyComposerState(
       elements,
       defaultState({
@@ -412,9 +413,39 @@ describe("applyComposerState", () => {
     );
     expect(elements.sendButtonEl.style.display).toBe("none");
     expect(elements.stopButtonEl.style.display).not.toBe("none");
+    expect(elements.stopButtonEl.classList.contains("is-secondary")).toBe(true);
     expect(elements.steerButtonEl.style.display).not.toBe("none");
     expect(elements.steerButtonEl.disabled).toBe(false);
     expect(elements.steerModeEl.style.display).not.toBe("none");
+
+    // Steer button is placed after stopButtonEl in controlRow (occupies primary slot on the right)
+    const controlRow = elements.steerButtonEl.parentElement;
+    expect(controlRow).not.toBeNull();
+    const children = Array.from(controlRow!.children);
+    const stopIndex = children.indexOf(elements.stopButtonEl);
+    const steerIndex = children.indexOf(elements.steerButtonEl);
+    expect(stopIndex).toBeGreaterThan(-1);
+    expect(steerIndex).toBeGreaterThan(stopIndex);
+
+    // Stop button loses secondary styling in pure stop mode
+    applyComposerState(elements, defaultState({ primaryMode: "stop", stopVisible: true }));
+    expect(elements.stopButtonEl.classList.contains("is-secondary")).toBe(false);
+    expect(elements.steerButtonEl.style.display).toBe("none");
+  });
+
+  it("triggers onDraftChange on compositionend to reveal steer controls after IME finishes", () => {
+    let capturedDraft: any = null;
+    const { elements: imeElements } = setup(undefined, {
+      onDraftChange: (d) => {
+        capturedDraft = d;
+      },
+    });
+
+    imeElements.composerEl.textContent = "输入法上屏文本";
+    imeElements.composerEl.dispatchEvent(new Event("compositionend"));
+
+    expect(capturedDraft).not.toBeNull();
+    expect(capturedDraft.text).toBe("输入法上屏文本");
   });
 
   it("shows Steer mode indicator iff primaryMode is stop-steer", () => {
@@ -629,34 +660,38 @@ describe("applyComposerSlashToken", () => {
     const { elements } = setup();
     applyComposerSlashToken(elements, { kind: "skill", name: "leader" });
 
-    expect(elements.slashTokenEl.style.display).not.toBe("none");
-    expect(elements.slashTokenEl.classList.contains("is-skill")).toBe(true);
-    expect(elements.slashTokenEl.classList.contains("is-command")).toBe(false);
-    expect(elements.slashTokenEl.classList.contains("is-capsule")).toBe(true);
-    expect(elements.slashTokenLabelEl.textContent).toBe("/leader");
-    expect(elements.slashTokenEl.getAttribute("aria-label")).toBe("Skill /leader");
+    expect(elements.slashTokenEl.style.display).toBe("none");
+    const capsule = elements.composerEl.querySelector(".hermesian-slash-token") as HTMLElement;
+    expect(capsule).not.toBeNull();
+    expect(capsule.classList.contains("is-skill")).toBe(true);
+    expect(capsule.classList.contains("is-command")).toBe(false);
+    expect(capsule.classList.contains("is-capsule")).toBe(true);
+    expect(capsule.querySelector(".hermesian-slash-token-label")!.textContent).toBe("/leader");
+    expect(capsule.getAttribute("aria-label")).toBe("Skill /leader");
   });
 
   it("renders a native command as blue inline token without capsule border class", () => {
     const { elements } = setup();
     applyComposerSlashToken(elements, { kind: "command", name: "model" });
 
-    expect(elements.slashTokenEl.style.display).not.toBe("none");
-    expect(elements.slashTokenEl.classList.contains("is-command")).toBe(true);
-    expect(elements.slashTokenEl.classList.contains("is-skill")).toBe(false);
-    expect(elements.slashTokenEl.classList.contains("is-capsule")).toBe(false);
-    expect(elements.slashTokenLabelEl.textContent).toBe("/model");
-    expect(elements.slashTokenEl.getAttribute("aria-label")).toBe("Command /model");
+    expect(elements.slashTokenEl.style.display).toBe("none");
+    const capsule = elements.composerEl.querySelector(".hermesian-slash-token") as HTMLElement;
+    expect(capsule).not.toBeNull();
+    expect(capsule.classList.contains("is-command")).toBe(true);
+    expect(capsule.classList.contains("is-skill")).toBe(false);
+    expect(capsule.classList.contains("is-capsule")).toBe(false);
+    expect(capsule.querySelector(".hermesian-slash-token-label")!.textContent).toBe("/model");
+    expect(capsule.getAttribute("aria-label")).toBe("Command /model");
   });
 
   it("hides the token when cleared and keeps the editor surface intact", () => {
     const { elements } = setup();
     applyComposerSlashToken(elements, { kind: "skill", name: "leader" });
-    expect(elements.slashTokenEl.style.display).not.toBe("none");
+    expect(elements.composerEl.querySelector(".hermesian-slash-token")).not.toBeNull();
 
     applyComposerSlashToken(elements, null);
     expect(elements.slashTokenEl.style.display).toBe("none");
-    expect(elements.slashTokenLabelEl.textContent).toBe("");
+    expect(elements.composerEl.querySelector(".hermesian-slash-token")).toBeNull();
   });
 
   it("forwards every keydown to the host (slash clear is a host decision now)", () => {
@@ -913,7 +948,9 @@ describe("slash token single source (production paths)", () => {
       return hostDraft;
     };
 
-    // Real Backspace keydown through the production keydown chain.
+    const renderSlashMenu = vi.fn();
+
+    // Real Backspace keydown through the production keydown chain (mirrors view.ts onKeydown).
     const pressBackspace = (): { slashClearRequested?: boolean } => {
       const event = new KeyboardEvent("keydown", {
         key: "Backspace",
@@ -924,8 +961,14 @@ describe("slash token single source (production paths)", () => {
         onRemoveReference: callbacks.onReferenceRemove,
         renderIcon: callbacks.renderIcon,
       });
+      if (result.draft) {
+        hostDraft = result.draft;
+      }
       if (result.slashClearRequested) {
         setToken(null);
+        if (hostDraft.text.length === 0 && hostDraft.references.length === 0) {
+          renderSlashMenu(true);
+        }
       }
       return result;
     };
@@ -939,6 +982,7 @@ describe("slash token single source (production paths)", () => {
       applyRestoredDraft,
       typeText,
       pressBackspace,
+      renderSlashMenu,
     };
   }
 
@@ -949,8 +993,10 @@ describe("slash token single source (production paths)", () => {
 
     // External restore path: host applies the persisted /leader draft.
     setToken({ kind: "skill", name: "leader" });
-    expect(elements.slashTokenLabelEl.textContent).toBe("/leader");
-    expect(elements.slashTokenEl.style.display).not.toBe("none");
+    const capsule = elements.composerEl.querySelector(".hermesian-slash-token") as HTMLElement;
+    expect(capsule).not.toBeNull();
+    expect(capsule.textContent).toContain("/leader");
+    expect(elements.slashTokenEl.style.display).toBe("none");
 
     // Ordinary input must carry the SAME token into the model.
     typeText("测试");
@@ -1014,17 +1060,42 @@ describe("slash token single source (production paths)", () => {
   });
 
   it("clears the token display and the canonical string together on empty Backspace", () => {
-    const { elements, setToken, pressBackspace, hostDraft } = setupHost();
+    const { elements, setToken, pressBackspace, hostDraft, renderSlashMenu } = setupHost();
     setToken({ kind: "skill", name: "leader" });
-    expect(elements.slashTokenEl.style.display).not.toBe("none");
+    expect(elements.composerEl.querySelector(".hermesian-slash-token")).not.toBeNull();
+    expect(elements.slashTokenEl.style.display).toBe("none");
     expect(serializeComposerInlineDraft(hostDraft())).toBe("/skill leader ");
 
-    // Real Backspace on the empty editor → slashClearRequested → host clears.
+    // Real Backspace on the empty editor → slashClearRequested → host clears & opens menu
     const result = pressBackspace();
     expect(result.slashClearRequested).toBe(true);
     expect(elements.slashTokenEl.style.display).toBe("none");
-    expect(elements.slashTokenLabelEl.textContent).toBe("");
+    expect(elements.composerEl.querySelector(".hermesian-slash-token")).toBeNull();
     expect(hostDraft().token).toBeNull();
     expect(serializeComposerInlineDraft(hostDraft())).toBe("");
+    expect(renderSlashMenu).toHaveBeenCalledWith(true);
+  });
+
+  it("does not open slash menu when Backspace deletes capsule but text remains (setupHost)", () => {
+    const { elements, setToken, typeText, pressBackspace, hostDraft, renderSlashMenu } = setupHost();
+    setToken({ kind: "skill", name: "leader" });
+    typeText("剩余文字");
+    // Place caret at text offset 0 (胶囊右缘)
+    setCaretOffset(elements.composerEl, 0);
+
+    const result = pressBackspace();
+    expect(result.slashClearRequested).toBe(true);
+    expect(elements.composerEl.querySelector(".hermesian-slash-token")).toBeNull();
+    expect(hostDraft().token).toBeNull();
+    expect(hostDraft().text).toBe("剩余文字");
+    expect(renderSlashMenu).not.toHaveBeenCalled();
+  });
+
+  it("syncs draft and invokes onDraftChange upon compositionend (IME)", () => {
+    const { elements, callbacks, hostDraft } = setupHost();
+    elements.composerEl.appendChild(document.createTextNode("中文输入"));
+    elements.composerEl.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    expect(callbacks.onDraftChange).toHaveBeenCalled();
+    expect(hostDraft().text).toBe("中文输入");
   });
 });

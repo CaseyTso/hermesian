@@ -100,15 +100,13 @@ export interface SteerCaptureClassification {
   /** Non-marker captured text that must still be replayed as assistant-delta. */
   body: string;
   ok: boolean;
-  reason?: "queued" | "steer_failed" | "unverifiable";
+  reason?: "queued" | "steer_failed";
 }
 
 /**
  * Classify a single captured agent chunk as a steer receipt or plain prose.
- * Anchored to the complete receipt sentence (trimmed, whole-text match): a
- * full failure/queue/success receipt is suppressed entirely (dynamic detail
- * never reaches `body`), while ordinary prose — even prose that mentions or
- * explains the receipt wording — is preserved verbatim.
+ * Complete failure/queue/redirect receipts are suppressed from `body`, while
+ * ordinary prose is preserved verbatim and treated as applied (ok: true).
  */
 export function classifySteerCapture(
   captured: string,
@@ -123,21 +121,21 @@ export function classifySteerCapture(
   if (text === STEER_SUCCESS_MARKER) {
     return { body: "", ok: true };
   }
-  return { body: captured, ok: false, reason: "unverifiable" };
+  return { body: captured, ok: true };
 }
 
 /**
  * Aggregate per-chunk classifications from the steer capture buffer. Receipt
- * chunks (success/queue/failure) contribute no body; ordinary prose chunks
- * are preserved verbatim in capture order. The verdict follows the strictest
- * outcome seen: steer_failed > queued > success > unverifiable.
+ * chunks (queue/failure/marker) contribute no body; ordinary prose chunks
+ * are preserved verbatim in capture order. The verdict follows explicit
+ * receipts: steer_failed > queued > applied. Silence or plain prose counts
+ * as applied.
  */
 export function aggregateSteerCapture(
   chunks: string[],
 ): SteerCaptureClassification {
   let body = "";
-  let outcome: "unverifiable" | "queued" | "steer_failed" | "success" =
-    "unverifiable";
+  let outcome: "queued" | "steer_failed" | "applied" = "applied";
   for (const chunk of chunks) {
     const classification = classifySteerCapture(chunk);
     if (classification.reason === "steer_failed") {
@@ -145,10 +143,6 @@ export function aggregateSteerCapture(
     } else if (classification.reason === "queued") {
       if (outcome !== "steer_failed") {
         outcome = "queued";
-      }
-    } else if (classification.ok) {
-      if (outcome !== "steer_failed" && outcome !== "queued") {
-        outcome = "success";
       }
     } else {
       body += classification.body;
@@ -159,10 +153,9 @@ export function aggregateSteerCapture(
       return { body, ok: false, reason: "steer_failed" };
     case "queued":
       return { body, ok: false, reason: "queued" };
-    case "success":
-      return { body, ok: true };
+    case "applied":
     default:
-      return { body, ok: false, reason: "unverifiable" };
+      return { body, ok: true };
   }
 }
 
@@ -1251,7 +1244,7 @@ export class HermesAcpClient {
       return { ok: false, reason: "steer_in_flight" };
     }
     if (!text.trim()) {
-      return { ok: false, reason: "unverifiable" };
+      return { ok: false, reason: "steer_failed" };
     }
     if (!this.busy) {
       return { ok: false, reason: "no_active_turn" };
@@ -1303,7 +1296,7 @@ export class HermesAcpClient {
       if (!this.context || !sessionId) {
         // Nothing went on the wire — release the slot immediately.
         this.pendingSteer = undefined;
-        return { ok: false, reason: "unverifiable" };
+        return { ok: false, reason: "steer_failed" };
       }
       const request = this.context.request(acp.methods.agent.session.prompt, {
         prompt: [{ type: "text", text }],
@@ -1321,40 +1314,43 @@ export class HermesAcpClient {
         () => this.onSteerRequestSettled(steer),
       );
       let classification: SteerCaptureClassification = aggregateSteerCapture([]);
+      let isTimeout = false;
       try {
         await withTimeout(
           request,
           FINITE_OPERATION_TIMEOUT_MS,
           "Hermes ACP steer",
         );
-        classification = aggregateSteerCapture(steer.captured);
-        // The settle handler already replayed captured prose on this path —
-        // never replay again here.
-        return classification.ok
-          ? { ok: true }
-          : { ok: false, reason: classification.reason ?? "unverifiable" };
-      } catch {
-        // Timeout / transport failure: bounded return, but the unresolved
-        // request must keep the single-flight slot reserved. Captured
-        // main-turn prose is replayed now, exactly once.
-        classification = aggregateSteerCapture(steer.captured);
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("timed out")) {
+          isTimeout = true;
+        } else {
+          // RPC rejected / JSON-RPC error / transport error:
+          classification = aggregateSteerCapture(steer.captured);
+          if (!steer.replayed) {
+            steer.replayed = true;
+            this.replaySteerCapture(classification);
+          }
+          return { ok: false, reason: "steer_failed" };
+        }
+      }
+
+      classification = aggregateSteerCapture(steer.captured);
+      if (isTimeout) {
         if (!steer.replayed) {
           steer.replayed = true;
           this.replaySteerCapture(classification);
         }
-        // Start a fresh capture epoch: the main turn keeps streaming into
-        // `captured` while the unresolved request still holds the slot.
-        // Replaying now must not silence that later prose forever — resetting
-        // the flag and the buffer lets closeSteerWindow (main-turn terminal)
-        // or a late settle replay the post-timeout prose exactly once.
         steer.captured = [];
         steer.replayed = false;
-        return { ok: false, reason: "unverifiable" };
       }
+      return classification.ok
+        ? { ok: true }
+        : { ok: false, reason: classification.reason ?? "steer_failed" };
     } catch {
       // Synchronous dispatch failure: nothing went on the wire.
       this.pendingSteer = undefined;
-      return { ok: false, reason: "unverifiable" };
+      return { ok: false, reason: "steer_failed" };
     }
   }
 
@@ -1487,9 +1483,8 @@ export class HermesAcpClient {
           if (this.steerReceiptWindow) {
             const classification = classifySteerCapture(update.content.text);
             if (
-              classification.ok ||
-              classification.reason === "queued" ||
-              classification.reason === "steer_failed"
+              !classification.ok ||
+              classification.body === ""
             ) {
               return;
             }

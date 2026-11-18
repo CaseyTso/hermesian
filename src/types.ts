@@ -138,7 +138,6 @@ export type HermesUiEvent =
 export type SteerFailureReason =
   | "queued"
   | "steer_failed"
-  | "unverifiable"
   | "no_active_turn"
   | "steer_in_flight";
 

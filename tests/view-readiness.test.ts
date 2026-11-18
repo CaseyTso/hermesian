@@ -32,6 +32,7 @@ beforeEach(() => {
   vi.stubGlobal("window", window);
   vi.stubGlobal("document", window.document);
   vi.stubGlobal("HTMLElement", window.HTMLElement);
+  vi.stubGlobal("Node", window.Node);
   (HTMLElement.prototype as any).show = function () { this.style.display = ""; };
   (HTMLElement.prototype as any).hide = function () { this.style.display = "none"; };
   (HTMLElement.prototype as any).setText = function (text: string) { this.textContent = text; };
@@ -403,5 +404,92 @@ describe("steer record view integration (F1, F5, F6, G6)", () => {
     h.view.updateControls(false);
 
     expect(h.view.steerModeEl.style.display).toBe("none");
+  });
+});
+
+describe("steer outcome handling in view (standard E)", () => {
+  it("applied: clears draft and records steer without queued marker or Notice", async () => {
+    const h = viewHarness({ readLocalHistory: async () => [] });
+    const activeTabId = h.view.conversationWorkspace.activeTabId;
+    const messagesEl = document.createElement("div");
+    const renderer = new MessageRenderer(messagesEl);
+    const turnManager = new TurnManager(renderer);
+    h.view.messageRenderer = renderer;
+    h.view.turnManager = turnManager;
+    turnManager.ensureActivity(activeTabId);
+
+    h.view.composerDraft = { text: "Applied correction", token: null, references: [] };
+    h.view.controlAvailability = () => ({ steer: true, send: true, composer: true } as any);
+    h.client.steerActiveTurn.mockResolvedValueOnce({ ok: true });
+
+    const NoticeMock = vi.mocked((await import("obsidian")).Notice);
+    NoticeMock.mockClear();
+
+    await (h.view as any).steerActiveTurnFromComposer();
+
+    expect(h.view.composerDraft.text).toBe("");
+    expect(h.view.composerHint).toBeUndefined();
+    expect(NoticeMock).not.toHaveBeenCalled();
+
+    const container = h.view.messageRenderer.containerFor(activeTabId);
+    const record = container.querySelector(".hermesian-steer-record");
+    expect(record).not.toBeNull();
+    expect(record!.classList.contains("is-queued")).toBe(false);
+  });
+
+  it("queued: clears draft, records queued steer, sets gentle hint, and avoids Notice", async () => {
+    const h = viewHarness({ readLocalHistory: async () => [] });
+    const activeTabId = h.view.conversationWorkspace.activeTabId;
+    const messagesEl = document.createElement("div");
+    const renderer = new MessageRenderer(messagesEl);
+    const turnManager = new TurnManager(renderer);
+    h.view.messageRenderer = renderer;
+    h.view.turnManager = turnManager;
+    turnManager.ensureActivity(activeTabId);
+
+    h.view.composerDraft = { text: "Queued guidance", token: null, references: [] };
+    h.view.controlAvailability = () => ({ steer: true, send: true, composer: true } as any);
+    h.client.steerActiveTurn.mockResolvedValueOnce({ ok: false, reason: "queued" });
+
+    const NoticeMock = vi.mocked((await import("obsidian")).Notice);
+    NoticeMock.mockClear();
+
+    await (h.view as any).steerActiveTurnFromComposer();
+
+    expect(h.view.composerDraft.text).toBe("");
+    expect(h.view.composerHint).toBe("Steer queued — will take effect at next turn.");
+    expect(/fail|error|could not|denied/i.test(h.view.composerHint!)).toBe(false);
+    expect(NoticeMock).not.toHaveBeenCalled();
+
+    const container = h.view.messageRenderer.containerFor(activeTabId);
+    const record = container.querySelector(".hermesian-steer-record.is-queued");
+    expect(record).not.toBeNull();
+  });
+
+  it("failed: retains draft, sets error hint, does not record, and triggers Notice", async () => {
+    const h = viewHarness({ readLocalHistory: async () => [] });
+    const activeTabId = h.view.conversationWorkspace.activeTabId;
+    const messagesEl = document.createElement("div");
+    const renderer = new MessageRenderer(messagesEl);
+    const turnManager = new TurnManager(renderer);
+    h.view.messageRenderer = renderer;
+    h.view.turnManager = turnManager;
+    turnManager.ensureActivity(activeTabId);
+
+    h.view.composerDraft = { text: "Failed guidance", token: null, references: [] };
+    h.view.controlAvailability = () => ({ steer: true, send: true, composer: true } as any);
+    h.client.steerActiveTurn.mockResolvedValueOnce({ ok: false, reason: "steer_failed" });
+
+    const NoticeMock = vi.mocked((await import("obsidian")).Notice);
+    NoticeMock.mockClear();
+
+    await (h.view as any).steerActiveTurnFromComposer();
+
+    expect(h.view.composerDraft.text).toBe("Failed guidance");
+    expect(h.view.composerHint).toBe("Steer failed. Draft kept.");
+    expect(NoticeMock).toHaveBeenCalledWith("Steer failed. Draft kept.");
+
+    const container = h.view.messageRenderer.containerFor(activeTabId);
+    expect(container.querySelector(".hermesian-steer-record")).toBeNull();
   });
 });

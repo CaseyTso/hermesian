@@ -1027,7 +1027,7 @@ describe("HermesAcpClient steer", () => {
     expect(captureB.all()).not.toContain("⚠️");
   });
 
-  it("returns unverifiable when no marker appears even with end_turn", async () => {
+  it("treats resolution with no explicit receipt as applied (silence is success)", async () => {
     const client = steerClient();
     const capture = assistantDeltas(client);
     const pending = steerDeferred<{ stopReason: string }>();
@@ -1040,12 +1040,12 @@ describe("HermesAcpClient steer", () => {
     pushSteerUpdate(client, steerChunk("something unrelated"));
     pending.resolve({ stopReason: "end_turn" });
 
-    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    await expect(steer).resolves.toEqual({ ok: true });
     // Concurrent main-turn text must not be lost.
     expect(capture.deltas).toEqual(["something unrelated"]);
   });
 
-  it("returns unverifiable when the request times out", async () => {
+  it("treats request timeout as applied without unverifiable", async () => {
     vi.useFakeTimers();
     try {
       const client = steerClient();
@@ -1056,13 +1056,13 @@ describe("HermesAcpClient steer", () => {
 
       const steer = client.steerActiveTurn("correction");
       await vi.advanceTimersByTimeAsync(30_001);
-      await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      await expect(steer).resolves.toEqual({ ok: true });
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("returns unverifiable when the request rejects", async () => {
+  it("returns steer_failed when the request rejects", async () => {
     const client = steerClient();
     steerTransport(
       client,
@@ -1076,7 +1076,7 @@ describe("HermesAcpClient steer", () => {
 
     await expect(client.steerActiveTurn("correction")).resolves.toEqual({
       ok: false,
-      reason: "unverifiable",
+      reason: "steer_failed",
     });
   });
 
@@ -1109,7 +1109,7 @@ describe("HermesAcpClient steer", () => {
     expect(request).toHaveBeenCalledOnce();
 
     pending.resolve({ stopReason: "end_turn" });
-    await expect(first).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    await expect(first).resolves.toEqual({ ok: true });
   });
 
   it("keeps sendPrompt's busy guard while steer uses its own bounded path", async () => {
@@ -1126,7 +1126,7 @@ describe("HermesAcpClient steer", () => {
 
     const steer = client.steerActiveTurn("correction");
     pending.resolve({ stopReason: "end_turn" });
-    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    await expect(steer).resolves.toEqual({ ok: true });
     expect(client.isBusy).toBe(true);
   });
 
@@ -1236,7 +1236,7 @@ describe("HermesAcpClient steer", () => {
     const steer = client.steerActiveTurn("correction");
 
     // The main request is still pending when the steer dispatches.
-    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    await expect(steer).resolves.toEqual({ ok: true });
     expect(calls).toEqual(["main prompt", "correction"]);
     resolveMain({ stopReason: "end_turn" });
     await main;
@@ -1328,7 +1328,7 @@ describe("HermesAcpClient steer", () => {
     expect(request).not.toHaveBeenCalled();
 
     resolveConnect();
-    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    await expect(steer).resolves.toEqual({ ok: true });
     expect(calls).toEqual(["main prompt", "correction"]);
 
     resolveMain({ stopReason: "end_turn" });
@@ -1424,7 +1424,7 @@ describe("HermesAcpClient steer", () => {
     expect(request).not.toHaveBeenCalled();
 
     resolveConnect();
-    await expect(first).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    await expect(first).resolves.toEqual({ ok: true });
     expect(calls).toEqual(["main prompt", "first correction"]);
 
     resolveMain({ stopReason: "end_turn" });
@@ -1466,7 +1466,7 @@ describe("HermesAcpClient steer", () => {
     const steer = client.steerActiveTurn("correction");
     // Settle the steer without any captured receipt (transport rejected).
     pending.reject(new Error("transport blew up"));
-    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    await expect(steer).resolves.toEqual({ ok: false, reason: "steer_failed" });
 
     // The receipt arrives after pendingSteer was cleared — it must not become
     // visible assistant text.
@@ -1485,7 +1485,7 @@ describe("HermesAcpClient steer", () => {
 
     const steer = client.steerActiveTurn("correction");
     pending.reject(new Error("transport blew up"));
-    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    await expect(steer).resolves.toEqual({ ok: false, reason: "steer_failed" });
 
     pushSteerUpdate(client, steerChunk("Queued for the next turn. (2 queued)"));
     pushSteerUpdate(client, steerChunk("⚠️ Steer failed: boom"));
@@ -1522,7 +1522,7 @@ describe("HermesAcpClient steer", () => {
 
     const steer = client.steerActiveTurn("correction");
     pending.reject(new Error("transport blew up"));
-    await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+    await expect(steer).resolves.toEqual({ ok: false, reason: "steer_failed" });
 
     // Count-less queue variants and the real failure receipt stay suppressed
     // while the steer window is still open; ordinary prose still streams.
@@ -1549,7 +1549,7 @@ describe("HermesAcpClient steer", () => {
 
       const first = client.steerActiveTurn("first correction");
       await vi.advanceTimersByTimeAsync(30_001);
-      await expect(first).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      await expect(first).resolves.toEqual({ ok: true });
 
       // The underlying request is still unresolved: a second steer must not
       // reach the wire even though the first call already returned.
@@ -1564,7 +1564,7 @@ describe("HermesAcpClient steer", () => {
       await Promise.resolve();
       await Promise.resolve();
       const third = client.steerActiveTurn("third correction");
-      await expect(third).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      await expect(third).resolves.toEqual({ ok: true });
       expect(request).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
@@ -1589,7 +1589,7 @@ describe("HermesAcpClient steer", () => {
       const steer = client.steerActiveTurn("correction");
       pushSteerUpdate(client, steerChunk("prose during the steer window"));
       await vi.advanceTimersByTimeAsync(30_001);
-      await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      await expect(steer).resolves.toEqual({ ok: true });
       expect(capture.deltas).toEqual(["prose during the steer window"]);
 
       // The unresolved request finally settles: the slot releases and the
@@ -1603,7 +1603,7 @@ describe("HermesAcpClient steer", () => {
       const next = client.steerActiveTurn("again");
       expect(request).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(30_001);
-      await expect(next).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      await expect(next).resolves.toEqual({ ok: true });
     } finally {
       vi.useRealTimers();
     }
@@ -1621,7 +1621,7 @@ describe("HermesAcpClient steer", () => {
 
       const steer = client.steerActiveTurn("correction");
       await vi.advanceTimersByTimeAsync(30_001);
-      await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      await expect(steer).resolves.toEqual({ ok: true });
       expect(request).toHaveBeenCalledTimes(1);
 
       // sendPrompt's finally performs this exact cleanup at main-turn terminal.
@@ -1631,7 +1631,7 @@ describe("HermesAcpClient steer", () => {
       const next = client.steerActiveTurn("correction again");
       expect(request).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(30_001);
-      await expect(next).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      await expect(next).resolves.toEqual({ ok: true });
     } finally {
       vi.useRealTimers();
     }
@@ -1649,7 +1649,7 @@ describe("HermesAcpClient steer", () => {
 
       const steer = client.steerActiveTurn("correction");
       await vi.advanceTimersByTimeAsync(30_001);
-      await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      await expect(steer).resolves.toEqual({ ok: true });
       expect(request).toHaveBeenCalledTimes(1);
 
       await client.disconnect();
@@ -1663,7 +1663,7 @@ describe("HermesAcpClient steer", () => {
       const next = client.steerActiveTurn("correction after reconnect");
       expect(request).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(30_001);
-      await expect(next).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      await expect(next).resolves.toEqual({ ok: true });
     } finally {
       vi.useRealTimers();
     }
@@ -1683,7 +1683,7 @@ describe("HermesAcpClient steer", () => {
       const steer = client.steerActiveTurn("correction");
       pushSteerUpdate(client, steerChunk("early prose "));
       await vi.advanceTimersByTimeAsync(30_001);
-      await expect(steer).resolves.toEqual({ ok: false, reason: "unverifiable" });
+      await expect(steer).resolves.toEqual({ ok: true });
       // Prose captured before the timeout is replayed at the bounded timeout.
       expect(capture.deltas).toEqual(["early prose "]);
 
@@ -1744,13 +1744,11 @@ describe("classifySteerCapture per-chunk receipts", () => {
   it("keeps ordinary prose that merely mentions marker words", () => {
     expect(classifySteerCapture("I won't say Steer failed")).toEqual({
       body: "I won't say Steer failed",
-      ok: false,
-      reason: "unverifiable",
+      ok: true,
     });
     expect(classifySteerCapture("The ⚠️ icon warns")).toEqual({
       body: "The ⚠️ icon warns",
-      ok: false,
-      reason: "unverifiable",
+      ok: true,
     });
   });
 
@@ -1758,8 +1756,7 @@ describe("classifySteerCapture per-chunk receipts", () => {
     const prose = "The server says Queued for the next turn when it is busy.";
     expect(classifySteerCapture(prose)).toEqual({
       body: prose,
-      ok: false,
-      reason: "unverifiable",
+      ok: true,
     });
   });
 
@@ -1770,8 +1767,7 @@ describe("classifySteerCapture per-chunk receipts", () => {
     ]) {
       expect(classifySteerCapture(prose)).toEqual({
         body: prose,
-        ok: false,
-        reason: "unverifiable",
+        ok: true,
       });
     }
   });
@@ -1795,8 +1791,7 @@ describe("classifySteerCapture per-chunk receipts", () => {
     ]) {
       expect(classifySteerCapture(prose)).toEqual({
         body: prose,
-        ok: false,
-        reason: "unverifiable",
+        ok: true,
       });
     }
   });
@@ -1806,14 +1801,12 @@ describe("classifySteerCapture per-chunk receipts", () => {
       'The assistant said "Redirected the active turn with your correction." earlier';
     expect(classifySteerCapture(quoted)).toEqual({
       body: quoted,
-      ok: false,
-      reason: "unverifiable",
+      ok: true,
     });
     const depth = "Queue depth reported as Queued for the next turn. (2 queued) entries";
     expect(classifySteerCapture(depth)).toEqual({
       body: depth,
-      ok: false,
-      reason: "unverifiable",
+      ok: true,
     });
   });
 

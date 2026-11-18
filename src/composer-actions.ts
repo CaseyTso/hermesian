@@ -1,8 +1,5 @@
 import type { ComposerInlineDraft } from "./composer-reference-tokens";
-import {
-  isSteerableDraft,
-  type SteerableDraftFacts,
-} from "./conversation-runtime";
+import type { SteerableDraftFacts } from "./conversation-runtime";
 
 /**
  * Pure composer action routing for Active Turn Steer / Stop / Stop-and-send.
@@ -90,7 +87,7 @@ export function composerSubmitIntent(input: {
     return { kind: "noop" };
   }
   if (input.stopAvailable) {
-    if (input.steerAvailable || isSteerableDraft(input.facts)) {
+    if (input.steerAvailable) {
       return { kind: "steer" };
     }
     if (composerHasRichSteerBlockers(input.facts) && input.facts.hasText === true) {
