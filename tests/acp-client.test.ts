@@ -13,6 +13,7 @@ import {
   classifySteerCapture,
   extractToolCallText,
   HermesAcpClient,
+  STEER_OUTCOME_WINDOW_MS,
   STEER_SUCCESS_MARKER,
 } from "../src/acp-client";
 
@@ -1049,7 +1050,7 @@ describe("HermesAcpClient steer", () => {
     expect(capture.deltas).toEqual(["something unrelated"]);
   });
 
-  it("treats request timeout as applied without unverifiable", async () => {
+  it("treats window expiration without receipt as queued (gateway flavour)", async () => {
     vi.useFakeTimers();
     try {
       const client = steerClient();
@@ -1059,8 +1060,76 @@ describe("HermesAcpClient steer", () => {
       Reflect.set(client, "resumedSessionId", "live-session");
 
       const steer = client.steerActiveTurn("correction");
-      await vi.advanceTimersByTimeAsync(30_001);
-      await expect(steer).resolves.toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(STEER_OUTCOME_WINDOW_MS);
+      await expect(steer).resolves.toEqual({ ok: false, reason: "queued" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not change queued result or throw unhandledRejection on late reject after window", async () => {
+    vi.useFakeTimers();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => {
+      unhandled.push(error);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const client = steerClient();
+      let rejectRequest!: (error: unknown) => void;
+      const pendingRequest = new Promise<{ stopReason: string }>((_, reject) => {
+        rejectRequest = reject;
+      });
+      steerTransport(client, vi.fn(() => pendingRequest));
+      Reflect.set(client, "busy", true);
+      Reflect.set(client, "mainTurnActive", true);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const steer = client.steerActiveTurn("correction");
+      // Window expires (2.5s) without settle:
+      await vi.advanceTimersByTimeAsync(STEER_OUTCOME_WINDOW_MS);
+      const result = await steer;
+      expect(result).toEqual({ ok: false, reason: "queued" });
+
+      // Late reject happens well after the 2.5s window returned:
+      rejectRequest(new Error("late transport network failure"));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Result already returned does not change and no unhandled rejection occurred:
+      expect(unhandled).toEqual([]);
+      // The single-flight slot was released by the late reject:
+      expect(Reflect.get(client, "pendingSteer")).toBeUndefined();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases single-flight slot on late resolve after window without altering queued result", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = steerClient();
+      let resolveRequest!: (value: { stopReason: string }) => void;
+      const pendingRequest = new Promise<{ stopReason: string }>((resolve) => {
+        resolveRequest = resolve;
+      });
+      steerTransport(client, vi.fn(() => pendingRequest));
+      Reflect.set(client, "busy", true);
+      Reflect.set(client, "mainTurnActive", true);
+      Reflect.set(client, "resumedSessionId", "live-session");
+
+      const steer = client.steerActiveTurn("correction");
+      await vi.advanceTimersByTimeAsync(STEER_OUTCOME_WINDOW_MS);
+      const result = await steer;
+      expect(result).toEqual({ ok: false, reason: "queued" });
+
+      // Late resolve:
+      resolveRequest({ stopReason: "end_turn" });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(Reflect.get(client, "pendingSteer")).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }
@@ -1540,7 +1609,7 @@ describe("HermesAcpClient steer", () => {
     expect(capture.deltas).toEqual(["The model then finished its answer."]);
   });
 
-  it("keeps the single-flight slot reserved after timeout until the request settles", async () => {
+  it("keeps the single-flight slot reserved after window expiration until the request settles", async () => {
     vi.useFakeTimers();
     try {
       const client = steerClient();
@@ -1555,8 +1624,8 @@ describe("HermesAcpClient steer", () => {
       Reflect.set(client, "resumedSessionId", "live-session");
 
       const first = client.steerActiveTurn("first correction");
-      await vi.advanceTimersByTimeAsync(30_001);
-      await expect(first).resolves.toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(STEER_OUTCOME_WINDOW_MS);
+      await expect(first).resolves.toEqual({ ok: false, reason: "queued" });
 
       // The underlying request is still unresolved: a second steer must not
       // reach the wire even though the first call already returned.
@@ -1597,8 +1666,8 @@ describe("HermesAcpClient steer", () => {
       pushSteerUpdate(client, steerChunk("prose during the steer window"));
       // Emitted immediately live:
       expect(capture.deltas).toEqual(["prose during the steer window"]);
-      await vi.advanceTimersByTimeAsync(30_001);
-      await expect(steer).resolves.toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(STEER_OUTCOME_WINDOW_MS);
+      await expect(steer).resolves.toEqual({ ok: false, reason: "queued" });
       expect(capture.deltas).toEqual(["prose during the steer window"]);
 
       // The unresolved request finally settles: the slot releases and the
@@ -1611,7 +1680,6 @@ describe("HermesAcpClient steer", () => {
       // The slot recovered: a new steer can dispatch.
       const next = client.steerActiveTurn("again");
       expect(request).toHaveBeenCalledTimes(2);
-      await vi.advanceTimersByTimeAsync(30_001);
       await expect(next).resolves.toEqual({ ok: true });
     } finally {
       vi.useRealTimers();
@@ -1629,8 +1697,8 @@ describe("HermesAcpClient steer", () => {
       Reflect.set(client, "resumedSessionId", "live-session");
 
       const steer = client.steerActiveTurn("correction");
-      await vi.advanceTimersByTimeAsync(30_001);
-      await expect(steer).resolves.toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(STEER_OUTCOME_WINDOW_MS);
+      await expect(steer).resolves.toEqual({ ok: false, reason: "queued" });
       expect(request).toHaveBeenCalledTimes(1);
 
       // sendPrompt's finally performs this exact cleanup at main-turn terminal.
@@ -1639,8 +1707,8 @@ describe("HermesAcpClient steer", () => {
 
       const next = client.steerActiveTurn("correction again");
       expect(request).toHaveBeenCalledTimes(2);
-      await vi.advanceTimersByTimeAsync(30_001);
-      await expect(next).resolves.toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(STEER_OUTCOME_WINDOW_MS);
+      await expect(next).resolves.toEqual({ ok: false, reason: "queued" });
     } finally {
       vi.useRealTimers();
     }
@@ -1657,8 +1725,8 @@ describe("HermesAcpClient steer", () => {
       Reflect.set(client, "resumedSessionId", "live-session");
 
       const steer = client.steerActiveTurn("correction");
-      await vi.advanceTimersByTimeAsync(30_001);
-      await expect(steer).resolves.toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(STEER_OUTCOME_WINDOW_MS);
+      await expect(steer).resolves.toEqual({ ok: false, reason: "queued" });
       expect(request).toHaveBeenCalledTimes(1);
 
       await client.disconnect();
@@ -1671,8 +1739,8 @@ describe("HermesAcpClient steer", () => {
 
       const next = client.steerActiveTurn("correction after reconnect");
       expect(request).toHaveBeenCalledTimes(2);
-      await vi.advanceTimersByTimeAsync(30_001);
-      await expect(next).resolves.toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(STEER_OUTCOME_WINDOW_MS);
+      await expect(next).resolves.toEqual({ ok: false, reason: "queued" });
     } finally {
       vi.useRealTimers();
     }
@@ -1691,8 +1759,8 @@ describe("HermesAcpClient steer", () => {
 
       const steer = client.steerActiveTurn("correction");
       pushSteerUpdate(client, steerChunk("early prose "));
-      await vi.advanceTimersByTimeAsync(30_001);
-      await expect(steer).resolves.toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(STEER_OUTCOME_WINDOW_MS);
+      await expect(steer).resolves.toEqual({ ok: false, reason: "queued" });
       // Prose was already emitted live:
       expect(capture.deltas).toEqual(["early prose "]);
 

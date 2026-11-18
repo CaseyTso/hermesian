@@ -67,28 +67,50 @@ const STARTUP_TIMEOUT_MS = 30_000;
 const FINITE_OPERATION_TIMEOUT_MS = 30_000;
 
 /**
- * The only accepted success marker for a steer. The server emits this exact
- * text (as an agent_message_chunk) when it redirected the active turn.
+ * Outcome decision window for a steer request (2.5 seconds).
+ *
+ * Hermes ACP servers exhibit two divergent busy prompt semantics:
+ * 1. In-process ACP server: busy prompts are handled directly by the running
+ *    agent, which either redirects the active turn or queues it for a later
+ *    server-initiated turn. In both cases, the server emits a standalone
+ *    receipt sentence on the session stream, and the prompt JSON-RPC resolves
+ *    immediately.
+ * 2. Gateway ACP server (`GatewayACPAgent`): the gateway daemon unconditionally
+ *    queues busy prompts, emits no receipt sentences, and blocks the prompt
+ *    JSON-RPC until the queued turn completes its entire execution.
+ *
+ * A 2.5s outcome window cleanly separates the two:
+ * - If the RPC settles within 2.5s, explicit receipts govern (steer_failed or
+ *   queued), and resolution with no receipt means redirect succeeded (in-process).
+ * - If 2.5s elapses without settle and without receipt, the server is running
+ *   the gateway flavour where the prompt is queued. Silence means queued.
+ */
+export const STEER_OUTCOME_WINDOW_MS = 2500;
+
+/**
+ * The only accepted success marker for a steer. In the in-process server,
+ * this exact text is emitted (as an agent_message_chunk) when the active
+ * turn was redirected. In the gateway server, no marker is emitted.
  */
 export const STEER_SUCCESS_MARKER = "Redirected the active turn with your correction.";
 
 /**
- * Complete queue-receipt sentences, counted and count-less. The server emits
- * each receipt as one standalone session_update sentence:
+ * Complete queue-receipt sentences, counted and count-less. The in-process
+ * server emits each receipt as one standalone session_update sentence:
  * `Queued for the next turn. (N queued)`, the older
  * `No active turn — queued for the next turn. (N queued)`, or the count-less
  * `Queued for the next turn` / `No active turn — queued` forms named by the
- * task contract. Classification anchors on the whole trimmed text, so a
- * substring mention inside ordinary main-stream prose is never mistaken for
- * a receipt.
+ * task contract. In the gateway server, no receipt sentences are emitted.
+ * Classification anchors on the whole trimmed text, so a substring mention
+ * inside ordinary main-stream prose is never mistaken for a receipt.
  */
 const STEER_QUEUED_RECEIPT =
   /^(?:Queued for the next turn\. \(\d+ queued\)|No active turn — queued for the next turn\. \(\d+ queued\)|Queued for the next turn|No active turn — queued)$/;
 
 /**
  * Complete failure-receipt shape: `⚠️ Steer failed: <detail>` (the verified
- * server emission), or the same sentence merged behind the success sentence
- * in a single chunk. Anchored as a whole trimmed sentence with the leading
+ * in-process server emission), or the same sentence merged behind the success
+ * sentence in a single chunk. Anchored as a whole trimmed sentence with the leading
  * warning icon required, so explanatory prose that merely starts with
  * failure/warning wording ("Steer failed is the phrase …", "⚠️ is a warning
  * icon …") is preserved verbatim.
@@ -1233,11 +1255,28 @@ export class HermesAcpClient {
   }
 
   /**
-   * Steer the running active turn with a pure-text correction. Runs over a
-   * bounded direct JSON-RPC request, never touching the queue: if the server
-   * falls back to queueing, the queue marker text is classified as an
-   * explicit failure. Steer does not change busy state — the main turn is
-   * still running, so the sendPrompt busy guard stays intact.
+   * Steer the running active turn with a pure-text correction.
+   *
+   * Busy prompt behaviour depends on the Hermes ACP server flavour:
+   * - In-process ACP server: resolves quickly and emits a standalone receipt
+   *   sentence on the session stream. Explicit receipts are authoritative;
+   *   resolving without a receipt means the active turn was redirected.
+   * - Gateway ACP server (`GatewayACPAgent`): unconditionally queues busy prompts,
+   *   never emits receipt sentences, and blocks the prompt JSON-RPC until the
+   *   queued turn finishes.
+   *
+   * We race the prompt request against a 2.5s outcome window:
+   * 1. Settles within 2.5s (resolved): explicit receipts govern
+   *    (`steer_failed` / `queued`), while silence (no receipt) means applied
+   *    (in-process redirect success).
+   * 2. Settles within 2.5s (rejected): `steer_failed`.
+   * 3. Window timer expires (2.5s without settle or receipt): returns `queued`
+   *    immediately (gateway flavour). The background request continues; late
+   *    receipts only serve to filter out marker copy, and late settle/reject
+   *    releases the single-flight slot without altering the returned outcome.
+   *
+   * Steer does not change busy state — the main turn is still running, so the
+   * sendPrompt busy guard stays intact.
    */
   async steerActiveTurn(text: string): Promise<SteerResult> {
     if (this.pendingSteer || this.steerPending) {
@@ -1305,36 +1344,50 @@ export class HermesAcpClient {
       this.steerReceiptWindow = true;
       // The settle handler owns the single-flight slot: it releases
       // pendingSteer when the underlying request eventually settles
-      // (resolve or reject). The bounded withTimeout below only decides
-      // this call's return value — after a timeout the slot stays reserved
-      // until settle / main-turn terminal / disconnect releases it.
+      // (resolve or reject). It does not produce unhandled rejections.
       void request.then(
         () => this.onSteerRequestSettled(steer),
         () => this.onSteerRequestSettled(steer),
       );
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let outcome: "resolved" | { rejected: unknown } | "window";
       try {
-        await withTimeout(
-          request,
-          FINITE_OPERATION_TIMEOUT_MS,
-          "Hermes ACP steer",
+        const windowPromise = new Promise<"window">((resolve) => {
+          timer = setTimeout(() => resolve("window"), STEER_OUTCOME_WINDOW_MS);
+        });
+        const settlePromise = request.then(
+          () => "resolved" as const,
+          (error: unknown) => ({ rejected: error }),
         );
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("timed out")) {
-          // 超时 = applied
-          return { ok: true };
+        outcome = await Promise.race([settlePromise, windowPromise]);
+      } finally {
+        if (timer !== undefined) {
+          clearTimeout(timer);
         }
-        // RPC rejected / JSON-RPC error / transport error:
+      }
+
+      if (outcome === "resolved") {
+        if (steer.receipt === "steer_failed") {
+          return { ok: false, reason: "steer_failed" };
+        }
+        if (steer.receipt === "queued") {
+          return { ok: false, reason: "queued" };
+        }
+        // In-process flavour: resolve with no receipt = redirect succeeded
+        return { ok: true };
+      }
+
+      if (typeof outcome === "object" && "rejected" in outcome) {
         return { ok: false, reason: "steer_failed" };
       }
 
+      // 'window': 2.5s elapsed without settle or receipt.
+      // Gateway flavour: prompts while busy are unconditionally queued.
       if (steer.receipt === "steer_failed") {
         return { ok: false, reason: "steer_failed" };
       }
-      if (steer.receipt === "queued") {
-        return { ok: false, reason: "queued" };
-      }
-      // resolve 无回执 = applied
-      return { ok: true };
+      return { ok: false, reason: "queued" };
     } catch {
       // Synchronous dispatch failure: nothing went on the wire.
       this.pendingSteer = undefined;
