@@ -2259,7 +2259,7 @@ body,
   width: 18px;
 }
 
-.hermesian-steer-label {
+.hermesian-primary-action > .hermesian-steer-label {
   display: none;
 }
 
@@ -2346,6 +2346,60 @@ body,
   text-overflow: ellipsis;
 }
 
+.hermesian-steer-pending-row {
+  align-items: center;
+  box-sizing: border-box;
+  display: flex;
+  margin: 4px 8px;
+  max-width: calc(100% - 16px);
+  min-width: 0;
+}
+
+.hermesian-steer-pending-chip {
+  align-items: center;
+  background: var(--hermesian-accent-soft);
+  border: 1px solid color-mix(in srgb, var(--hermesian-accent) 25%, transparent);
+  border-radius: var(--hermesian-radius-pill);
+  box-sizing: border-box;
+  color: var(--text-normal);
+  display: inline-flex;
+  font-size: var(--font-ui-smaller);
+  gap: 5px;
+  line-height: 1.3;
+  max-height: 24px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 8px 2px 6px;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.hermesian-steer-pending-icon {
+  color: var(--hermesian-accent);
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.hermesian-steer-pending-icon svg {
+  height: 12px;
+  width: 12px;
+}
+
+.hermesian-steer-pending-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermesian-steer-pending-status {
+  color: var(--hermesian-accent);
+  flex: 0 0 auto;
+  font-size: calc(var(--font-ui-smaller) - 1px);
+  font-style: italic;
+  opacity: 0.85;
+}
+
 @container hermesian (max-width: 480px) {
   .hermesian-message {
     max-width: 94%;
@@ -2415,7 +2469,7 @@ body,
     width: 30px;
   }
 
-  .hermesian-steer-label {
+  .hermesian-primary-action > .hermesian-steer-label {
     display: none;
   }
 }

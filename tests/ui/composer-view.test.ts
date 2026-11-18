@@ -2,7 +2,13 @@
  * @vitest-environment happy-dom
  */
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  formatSteerPendingPreview,
+} from "../../src/composer-actions";
 
 import {
   applyComposerDraft,
@@ -140,7 +146,7 @@ describe("createComposerView", () => {
     expect(elements.composerEl.contentEditable).toBe("false");
   });
 
-  it("renders the steer button with an icon and visible Steer text label while preserving aria-label", () => {
+  it("renders the steer button with an icon and accessible Steer text label, hidden by high-specificity CSS", () => {
     const { elements } = setup();
     expect(elements.steerButtonEl.getAttribute("aria-label")).toBe("Steer active turn");
     expect(elements.steerButtonEl.getAttribute("title")).toBe("Steer active turn");
@@ -149,6 +155,37 @@ describe("createComposerView", () => {
     expect(label?.textContent).toBe("Steer");
     expect(elements.steerLabelEl.textContent).toBe("Steer");
     expect(elements.steerButtonEl.querySelector(".hermesian-steer-icon")).not.toBeNull();
+
+    // Verify specificity fix: .hermesian-primary-action > .hermesian-steer-label (0,2,0)
+    // overrides .hermesian-primary-action > span (0,1,1) with display: none.
+    const stylesCss = readFileSync(resolve(__dirname, "../../styles.css"), "utf8");
+    expect(stylesCss).toMatch(/\.hermesian-primary-action\s*>\s*\.hermesian-steer-label\s*\{[^}]*display:\s*none;/);
+  });
+
+  it("renders the in-flight steering chip in contexts directly after current-file row, initially hidden", () => {
+    const { elements } = setup();
+    expect(elements.steerPendingRowEl).toBeDefined();
+    expect(elements.steerPendingRowEl.classList.contains("hermesian-steer-pending-row")).toBe(true);
+    expect(elements.steerPendingRowEl.style.display).toBe("none");
+
+    expect(elements.steerPendingChipEl).toBeDefined();
+    expect(elements.steerPendingChipEl.classList.contains("hermesian-steer-pending-chip")).toBe(true);
+    expect(elements.steerPendingChipEl.parentElement).toBe(elements.steerPendingRowEl);
+
+    expect(elements.steerPendingIconEl.classList.contains("hermesian-steer-pending-icon")).toBe(true);
+    expect(elements.steerPendingTextEl.classList.contains("hermesian-steer-pending-text")).toBe(true);
+    expect(elements.steerPendingStatusEl.classList.contains("hermesian-steer-pending-status")).toBe(true);
+    expect(elements.steerPendingStatusEl.textContent).toBe("steering…");
+
+    // Located in composer-contexts directly after currentFileRow
+    expect(elements.steerPendingRowEl.parentElement?.classList.contains("hermesian-composer-contexts")).toBe(true);
+    expect(elements.steerPendingRowEl.previousElementSibling?.classList.contains("hermesian-current-file-row")).toBe(true);
+  });
+
+  it("formatSteerPendingPreview truncates text strictly at 40 chars with ellipsis", () => {
+    expect(formatSteerPendingPreview("Short steer")).toBe("Short steer");
+    expect(formatSteerPendingPreview("a".repeat(40))).toBe("a".repeat(40));
+    expect(formatSteerPendingPreview("a".repeat(41))).toBe(`${"a".repeat(40)}…`);
   });
 
   it("renders the steer mode indicator with icon and text, initially hidden", () => {

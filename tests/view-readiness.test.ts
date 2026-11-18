@@ -18,6 +18,7 @@ import { ConversationController } from "../src/conversation-controller";
 import { createConversationWorkspace, addConversationTab, updateConversationTab } from "../src/conversation-tabs";
 import { PendingSendStore } from "../src/pending-send";
 import { MessageRenderer, TurnManager } from "../src/ui/message-renderer";
+import type { SteerResult } from "../src/types";
 
 const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 function deferred<T>() {
@@ -107,8 +108,11 @@ function viewHarness(options: { readLocalHistory?: () => Promise<any[]> } = {}) 
     "composerEl", "composerStatusEl", "composerHintEl", "filePickerMenuEl",
     "statusEl", "steerModeEl", "slashTokenEl", "slashTokenIconEl",
     "slashTokenLabelEl", "selectionBarEl", "imageAttachmentBarEl",
+    "steerPendingRowEl", "steerPendingChipEl", "steerPendingIconEl",
+    "steerPendingTextEl", "steerPendingStatusEl",
   ]) view[name] = document.createElement("div");
   view.steerModeEl.hide();
+  view.steerPendingRowEl.hide();
   for (const name of ["sendButtonEl", "stopButtonEl", "steerButtonEl", "dictationButtonEl", "filePickerButtonEl", "historyButtonEl", "reasoningButtonEl"]) view[name] = document.createElement("button");
   view.showConversationMessages = vi.fn();
   view.applyComposerCanonicalDraft = vi.fn((text: string) => { view.composerDraft = { text, token: null, references: [] }; });
@@ -408,7 +412,45 @@ describe("steer record view integration (F1, F5, F6, G6)", () => {
 });
 
 describe("steer outcome handling in view (standard E)", () => {
-  it("applied: clears draft and records steer without queued marker or Notice", async () => {
+  it("in-flight: immediately clears draft text, shows steering chip with truncated preview, and keeps composer editable", async () => {
+    const h = viewHarness({ readLocalHistory: async () => [] });
+    const activeTabId = h.view.conversationWorkspace.activeTabId;
+    const messagesEl = document.createElement("div");
+    const renderer = new MessageRenderer(messagesEl);
+    const turnManager = new TurnManager(renderer);
+    h.view.messageRenderer = renderer;
+    h.view.turnManager = turnManager;
+    turnManager.ensureActivity(activeTabId);
+
+    const pendingSteer = deferred<SteerResult>();
+    h.client.steerActiveTurn.mockImplementationOnce(() => pendingSteer.promise);
+
+    h.view.composerDraft = {
+      text: "A long guidance that will be truncated because it exceeds the forty character preview ceiling",
+      token: null,
+      references: [],
+    };
+    h.view.controlAvailability = () => ({ steer: true, send: true, composer: true } as any);
+
+    const steerPromise = (h.view as any).steerActiveTurnFromComposer();
+
+    // In-flight optimistic phase
+    expect(h.view.composerDraft.text).toBe("");
+    expect(h.view.steerPendingRowEl.style.display).not.toBe("none");
+    expect(h.view.steerPendingTextEl.textContent).toBe(
+      "A long guidance that will be truncated b…",
+    );
+    expect(h.view.steerPendingTextEl.textContent.length).toBe(41);
+    expect(h.view.composerEl.contentEditable).not.toBe("false");
+
+    // Complete call
+    pendingSteer.resolve({ ok: true });
+    await steerPromise;
+
+    expect(h.view.steerPendingRowEl.style.display).toBe("none");
+  });
+
+  it("applied: removes chip, leaves draft cleared, and records steer without queued marker or Notice", async () => {
     const h = viewHarness({ readLocalHistory: async () => [] });
     const activeTabId = h.view.conversationWorkspace.activeTabId;
     const messagesEl = document.createElement("div");
@@ -428,6 +470,7 @@ describe("steer outcome handling in view (standard E)", () => {
     await (h.view as any).steerActiveTurnFromComposer();
 
     expect(h.view.composerDraft.text).toBe("");
+    expect(h.view.steerPendingRowEl.style.display).toBe("none");
     expect(h.view.composerHint).toBeUndefined();
     expect(NoticeMock).not.toHaveBeenCalled();
 
@@ -437,7 +480,7 @@ describe("steer outcome handling in view (standard E)", () => {
     expect(record!.classList.contains("is-queued")).toBe(false);
   });
 
-  it("queued: clears draft, records queued steer, sets gentle hint, and avoids Notice", async () => {
+  it("queued: removes chip, leaves draft cleared, records queued steer, sets gentle hint, and avoids Notice", async () => {
     const h = viewHarness({ readLocalHistory: async () => [] });
     const activeTabId = h.view.conversationWorkspace.activeTabId;
     const messagesEl = document.createElement("div");
@@ -457,6 +500,7 @@ describe("steer outcome handling in view (standard E)", () => {
     await (h.view as any).steerActiveTurnFromComposer();
 
     expect(h.view.composerDraft.text).toBe("");
+    expect(h.view.steerPendingRowEl.style.display).toBe("none");
     expect(h.view.composerHint).toBe("Steer queued — will take effect at next turn.");
     expect(/fail|error|could not|denied/i.test(h.view.composerHint!)).toBe(false);
     expect(NoticeMock).not.toHaveBeenCalled();
@@ -466,7 +510,7 @@ describe("steer outcome handling in view (standard E)", () => {
     expect(record).not.toBeNull();
   });
 
-  it("failed: retains draft, sets error hint, does not record, and triggers Notice", async () => {
+  it("failed (RPC rejection): removes chip, quietly restores draft, sets gentle hint, and avoids Notice", async () => {
     const h = viewHarness({ readLocalHistory: async () => [] });
     const activeTabId = h.view.conversationWorkspace.activeTabId;
     const messagesEl = document.createElement("div");
@@ -486,8 +530,39 @@ describe("steer outcome handling in view (standard E)", () => {
     await (h.view as any).steerActiveTurnFromComposer();
 
     expect(h.view.composerDraft.text).toBe("Failed guidance");
-    expect(h.view.composerHint).toBe("Steer failed. Draft kept.");
-    expect(NoticeMock).toHaveBeenCalledWith("Steer failed. Draft kept.");
+    expect(h.view.steerPendingRowEl.style.display).toBe("none");
+    expect(h.view.composerHint).toBe("Steer did not land — your text is back in the composer.");
+    expect(/fail|error|could not|denied/i.test(h.view.composerHint!)).toBe(false);
+    expect(NoticeMock).not.toHaveBeenCalled();
+
+    const container = h.view.messageRenderer.containerFor(activeTabId);
+    expect(container.querySelector(".hermesian-steer-record")).toBeNull();
+  });
+
+  it("failed (transport exception): removes chip, quietly restores draft, sets gentle hint, and avoids Notice", async () => {
+    const h = viewHarness({ readLocalHistory: async () => [] });
+    const activeTabId = h.view.conversationWorkspace.activeTabId;
+    const messagesEl = document.createElement("div");
+    const renderer = new MessageRenderer(messagesEl);
+    const turnManager = new TurnManager(renderer);
+    h.view.messageRenderer = renderer;
+    h.view.turnManager = turnManager;
+    turnManager.ensureActivity(activeTabId);
+
+    h.view.composerDraft = { text: "Transport crash guidance", token: null, references: [] };
+    h.view.controlAvailability = () => ({ steer: true, send: true, composer: true } as any);
+    h.client.steerActiveTurn.mockRejectedValueOnce(new Error("socket terminated abruptly"));
+
+    const NoticeMock = vi.mocked((await import("obsidian")).Notice);
+    NoticeMock.mockClear();
+
+    await (h.view as any).steerActiveTurnFromComposer();
+
+    expect(h.view.composerDraft.text).toBe("Transport crash guidance");
+    expect(h.view.steerPendingRowEl.style.display).toBe("none");
+    expect(h.view.composerHint).toBe("Steer did not land — your text is back in the composer.");
+    expect(/fail|error|could not|denied/i.test(h.view.composerHint!)).toBe(false);
+    expect(NoticeMock).not.toHaveBeenCalled();
 
     const container = h.view.messageRenderer.containerFor(activeTabId);
     expect(container.querySelector(".hermesian-steer-record")).toBeNull();

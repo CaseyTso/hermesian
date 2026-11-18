@@ -49,6 +49,11 @@ export interface ComposerElements {
   steerButtonEl: HTMLButtonElement;
   steerLabelEl: HTMLElement;
   steerModeEl: HTMLElement;
+  steerPendingChipEl: HTMLElement;
+  steerPendingIconEl: HTMLElement;
+  steerPendingRowEl: HTMLElement;
+  steerPendingStatusEl: HTMLElement;
+  steerPendingTextEl: HTMLElement;
   stopButtonEl: HTMLButtonElement;
 }
 
@@ -146,6 +151,25 @@ export function createComposerView(
   currentFileIcon.empty();
   const currentFileLabelEl = currentFileBarEl.createSpan({
     cls: "hermesian-current-file-label",
+  });
+
+  const steerPendingRowEl = composerContexts.createDiv({
+    cls: "hermesian-steer-pending-row",
+  });
+  steerPendingRowEl.hide();
+  const steerPendingChipEl = steerPendingRowEl.createDiv({
+    cls: "hermesian-steer-pending-chip",
+  });
+  const steerPendingIconEl = steerPendingChipEl.createSpan({
+    cls: "hermesian-steer-pending-icon",
+  });
+  steerPendingIconEl.empty();
+  const steerPendingTextEl = steerPendingChipEl.createSpan({
+    cls: "hermesian-steer-pending-text",
+  });
+  const steerPendingStatusEl = steerPendingChipEl.createSpan({
+    cls: "hermesian-steer-pending-status",
+    text: "steering…",
   });
 
   // Hidden native inputs: the host wires `change` and reads File.path.
@@ -517,6 +541,11 @@ export function createComposerView(
     steerButtonEl,
     steerLabelEl,
     steerModeEl,
+    steerPendingChipEl,
+    steerPendingIconEl,
+    steerPendingRowEl,
+    steerPendingStatusEl,
+    steerPendingTextEl,
     stopButtonEl,
   };
 }

@@ -189,3 +189,13 @@ export function preferredMediaRecorderMimeType(
 export function dictationAudioTooShort(byteLength: number): boolean {
   return byteLength < MIN_DICTATION_AUDIO_BYTES;
 }
+
+/** Formats preview text for the in-flight steering chip (capped at 40 chars with ellipsis). */
+export function formatSteerPendingPreview(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= 40) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 40)}…`;
+}
+

@@ -148,6 +148,7 @@ import {
   composerSubmitIntent,
   dictationAudioTooShort,
   focusOwnsEscape,
+  formatSteerPendingPreview,
   preferredMediaRecorderMimeType,
   shouldStopOnEscape,
   steerableDraftFactsFromComposer,
@@ -200,19 +201,6 @@ const DISABLED_CONVERSATION_CONTROLS: ConversationControlAvailability =
     stop: false,
     tabNavigation: false,
   });
-
-function steerFailureMessage(reason: string): string {
-  switch (reason) {
-    case "steer_failed":
-      return "Steer failed. Draft kept.";
-    case "no_active_turn":
-      return "No active turn to steer.";
-    case "steer_in_flight":
-      return "A steer is already in progress.";
-    default:
-      return `Steer failed: ${reason}`;
-  }
-}
 
 function dictationFailureMessage(result: Extract<DictationResult, { ok: false }>): string {
   switch (result.reason) {
@@ -393,6 +381,11 @@ export class HermesianSidebarView extends ItemView {
   private composerHint: string | undefined;
   /** True while a pure-text steer request is outstanding (disables Steer). */
   private steerInFlight = false;
+  steerPendingRowEl: HTMLElement | undefined;
+  steerPendingChipEl: HTMLElement | undefined;
+  steerPendingIconEl: HTMLElement | undefined;
+  steerPendingTextEl: HTMLElement | undefined;
+  steerPendingStatusEl: HTMLElement | undefined;
   private dictationPhase: DictationUiPhase = "idle";
   private mediaRecorder: MediaRecorder | undefined;
   private mediaStream: MediaStream | undefined;
@@ -478,6 +471,7 @@ export class HermesianSidebarView extends ItemView {
     this.contextGaugePopover = null;
     this.startup?.close();
     this.startup = undefined;
+    this.hideSteerPendingChip();
     this.teardownDictationRecording();
     this.captureActiveConversationRuntime();
     const controller = this.controller;
@@ -827,6 +821,11 @@ export class HermesianSidebarView extends ItemView {
     this.sendButtonEl = composerElements.sendButtonEl;
     this.steerButtonEl = composerElements.steerButtonEl;
     this.steerModeEl = composerElements.steerModeEl;
+    this.steerPendingRowEl = composerElements.steerPendingRowEl;
+    this.steerPendingChipEl = composerElements.steerPendingChipEl;
+    this.steerPendingIconEl = composerElements.steerPendingIconEl;
+    this.steerPendingTextEl = composerElements.steerPendingTextEl;
+    this.steerPendingStatusEl = composerElements.steerPendingStatusEl;
     this.stopButtonEl = composerElements.stopButtonEl;
     this.dictationButtonEl = composerElements.dictationButtonEl;
     this.filePickerButtonEl = composerElements.filePickerButtonEl;
@@ -849,6 +848,9 @@ export class HermesianSidebarView extends ItemView {
     setIcon(composerElements.steerButtonEl.querySelector("span")!, "corner-down-left");
     setIcon(composerElements.stopButtonEl.querySelector("span")!, "square");
     setIcon(composerElements.steerModeEl.querySelector(".hermesian-steer-mode-icon")!, "corner-down-left");
+    if (composerElements.steerPendingIconEl) {
+      setIcon(composerElements.steerPendingIconEl, "corner-down-left");
+    }
     this.setComposerSlashToken(null);
     this.renderComposerInlineDraft();
 
@@ -2924,64 +2926,112 @@ export class HermesianSidebarView extends ItemView {
     }
   }
 
+  private showSteerPendingChip(text: string): void {
+    if (this.steerPendingTextEl) {
+      this.steerPendingTextEl.textContent = formatSteerPendingPreview(text);
+    }
+    if (this.steerPendingRowEl) {
+      this.steerPendingRowEl.show();
+    }
+  }
+
+  private hideSteerPendingChip(): void {
+    if (this.steerPendingRowEl) {
+      this.steerPendingRowEl.hide();
+    }
+    if (this.steerPendingTextEl) {
+      this.steerPendingTextEl.textContent = "";
+    }
+  }
+
   private async steerActiveTurnFromComposer(): Promise<void> {
     const activeTab = this.activeConversationTab();
     if (!activeTab || this.steerInFlight || !this.controlAvailability().steer) {
+      this.hideSteerPendingChip();
       return;
     }
     const text = this.composerDraft.text.trim();
     if (!text) {
+      this.hideSteerPendingChip();
       return;
     }
     const client = this.plugin.getClient(activeTab.id);
+    if (!client) {
+      this.hideSteerPendingChip();
+      return;
+    }
+
+    const frozen = {
+      token: this.composerDraft.token,
+      text: this.composerDraft.text,
+      references: [...this.composerDraft.references],
+    };
+
+    // 1. Clear draft text synchronously (retaining token/references).
+    this.composerDraft = {
+      token: this.composerDraft.token,
+      text: "",
+      references: this.composerDraft.references,
+    };
+    this.renderComposerInlineDraft();
+    this.captureActiveConversationRuntime();
+
+    // 2. Show steering chip & enter in-flight state.
     this.steerInFlight = true;
     this.composerHint = undefined;
+    this.showSteerPendingChip(text);
     this.updateControls(false);
+
     let result: SteerResult;
     try {
       result = await client.steerActiveTurn(text);
-    } catch (error) {
+    } catch {
       this.steerInFlight = false;
-      this.composerHint = this.messageFor(error);
+      this.hideSteerPendingChip();
+      this.composerDraft = {
+        token: frozen.token,
+        text: frozen.text,
+        references: [...frozen.references],
+      };
+      this.renderComposerInlineDraft();
+      this.captureActiveConversationRuntime();
+      this.composerHint = "Steer did not land — your text is back in the composer.";
       this.updateControls(false);
-      new Notice(`Hermesian steer failed: ${this.messageFor(error)}`);
+      this.composerEl.focus();
       return;
     }
+
     this.steerInFlight = false;
+    this.hideSteerPendingChip();
+
     const steerDisposition = shouldRecordSteer(result);
     if (steerDisposition.record) {
       this.appendSteerRecord(activeTab.id, text, steerDisposition.queued);
     }
     if (result.ok) {
-      // Clear pure-text draft after an applied steer (receipt-authoritative).
-      this.composerDraft = {
-        token: this.composerDraft.token,
-        text: "",
-        references: this.composerDraft.references,
-      };
-      this.renderComposerInlineDraft();
-      this.captureActiveConversationRuntime();
       this.composerHint = undefined;
       this.updateControls(false);
       this.composerEl.focus();
       return;
     }
     if (result.reason === "queued") {
-      this.composerDraft = {
-        token: this.composerDraft.token,
-        text: "",
-        references: this.composerDraft.references,
-      };
-      this.renderComposerInlineDraft();
-      this.captureActiveConversationRuntime();
       this.composerHint = "Steer queued — will take effect at next turn.";
       this.updateControls(false);
       this.composerEl.focus();
       return;
     }
-    this.composerHint = steerFailureMessage(result.reason);
+
+    // failed: silent draft restore, gentle hint, no Notice.
+    this.composerDraft = {
+      token: frozen.token,
+      text: frozen.text,
+      references: [...frozen.references],
+    };
+    this.renderComposerInlineDraft();
+    this.captureActiveConversationRuntime();
+    this.composerHint = "Steer did not land — your text is back in the composer.";
     this.updateControls(false);
-    new Notice(this.composerHint);
+    this.composerEl.focus();
   }
 
   private async handleComposerStop(): Promise<void> {
