@@ -7,6 +7,7 @@ import {
   type InlineReference,
   type ReferenceTokenKind,
 } from "./composer-reference-tokens";
+import type { ComposerSlashToken } from "./slash-menu";
 
 /**
  * Contenteditable adapter layer for the composer.
@@ -21,6 +22,9 @@ import {
  */
 
 export const INLINE_REF_CAPSULE_CLASS = "hermesian-inline-ref";
+export const INLINE_SLASH_TOKEN_CLASS = "hermesian-slash-token";
+export const INLINE_SLASH_TOKEN_KIND = "data-slash-kind";
+export const INLINE_SLASH_TOKEN_NAME = "data-slash-name";
 const CAPSULE_DATA = "data-ref-value";
 const CAPSULE_KIND = "data-ref-kind";
 
@@ -28,7 +32,9 @@ export interface InlineEditorRenderOptions {
   /** Called when a capsule's remove button is clicked. */
   onRemoveReference?(index: number): void;
   /** Optional icon renderer (host injects Obsidian's setIcon). */
-  renderIcon?(iconEl: HTMLElement, kind: ReferenceTokenKind): void;
+  renderIcon?(iconEl: HTMLElement, kind: ReferenceTokenKind | "skill" | "command"): void;
+  /** Optional slash icon renderer. */
+  renderSlashIcon?(iconEl: HTMLElement, token: ComposerSlashToken): void;
 }
 
 /** Normalize clipboard/IME newlines to \n (single canonical form). */
@@ -42,6 +48,9 @@ function nodeLength(node: Node): number {
     return (node as Text).data.length;
   }
   if (node instanceof HTMLElement) {
+    if (node.classList.contains(INLINE_SLASH_TOKEN_CLASS)) {
+      return 0;
+    }
     if (node.classList.contains(INLINE_REF_CAPSULE_CLASS)) {
       return (node.getAttribute(CAPSULE_DATA) ?? "").length;
     }
@@ -95,10 +104,11 @@ function offsetInNode(node: Node, offset: number): number {
     return Math.min(offset, (node as Text).data.length);
   }
   if (node instanceof HTMLElement) {
-    if (node.classList.contains(INLINE_REF_CAPSULE_CLASS)) {
-      return 0;
-    }
-    if (node.tagName === "BR") {
+    if (
+      node.classList.contains(INLINE_SLASH_TOKEN_CLASS) ||
+      node.classList.contains(INLINE_REF_CAPSULE_CLASS) ||
+      node.tagName === "BR"
+    ) {
       return 0;
     }
     let cursor = 0;
@@ -164,7 +174,8 @@ export function utf16OffsetToDom(
 /** Read the canonical draft back from the DOM (independent of the model). */
 export function readInlineDraftFromDom(
   editorEl: HTMLElement,
-): Pick<ComposerInlineDraft, "text" | "references"> {
+): ComposerInlineDraft {
+  let token: ComposerSlashToken | null = null;
   let text = "";
   const references: InlineReference[] = [];
   const walk = (node: Node): void => {
@@ -173,6 +184,14 @@ export function readInlineDraftFromDom(
       return;
     }
     if (node instanceof HTMLElement) {
+      if (node.classList.contains(INLINE_SLASH_TOKEN_CLASS)) {
+        const kind = node.getAttribute(INLINE_SLASH_TOKEN_KIND);
+        const name = node.getAttribute(INLINE_SLASH_TOKEN_NAME);
+        if ((kind === "skill" || kind === "command") && name) {
+          token = { kind, name };
+        }
+        return;
+      }
       if (node.classList.contains(INLINE_REF_CAPSULE_CLASS)) {
         const value = node.getAttribute(CAPSULE_DATA) ?? "";
         const kind = node.getAttribute(CAPSULE_KIND);
@@ -207,7 +226,7 @@ export function readInlineDraftFromDom(
   for (const child of Array.from(editorEl.childNodes)) {
     walk(child);
   }
-  return { text, references };
+  return { token, text, references };
 }
 
 /**
@@ -226,6 +245,37 @@ export function renderInlineDraft(
     editorEl.removeChild(editorEl.firstChild);
   }
   const doc = editorEl.ownerDocument;
+
+  if (draft.token) {
+    const isSkill = draft.token.kind === "skill";
+    const capsule = doc.createElement("span");
+    capsule.className = `${INLINE_SLASH_TOKEN_CLASS} ${isSkill ? "is-skill is-capsule" : "is-command"}`;
+    capsule.setAttribute("contenteditable", "false");
+    capsule.setAttribute(INLINE_SLASH_TOKEN_KIND, draft.token.kind);
+    capsule.setAttribute(INLINE_SLASH_TOKEN_NAME, draft.token.name);
+    capsule.setAttribute("role", "status");
+    capsule.setAttribute(
+      "aria-label",
+      isSkill ? `Skill /${draft.token.name}` : `Command /${draft.token.name}`,
+    );
+
+    const icon = doc.createElement("span");
+    icon.className = "hermesian-slash-token-icon";
+    if (options.renderSlashIcon) {
+      options.renderSlashIcon(icon, draft.token);
+    } else if (options.renderIcon) {
+      options.renderIcon(icon, isSkill ? "skill" : "command");
+    }
+    capsule.appendChild(icon);
+
+    const label = doc.createElement("span");
+    label.className = "hermesian-slash-token-label";
+    label.textContent = `/${draft.token.name}`;
+    capsule.appendChild(label);
+
+    editorEl.appendChild(capsule);
+  }
+
   const appendTextSegment = (segment: string): void => {
     const parts = segment.split("\n");
     parts.forEach((part, index) => {
@@ -328,6 +378,72 @@ export function getSelectionOffsets(
   return { start: Math.min(start, end), end: Math.max(start, end) };
 }
 
+/** Determine whether the collapsed caret is positioned immediately before the inline slash token capsule. */
+export function isCaretBeforeSlashToken(editorEl: HTMLElement): boolean {
+  const selection = editorEl.ownerDocument.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return false;
+  }
+  const range = selection.getRangeAt(0);
+  if (!range.collapsed) {
+    return false;
+  }
+  const firstChild = editorEl.firstChild;
+  if (
+    !firstChild ||
+    !(firstChild instanceof HTMLElement) ||
+    !firstChild.classList.contains(INLINE_SLASH_TOKEN_CLASS)
+  ) {
+    return false;
+  }
+  if (range.startContainer === editorEl && range.startOffset === 0) {
+    return true;
+  }
+  if (firstChild.contains(range.startContainer)) {
+    return true;
+  }
+  return false;
+}
+
+/** Determine whether the current selection intersects/covers the inline slash token capsule. */
+export function isSelectionCoveringSlashToken(
+  editorEl: HTMLElement,
+  draft: ComposerInlineDraft,
+): boolean {
+  if (!draft.token) {
+    return false;
+  }
+  const selection = editorEl.ownerDocument.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return false;
+  }
+  const range = selection.getRangeAt(0);
+  if (range.collapsed) {
+    return false;
+  }
+  const slashEl = editorEl.querySelector(`.${INLINE_SLASH_TOKEN_CLASS}`);
+  if (!slashEl) {
+    return false;
+  }
+  if (
+    !editorEl.contains(range.startContainer) ||
+    !editorEl.contains(range.endContainer)
+  ) {
+    return false;
+  }
+  if (typeof range.intersectsNode === "function") {
+    return range.intersectsNode(slashEl);
+  }
+  if (
+    range.startContainer === editorEl &&
+    range.startOffset === 0 &&
+    range.endOffset > 0
+  ) {
+    return true;
+  }
+  return slashEl.contains(range.startContainer);
+}
+
 export function getCaretOffset(editorEl: HTMLElement): number | null {
   const selection = getSelectionOffsets(editorEl);
   return selection ? selection.start : null;
@@ -377,6 +493,7 @@ export function applyInlinePaste(
   }
   const text = normalizeNewlines(payload.text ?? "");
   const selection = getSelectionOffsets(editorEl);
+  const coversSlash = isSelectionCoveringSlashToken(editorEl, draft);
   const position = expandSelectionOverCapsules(
     draft,
     selection?.start ?? 0,
@@ -392,6 +509,9 @@ export function applyInlinePaste(
       inserted: "",
     });
     updated = insertInlineReference(cleared, position.start, recognized);
+    if (coversSlash) {
+      updated = { ...updated, token: null };
+    }
     caret = position.start + recognized.value.length;
   } else {
     updated = applyInlineDraftEdit(draft, {
@@ -399,6 +519,9 @@ export function applyInlinePaste(
       end: position.end,
       inserted: text,
     });
+    if (coversSlash) {
+      updated = { ...updated, token: null };
+    }
     caret = position.start + text.length;
   }
   renderInlineDraft(editorEl, updated, options, caret);
@@ -454,25 +577,54 @@ export function handleInlineEditorKeydown(
     return { handled: false };
   }
 
+  // Snap caret after capsule if typing while positioned before the capsule
+  if (
+    draft.token !== null &&
+    isCaretBeforeSlashToken(editorEl) &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    event.key.length === 1
+  ) {
+    setCaretOffset(editorEl, 0);
+  }
+
   if (event.key === "Backspace" || event.key === "Delete") {
     const selection = getSelectionOffsets(editorEl);
-    if (selection && selection.start !== selection.end) {
+    const coversSlash = isSelectionCoveringSlashToken(editorEl, draft);
+    if ((selection && selection.start !== selection.end) || coversSlash) {
+      const selStart = selection ? selection.start : 0;
+      const selEnd = selection ? selection.end : 0;
       const expanded = expandSelectionOverCapsules(
         draft,
-        selection.start,
-        selection.end,
+        selStart,
+        selEnd,
       );
       const updated = applyInlineDraftEdit(draft, {
         start: expanded.start,
         end: expanded.end,
         inserted: "",
       });
-      renderInlineDraft(editorEl, updated, options, expanded.start);
-      return { handled: true, draft: updated };
+      const finalDraft: ComposerInlineDraft = {
+        ...updated,
+        token: coversSlash ? null : draft.token,
+      };
+      renderInlineDraft(editorEl, finalDraft, options, expanded.start);
+      return { handled: true, draft: finalDraft, slashClearRequested: coversSlash };
     }
     if (event.key === "Backspace") {
       if (draft.text.length === 0 && draft.references.length === 0) {
+        if (draft.token !== null) {
+          const updated: ComposerInlineDraft = { ...draft, token: null };
+          renderInlineDraft(editorEl, updated, options, 0);
+          return { handled: true, draft: updated, slashClearRequested: true };
+        }
         return { handled: true, slashClearRequested: true };
+      }
+      if (draft.token !== null && caret === 0 && !isCaretBeforeSlashToken(editorEl)) {
+        const updated: ComposerInlineDraft = { ...draft, token: null };
+        renderInlineDraft(editorEl, updated, options, 0);
+        return { handled: true, draft: updated, slashClearRequested: true };
       }
       const index = draft.references.findIndex(
         (reference) => reference.start + reference.value.length === caret,
@@ -484,6 +636,11 @@ export function handleInlineEditorKeydown(
         return { handled: true, draft: updated };
       }
       return { handled: false };
+    }
+    if (draft.token !== null && isCaretBeforeSlashToken(editorEl)) {
+      const updated: ComposerInlineDraft = { ...draft, token: null };
+      renderInlineDraft(editorEl, updated, options, 0);
+      return { handled: true, draft: updated, slashClearRequested: true };
     }
     const index = draft.references.findIndex(
       (reference) => reference.start === caret,
@@ -498,6 +655,15 @@ export function handleInlineEditorKeydown(
   }
 
   if (event.key === "ArrowLeft") {
+    if (draft.token !== null && caret === 0 && !isCaretBeforeSlashToken(editorEl)) {
+      const range = editorEl.ownerDocument.createRange();
+      range.setStart(editorEl, 0);
+      range.collapse(true);
+      const sel = editorEl.ownerDocument.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      return { handled: true };
+    }
     if (draft.references.some((reference) => reference.start === caret)) {
       let target = caret - 1;
       for (const reference of draft.references) {
@@ -513,6 +679,10 @@ export function handleInlineEditorKeydown(
   }
 
   if (event.key === "ArrowRight") {
+    if (draft.token !== null && isCaretBeforeSlashToken(editorEl)) {
+      setCaretOffset(editorEl, 0);
+      return { handled: true };
+    }
     if (
       draft.references.some(
         (reference) => reference.start + reference.value.length === caret,
@@ -567,14 +737,23 @@ export function inlineCutPayload(
   if (!selection) {
     return null;
   }
+  const coversSlash = isSelectionCoveringSlashToken(editorEl, draft);
   const touchesCapsule = draft.references.some((reference) => {
     const refEnd = reference.start + reference.value.length;
     return selection.start < refEnd && selection.end > reference.start;
   });
-  if (!touchesCapsule) {
+  if (!touchesCapsule && !coversSlash) {
     return null;
   }
-  return draft.text.slice(selection.start, selection.end);
+  const selectedText = draft.text.slice(selection.start, selection.end);
+  if (coversSlash && draft.token) {
+    const prefix =
+      draft.token.kind === "skill"
+        ? `/skill ${draft.token.name} `
+        : `/${draft.token.name} `;
+    return `${prefix}${selectedText}`;
+  }
+  return selectedText;
 }
 
 export interface InlineCutResult {
@@ -595,6 +774,7 @@ export function applyInlineCut(
     return { handled: false };
   }
   const selection = getSelectionOffsets(editorEl)!;
+  const coversSlash = isSelectionCoveringSlashToken(editorEl, draft);
   const expanded = expandSelectionOverCapsules(
     draft,
     selection.start,
@@ -605,8 +785,12 @@ export function applyInlineCut(
     end: expanded.end,
     inserted: "",
   });
-  renderInlineDraft(editorEl, updated, options, expanded.start);
-  return { handled: true, draft: updated, payload };
+  const finalDraft: ComposerInlineDraft = {
+    ...updated,
+    token: coversSlash ? null : draft.token,
+  };
+  renderInlineDraft(editorEl, finalDraft, options, expanded.start);
+  return { handled: true, draft: finalDraft, payload };
 }
 
 /**
@@ -615,10 +799,10 @@ export function applyInlineCut(
  */
 export function handleInlineEditorInput(
   editorEl: HTMLElement,
-  draft: ComposerInlineDraft,
+  _draft: ComposerInlineDraft,
 ): ComposerInlineDraft {
   const read = readInlineDraftFromDom(editorEl);
-  return { token: draft.token, text: read.text, references: read.references };
+  return { token: read.token, text: read.text, references: read.references };
 }
 
 /**
@@ -634,6 +818,7 @@ export function insertTextAtCaret(
 ): { draft: ComposerInlineDraft; caret: number } {
   const inserted = normalizeNewlines(text);
   const selection = getSelectionOffsets(editorEl);
+  const coversSlash = isSelectionCoveringSlashToken(editorEl, draft);
   const position = expandSelectionOverCapsules(
     draft,
     selection?.start ?? draft.text.length,
@@ -644,7 +829,11 @@ export function insertTextAtCaret(
     end: position.end,
     inserted,
   });
+  const finalDraft: ComposerInlineDraft = {
+    ...updated,
+    token: coversSlash ? null : draft.token,
+  };
   const caret = position.start + inserted.length;
-  renderInlineDraft(editorEl, updated, options, caret);
-  return { draft: updated, caret };
+  renderInlineDraft(editorEl, finalDraft, options, caret);
+  return { draft: finalDraft, caret };
 }

@@ -24,6 +24,18 @@ _Avoid_: Broken session, unrecoverable session
 The currently executing Hermes response within one Conversation Tab.
 _Avoid_: Working dialog, active chat
 
+**Atomic Capsule Deletion**:
+The rule that any inline composer capsule — Skill Capsule or File Attachment Capsule — is removed as a single unit: one Backspace with the caret at its right edge, or any deletion whose selection covers it. A capsule is never partially edited.
+_Avoid_: Character-wise capsule editing, partial capsule
+
+**Steer Eligibility**:
+The condition under which a draft qualifies as a Steer: the Conversation Tab has an Active Turn and the draft is non-empty plain text; rich attachments keep their own explicit rejection instead of silently becoming a Steer. It is decided client-side from those facts alone, never gated on backend phase reports.
+_Avoid_: Backend-gated steer, phase-conditional steer
+
+**Steer Receipt**:
+The explicit confirmation a steer request brings back from Hermes, classifying it as applied, queued for the next turn, or failed. It is the only authority for a Steer's outcome; a request accepted with no receipt at all counts as applied, so silence is never reported as a failure.
+_Avoid_: Steer marker, verbatim confirmation sentence, optimistic guess
+
 **Steer**:
 Plain-text correction or guidance applied to an Active Turn instead of becoming a later queued turn.
 _Avoid_: Queue, follow-up message, interrupt
@@ -31,6 +43,10 @@ _Avoid_: Queue, follow-up message, interrupt
 **Stop-and-send**:
 A message submitted while an Active Turn is being cancelled, held until cancellation completes and then started as a normal new turn.
 _Avoid_: Queue, retry send
+
+**Steer Send Button**:
+The composer's primary round button while an Active Turn runs and the draft qualifies as a Steer: pressing it submits the draft as a Steer. With an empty draft the same slot shows Stop instead, and Stop keeps its own adjacent button whenever an Active Turn runs, so stopping never depends on an empty draft.
+_Avoid_: Hidden stop, steer-only mode, repurposed send button
 
 **Steer Mode Indicator**:
 An Inset Floating Surface strip in the composer that appears while the draft qualifies as a Steer, telling the user the message will steer the Active Turn before it is sent. It disappears the moment the draft no longer qualifies. It is a status readout, not a choice surface: it does not offer queuing alternatives.
@@ -55,6 +71,10 @@ _Avoid_: Thinking display, reasoning visibility
 **Model Selection**:
 A Conversation Tab preference identifying both its provider and model; same model name across providers is not same selection.
 _Avoid_: Bare model name, global model, active model
+
+**Skill Capsule**:
+An inline atomic capsule inside the composer draft, inserted from the slash menu, that invokes the named skill with the next message. It lives in the draft as an indivisible unit: caret movement and selection treat it as one atom, and removing it removes the invocation; while it is present the skill is attached to the message.
+_Avoid_: Skill chip, slash tag, skill token, out-of-field token node
 
 **File Attachment Capsule**:
 An inline reference capsule in the composer that holds the absolute path of a file of any type or a folder, inserted by the file picker button instead of by paste. It is a path reference, not a promise that Hermesian will parse, read, or upload the referenced content.

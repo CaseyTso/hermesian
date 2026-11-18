@@ -13,6 +13,7 @@ import {
   handleInlineEditorInput,
   inlineCutPayload,
   insertTextAtCaret,
+  isCaretBeforeSlashToken,
   normalizeNewlines,
   readInlineDraftFromDom,
   renderInlineDraft,
@@ -170,6 +171,7 @@ describe("readInlineDraftFromDom", () => {
     renderInlineDraft(editorEl, original);
     const read = readInlineDraftFromDom(editorEl);
     expect(read).toEqual({
+      token: null,
       text: original.text,
       references: original.references,
     });
@@ -191,6 +193,7 @@ describe("readInlineDraftFromDom", () => {
     const typed = document.createTextNode("中间");
     editorEl.insertBefore(typed, editorEl.childNodes[1]);
     expect(readInlineDraftFromDom(editorEl)).toEqual({
+      token: null,
       text: `${URL_A}中间${URL_B}`,
       references: [
         { kind: "url", value: URL_A, start: 0 },
@@ -209,6 +212,7 @@ describe("readInlineDraftFromDom", () => {
     const { editorEl } = setup();
     editorEl.textContent = "https://example.com/a 普通文本";
     expect(readInlineDraftFromDom(editorEl)).toEqual({
+      token: null,
       text: "https://example.com/a 普通文本",
       references: [],
     });
@@ -222,6 +226,7 @@ describe("readInlineDraftFromDom", () => {
     });
     renderInlineDraft(editorEl, original);
     expect(readInlineDraftFromDom(editorEl)).toEqual({
+      token: null,
       text: original.text,
       references: original.references,
     });
@@ -583,6 +588,262 @@ describe("handleInlineEditorKeydown", () => {
     expect(result.sendRequested).toBe(true);
     expect(result.handled).toBe(true);
   });
+
+describe("inline slash capsule atomic behavior", () => {
+  function slashCapsuleNode(editorEl: HTMLElement): HTMLElement | null {
+    return editorEl.querySelector(".hermesian-slash-token");
+  }
+
+  it("renders a skill capsule as an atomic inline node at draft start", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "skill", name: "leader" },
+      text: "任务内容",
+    });
+    renderInlineDraft(editorEl, original);
+    const capsule = slashCapsuleNode(editorEl);
+    expect(capsule).not.toBeNull();
+    expect(capsule!.getAttribute("contenteditable")).toBe("false");
+    expect(capsule!.classList.contains("is-skill")).toBe(true);
+    expect(capsule!.classList.contains("is-capsule")).toBe(true);
+    expect(capsule!.getAttribute("aria-label")).toBe("Skill /leader");
+    expect(capsule!.querySelector(".hermesian-slash-token-label")!.textContent).toBe("/leader");
+    expect(editorEl.childNodes[0]).toBe(capsule);
+    expect(editorEl.childNodes[1]!.textContent).toBe("任务内容");
+  });
+
+  it("renders a command token as an atomic inline node at draft start (F)", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "command", name: "compress" },
+      text: "上下文",
+    });
+    renderInlineDraft(editorEl, original);
+    const capsule = slashCapsuleNode(editorEl);
+    expect(capsule).not.toBeNull();
+    expect(capsule!.getAttribute("contenteditable")).toBe("false");
+    expect(capsule!.classList.contains("is-command")).toBe(true);
+    expect(capsule!.classList.contains("is-skill")).toBe(false);
+    expect(capsule!.getAttribute("aria-label")).toBe("Command /compress");
+    expect(capsule!.querySelector(".hermesian-slash-token-label")!.textContent).toBe("/compress");
+  });
+
+  it("reads back draft with inline slash token identically", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "skill", name: "leader" },
+      text: "执行任务",
+    });
+    renderInlineDraft(editorEl, original);
+    expect(readInlineDraftFromDom(editorEl)).toEqual({
+      token: { kind: "skill", name: "leader" },
+      text: "执行任务",
+      references: [],
+    });
+  });
+
+  it("B: empty draft + capsule: Backspace removes capsule and clears token", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "skill", name: "leader" },
+      text: "",
+    });
+    renderInlineDraft(editorEl, original);
+    setCaretOffset(editorEl, 0);
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "Backspace"),
+      original,
+    );
+    expect(result.handled).toBe(true);
+    expect(result.draft).toEqual(draft({ token: null, text: "" }));
+    expect(result.slashClearRequested).toBe(true);
+    expect(slashCapsuleNode(editorEl)).toBeNull();
+  });
+
+  it("B: empty draft + command capsule: Backspace removes capsule and clears token", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "command", name: "compress" },
+      text: "",
+    });
+    renderInlineDraft(editorEl, original);
+    setCaretOffset(editorEl, 0);
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "Backspace"),
+      original,
+    );
+    expect(result.handled).toBe(true);
+    expect(result.draft).toEqual(draft({ token: null, text: "" }));
+    expect(result.slashClearRequested).toBe(true);
+    expect(slashCapsuleNode(editorEl)).toBeNull();
+  });
+
+  it("C: capsule + text: Backspace at right edge of capsule removes capsule and preserves text", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "skill", name: "leader" },
+      text: "保留这段文字",
+    });
+    renderInlineDraft(editorEl, original);
+    setCaretOffset(editorEl, 0); // right edge of capsule
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "Backspace"),
+      original,
+    );
+    expect(result.handled).toBe(true);
+    expect(result.draft).toEqual(draft({ token: null, text: "保留这段文字" }));
+    expect(result.slashClearRequested).toBe(true);
+    expect(slashCapsuleNode(editorEl)).toBeNull();
+    expect(editorEl.textContent).toBe("保留这段文字");
+  });
+
+  it("D: capsule + text: Cmd+A Select All + Backspace removes both capsule and text", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "skill", name: "leader" },
+      text: "全选删除",
+    });
+    renderInlineDraft(editorEl, original);
+    const range = editorEl.ownerDocument.createRange();
+    range.setStart(editorEl, 0);
+    range.setEnd(editorEl, editorEl.childNodes.length);
+    const sel = editorEl.ownerDocument.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "Backspace"),
+      original,
+    );
+    expect(result.handled).toBe(true);
+    expect(result.draft).toEqual(draft({ token: null, text: "" }));
+    expect(result.slashClearRequested).toBe(true);
+    expect(slashCapsuleNode(editorEl)).toBeNull();
+    expect(editorEl.textContent).toBe("");
+  });
+
+  it("D: capsule + text: Cmd+A Select All + Delete removes both capsule and text", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "command", name: "compress" },
+      text: "全选删除",
+    });
+    renderInlineDraft(editorEl, original);
+    const range = editorEl.ownerDocument.createRange();
+    range.setStart(editorEl, 0);
+    range.setEnd(editorEl, editorEl.childNodes.length);
+    const sel = editorEl.ownerDocument.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "Delete"),
+      original,
+    );
+    expect(result.handled).toBe(true);
+    expect(result.draft).toEqual(draft({ token: null, text: "" }));
+    expect(result.slashClearRequested).toBe(true);
+    expect(slashCapsuleNode(editorEl)).toBeNull();
+    expect(editorEl.textContent).toBe("");
+  });
+
+  it("E: ArrowLeft from right edge of capsule crosses it in one step to before capsule", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "skill", name: "leader" },
+      text: "任务",
+    });
+    renderInlineDraft(editorEl, original);
+    setCaretOffset(editorEl, 0); // right edge of capsule
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "ArrowLeft"),
+      original,
+    );
+    expect(result.handled).toBe(true);
+    expect(isCaretBeforeSlashToken(editorEl)).toBe(true);
+  });
+
+  it("E: ArrowRight from before capsule crosses it in one step to right edge", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "skill", name: "leader" },
+      text: "任务",
+    });
+    renderInlineDraft(editorEl, original);
+    const range = editorEl.ownerDocument.createRange();
+    range.setStart(editorEl, 0);
+    range.collapse(true);
+    const sel = editorEl.ownerDocument.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    expect(isCaretBeforeSlashToken(editorEl)).toBe(true);
+
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "ArrowRight"),
+      original,
+    );
+    expect(result.handled).toBe(true);
+    expect(isCaretBeforeSlashToken(editorEl)).toBe(false);
+    expect(getCaretOffset(editorEl)).toBe(0);
+  });
+
+  it("E: typing key while positioned before capsule snaps caret to text side", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "skill", name: "leader" },
+      text: "任务",
+    });
+    renderInlineDraft(editorEl, original);
+    const range = editorEl.ownerDocument.createRange();
+    range.setStart(editorEl, 0);
+    range.collapse(true);
+    const sel = editorEl.ownerDocument.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    expect(isCaretBeforeSlashToken(editorEl)).toBe(true);
+
+    handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "a"),
+      original,
+    );
+    expect(isCaretBeforeSlashToken(editorEl)).toBe(false);
+    expect(getCaretOffset(editorEl)).toBe(0);
+  });
+
+  it("Delete key while positioned before capsule removes capsule", () => {
+    const { editorEl } = setup();
+    const original = draft({
+      token: { kind: "skill", name: "leader" },
+      text: "任务",
+    });
+    renderInlineDraft(editorEl, original);
+    const range = editorEl.ownerDocument.createRange();
+    range.setStart(editorEl, 0);
+    range.collapse(true);
+    const sel = editorEl.ownerDocument.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    expect(isCaretBeforeSlashToken(editorEl)).toBe(true);
+
+    const result = handleInlineEditorKeydown(
+      editorEl,
+      keydown(editorEl, "Delete"),
+      original,
+    );
+    expect(result.handled).toBe(true);
+    expect(result.draft).toEqual(draft({ token: null, text: "任务" }));
+    expect(result.slashClearRequested).toBe(true);
+    expect(slashCapsuleNode(editorEl)).toBeNull();
+  });
+});
 
   it("Backspace adjacent to a capsule is ignored while composing", () => {
     const { editorEl } = setup();
