@@ -313,12 +313,13 @@ describe("Turn Rail - Component behavior", () => {
       const previewText = firstDot.getAttribute("data-preview");
 
       expect(previewText).toBe(`${longPrompt.slice(0, MAX_PREVIEW_CHARS)}…`);
-      expect(firstDot.getAttribute("title")).toBe(previewText);
+      // No native title: the custom tooltip is the single hover surface.
+      expect(firstDot.hasAttribute("title")).toBe(false);
 
-      // Mouseenter shows tooltip
+      // Mouseenter shows tooltip with compact turn number + preview
       firstDot.dispatchEvent(new MouseEvent("mouseenter"));
       expect(rail.tooltipEl.classList.contains("is-hidden")).toBe(false);
-      expect(rail.tooltipEl.textContent).toBe(previewText);
+      expect(rail.tooltipEl.textContent).toBe(`1 · ${previewText}`);
 
       // Mouseleave hides tooltip
       firstDot.dispatchEvent(new MouseEvent("mouseleave"));

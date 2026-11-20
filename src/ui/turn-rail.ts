@@ -354,7 +354,9 @@ export class TurnRail {
         ? `${turn.text.slice(0, MAX_PREVIEW_CHARS)}…`
         : turn.text;
 
-      dot.setAttribute("title", previewText);
+      // Single hover preview surface: no native `title` (it stacks a second
+      // OS tooltip on top of the custom one). The turn number lives only in
+      // the compact tooltip and the accessible name.
       dot.setAttribute("aria-label", `轮次 ${i + 1}: ${previewText}`);
       dot.setAttribute("data-preview", previewText);
 
@@ -368,7 +370,7 @@ export class TurnRail {
 
       // Hover preview
       dot.addEventListener("mouseenter", () => {
-        this.#showTooltip(dot, previewText);
+        this.#showTooltip(dot, `${i + 1} · ${previewText}`);
       });
       dot.addEventListener("mouseleave", () => {
         this.#hideTooltip();
@@ -490,9 +492,11 @@ export class TurnRail {
   #showTooltip(dot: HTMLElement, text: string): void {
     this.#tooltipEl.textContent = text;
     this.#tooltipEl.classList.remove("is-hidden");
-    const dotTop = dot.offsetTop;
-    const dotHeight = dot.offsetHeight;
-    this.#tooltipEl.style.top = `${dotTop + dotHeight / 2 - 12}px`;
+    const dotRect = dot.getBoundingClientRect();
+    const railRect = this.#railEl.getBoundingClientRect();
+    const top = dotRect.top - railRect.top + dotRect.height / 2 - this.#tooltipEl.offsetHeight / 2;
+    const maxTop = Math.max(0, this.#railEl.clientHeight - this.#tooltipEl.offsetHeight);
+    this.#tooltipEl.style.top = `${Math.min(Math.max(0, top), maxTop)}px`;
   }
 
   #hideTooltip(): void {
