@@ -51,6 +51,11 @@ import {
   type PastedImageAttachment,
 } from "./image-attachments";
 import {
+  extractGuardedCode,
+  restoreGuardedCode,
+  type GuardedCodeFragment,
+} from "./markdown-code-guard";
+import {
   extractMermaidBlocks,
   replaceMermaidPlaceholders,
 } from "./markdown-mermaid";
@@ -3800,14 +3805,25 @@ export class HermesianSidebarView extends ItemView {
 
     const { processedText, mermaidBlocks } = extractMermaidBlocks(text);
 
-    await MarkdownRenderer.render(
-      this.app,
-      normalizeTableSpacing(normalizeMathDelimiters(processedText)),
-      target,
-      sourcePath,
-      this,
-    );
+    // Table and math normalization see the original code; the guard runs last
+    // so Obsidian never receives code another plugin would execute.
+    let guardedText = normalizeTableSpacing(normalizeMathDelimiters(processedText));
+    let guardedCode: GuardedCodeFragment[] = [];
+    try {
+      const guarded = extractGuardedCode(guardedText);
+      guardedText = guarded.processedText;
+      guardedCode = guarded.fragments;
+    } catch (error) {
+      // Without the guard the message still renders, only unprotected.
+      this.logger.warn("controller.background.failure", {
+        operation: "guard-code",
+        ...safeErrorFields(error),
+      });
+    }
 
+    await MarkdownRenderer.render(this.app, guardedText, target, sourcePath, this);
+
+    restoreGuardedCode(target, guardedCode);
     replaceMermaidPlaceholders(target, mermaidBlocks, this.app);
 
     linkifyExternalUrls(target);
